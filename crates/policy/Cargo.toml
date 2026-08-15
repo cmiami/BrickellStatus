@@ -7,7 +7,7 @@ description = "Explainable signal policy and Brickell bridge prediction"
 
 [dependencies]
 bridgestatus-model = { path = "../model" }
-jiff = { version = "=0.2.32", features = ["serde"] }
+jiff = { version = "=0.2.35", features = ["serde"] }
 serde.workspace = true
 thiserror.workspace = true
 
