@@ -1,12 +1,34 @@
 <script lang="ts">
   import { Download, Search, SlidersHorizontal } from '@lucide/svelte';
 
+  import { lazyLoad } from '$lib/actions/lazyList';
   import { snapshot } from '$lib/state';
   import type { BridgeStateInterval, DeliveryState } from '$lib/types';
 
   let query = $state('');
   let channel = $state('all');
   let delivery = $state<'all' | DeliveryState>('all');
+
+  /// One window is comfortably more than a scroll region shows, so the reader
+  /// never sees the list catching up with them.
+  const PAGE = 40;
+  let bridgeVisible = $state(PAGE);
+  let dispatchVisible = $state(PAGE);
+  let bridgeScroll = $state<HTMLElement | null>(null);
+  let dispatchScroll = $state<HTMLElement | null>(null);
+
+  /// Changing a filter produces a different list, so the window restarts at the
+  /// top. Keeping a large count would render rows the reader never asked to see
+  /// and leave them scrolled into the middle of a set they have not read.
+  $effect(() => {
+    void query;
+    void channel;
+    void delivery;
+    bridgeVisible = PAGE;
+    dispatchVisible = PAGE;
+    bridgeScroll?.scrollTo({ top: 0 });
+    dispatchScroll?.scrollTo({ top: 0 });
+  });
 
   const filtered = $derived.by(() => {
     const normalized = query.trim().toLocaleLowerCase();
@@ -31,6 +53,9 @@
       return matchesQuery && matchesChannel;
     });
   });
+
+  const visibleBridgeIntervals = $derived(filteredBridgeIntervals.slice(0, bridgeVisible));
+  const visibleDispatches = $derived(filtered.slice(0, dispatchVisible));
 
   const formatTime = (value: string) =>
     new Intl.DateTimeFormat(undefined, {
@@ -137,11 +162,19 @@
           <p>Target and upstream open/closed intervals retained for prediction history.</p>
         </header>
         {#if filteredBridgeIntervals.length}
-          <div class="bridge-table" aria-label="Bridge state history">
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+          <div
+            class="scroll-region"
+            bind:this={bridgeScroll}
+            tabindex="0"
+            role="region"
+            aria-label="Bridge state history, scrollable"
+          >
+          <div class="bridge-table">
             <div class="bridge-head" aria-hidden="true">
               <span>Started</span><span>Bridge</span><span>Observed state</span><span>Duration</span>
             </div>
-            {#each filteredBridgeIntervals as interval (`${interval.sourceId}:${interval.bridgeKey}:${interval.startedAt}`)}
+            {#each visibleBridgeIntervals as interval (`${interval.sourceId}:${interval.bridgeKey}:${interval.startedAt}`)}
               <article class="bridge-row">
                 <time datetime={interval.startedAt}>{formatTime(interval.startedAt)}</time>
                 <div class="bridge-name">
@@ -155,7 +188,20 @@
                 </div>
               </article>
             {/each}
+            <div
+              class="scroll-sentinel"
+              aria-hidden="true"
+              use:lazyLoad={{
+                root: bridgeScroll,
+                exhausted: bridgeVisible >= filteredBridgeIntervals.length,
+                onLoadMore: () => (bridgeVisible = Math.min(bridgeVisible + PAGE, filteredBridgeIntervals.length))
+              }}
+            ></div>
           </div>
+          </div>
+          <p class="scroll-count" aria-live="polite">
+            Showing {visibleBridgeIntervals.length} of {filteredBridgeIntervals.length} intervals
+          </p>
         {:else}
           <div class="empty-log compact-empty">
             <h3>No bridge intervals match</h3>
@@ -174,7 +220,15 @@
         </header>
 
       {#if filtered.length}
-        <div class="dispatch-table" aria-label="Dispatch records">
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <div
+          class="scroll-region"
+          bind:this={dispatchScroll}
+          tabindex="0"
+          role="region"
+          aria-label="Dispatch records, scrollable"
+        >
+        <div class="dispatch-table">
           <div class="dispatch-head" aria-hidden="true">
             <span>Updated</span>
             <span>Channel and revision</span>
@@ -182,7 +236,7 @@
             <span>Destinations</span>
             <span>Outcome</span>
           </div>
-          {#each filtered as record (record.id)}
+          {#each visibleDispatches as record (record.id)}
             <article class="dispatch-row">
               <time datetime={record.at}>{formatTime(record.at)}</time>
               <div class="dispatch-event">
@@ -207,7 +261,20 @@
               </div>
             </article>
           {/each}
+          <div
+            class="scroll-sentinel"
+            aria-hidden="true"
+            use:lazyLoad={{
+              root: dispatchScroll,
+              exhausted: dispatchVisible >= filtered.length,
+              onLoadMore: () => (dispatchVisible = Math.min(dispatchVisible + PAGE, filtered.length))
+            }}
+          ></div>
         </div>
+        </div>
+        <p class="scroll-count" aria-live="polite">
+          Showing {visibleDispatches.length} of {filtered.length} dispatches
+        </p>
       {:else}
         <div class="empty-log">
           <h2>{$snapshot.dispatches.length ? 'No dispatches match' : 'No durable messages yet'}</h2>
@@ -232,6 +299,42 @@
 </section>
 
 <style>
+  /* The log grows without bound, so each register scrolls inside its own
+     region rather than pushing the page to an unusable length. */
+  .scroll-region {
+    max-height: clamp(300px, 52vh, 620px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--rule);
+  }
+
+  .scroll-region:focus-visible {
+    outline: var(--focus);
+    outline-offset: 2px;
+  }
+
+  /* Headers stay put so a scrolled row is still readable against its columns. */
+  .scroll-region :global(.bridge-head),
+  .scroll-region :global(.dispatch-head) {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+
+  .scroll-sentinel {
+    height: 1px;
+  }
+
+  .scroll-count {
+    margin: 8px 0 0;
+    color: var(--muted);
+    font-family: var(--font-instrument);
+    font-size: var(--type-micro);
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+  }
+
   .log-page {
     padding-inline: clamp(18px, 3vw, 48px);
   }
