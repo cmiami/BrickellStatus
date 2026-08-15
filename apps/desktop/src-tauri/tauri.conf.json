@@ -45,7 +45,8 @@
       "icons/icon.icns"
     ],
     "resources": {
-      "resources/licenses/": "licenses/"
+      "resources/licenses/": "licenses/",
+      "resources/firmware/": "firmware/"
     },
     "copyright": "Copyright © 2026 PuenteGonorrea contributors",
     "category": "Utility",

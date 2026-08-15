@@ -35,14 +35,39 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm --prefix apps/console ci
 
-      # tauri.conf.json points at two paths that are generated rather than
+      # The app bundles the firmware it flashes, so the release has to build it.
+      # Building here rather than committing the .bin files keeps the build id
+      # the device reports honest: a committed binary can drift from main.cpp,
+      # and the device would then confidently name a build it is not running.
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-${{ runner.os }}-${{ hashFiles('firmware/e213/platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio==6.1.18
+
+      - name: Build E213 firmware
+        run: python3 firmware/e213/scripts/bundle_firmware.py
+
+      # tauri.conf.json points at three paths that are generated rather than
       # committed: `frontendDist` (console/build) and the `resources/licenses`
-      # bundle resource. `generate_context!` and the Tauri build script both fail
-      # when either is missing, so *any* cargo command that builds the desktop
-      # crate needs them first -- including `cargo test`, which runs long before
+      # and `resources/firmware` bundle resources. `generate_context!` and the Tauri build script both fail
+      # when any is missing, so *any* cargo command that builds the desktop
+      # crate needs them all first -- including `cargo test`, which runs long before
       # the Tauri build step invokes its own beforeBuildCommand. Every other path
       # tauri.conf.json references (icons, Info.plist, capabilities) is tracked.
-      # `desktop:prepare` is exactly the beforeBuildCommand and produces both.
+      # `desktop:prepare` is exactly the beforeBuildCommand and produces all three.
       - name: Prepare generated Tauri inputs
         run: npm --prefix apps/console run desktop:prepare
 

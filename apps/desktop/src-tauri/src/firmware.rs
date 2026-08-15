@@ -904,4 +904,31 @@ mod tests {
         assert!(!requirement.should_prompt());
         assert_eq!(requirement, FlashRequirement::UnknownBuild);
     }
+
+    #[test]
+    fn the_bundle_this_build_ships_is_valid() {
+        // Guards the bundling script, not the loader: a manifest that names a
+        // file the script forgot to copy, or omits boot_app0, would otherwise
+        // only surface on a device. Skips when no bundle has been generated, so
+        // a checkout without an embedded toolchain still runs the suite.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/firmware");
+        if !root.join("manifest.json").is_file() {
+            return;
+        }
+        match FirmwareBundle::load(&root) {
+            Ok(bundle) => {
+                for variant in bundle.variants() {
+                    assert!(
+                        variant.total_bytes() > 100_000,
+                        "{} looks too small to be a real build",
+                        variant.id
+                    );
+                }
+            }
+            // An empty bundle is legitimate: the app then reports that it ships
+            // no firmware. Any other failure is a broken bundling script.
+            Err(FirmwareError::NoVariants) => {}
+            Err(error) => panic!("bundled firmware is invalid: {error}"),
+        }
+    }
 }

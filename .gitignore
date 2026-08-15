@@ -9,6 +9,7 @@ apps/console/.svelte-kit/
 apps/console/build/
 apps/console/dist/
 /apps/desktop/src-tauri/resources/licenses/
+/apps/desktop/src-tauri/resources/firmware/
 
 # Tauri bundles and signing
 apps/desktop/src-tauri/gen/
