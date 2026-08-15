@@ -33,10 +33,16 @@ FORM: Grounded direction 3, approved Live Time Rail composition, concept seed 14
   <div class="live-console">
     <div class="live-grid">
       <StatusDecision decision={$snapshot.decision} />
-      <TimeRail evidence={$snapshot.evidence} generatedAt={$snapshot.generatedAt} />
+      <TimeRail
+        evidence={$snapshot.evidence}
+        generatedAt={$snapshot.generatedAt}
+        decision={$snapshot.decision}
+      />
       <ChannelLedger channels={$snapshot.channels} outputs={$snapshot.outputs} />
     </div>
-    <DispatchLedger dispatches={$snapshot.dispatches} channels={$snapshot.channels} />
+    {#if $snapshot.dispatches.length}
+      <DispatchLedger dispatches={$snapshot.dispatches} channels={$snapshot.channels} />
+    {/if}
     <footer class="live-footer">
       <span>All times · {$snapshot.localTimeZone}</span>
       <span>Tender’s Log supports decisions; it does not guarantee a bridge opening.</span>

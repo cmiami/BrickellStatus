@@ -1,13 +1,15 @@
 <script lang="ts">
   import { CircleDashed, Ship, Waypoints } from '@lucide/svelte';
-  import type { EvidenceStrip } from '$lib/types';
+  import type { DecisionSnapshot, EvidenceStrip } from '$lib/types';
 
   let {
     evidence,
-    generatedAt
+    generatedAt,
+    decision
   }: {
     evidence: EvidenceStrip[];
     generatedAt: string;
+    decision: DecisionSnapshot;
   } = $props();
 
   const formatAge = (seconds: number) => {
@@ -76,10 +78,14 @@
       {/each}
 
       {#if evidence.length === 0}
-        <div class="empty-register">
+        <div class="empty-register" role="status">
           <CircleDashed size={22} aria-hidden="true" />
-          <strong>No current evidence</strong>
-          <span>Fresh observations will register here. Schedule context alone does not create a warning.</span>
+          <div>
+            <span>Current bridge status</span>
+            <strong>{decision.stateLabel}</strong>
+            <p>{decision.meaning}</p>
+          </div>
+          <span class="status-word" data-state={decision.availability}>{decision.availability}</span>
         </div>
       {/if}
     </div>
@@ -331,18 +337,40 @@
 
   .empty-register {
     display: grid;
-    min-height: 160px;
-    place-items: center;
-    align-content: center;
-    gap: 8px;
+    min-height: 132px;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 14px;
     color: var(--muted);
-    border: 1px dashed var(--steel);
-    padding: 24px;
-    text-align: center;
+    background: var(--frost);
+    border: 1px solid var(--steel);
+    padding: 20px;
+    text-align: left;
   }
 
-  .empty-register span {
+  .empty-register > div {
+    display: grid;
+    gap: 4px;
+  }
+
+  .empty-register > div > span {
+    font-family: var(--font-instrument);
+    font-size: var(--type-micro);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .empty-register strong {
+    color: var(--marine);
+    font-family: var(--font-instrument);
+    font-size: var(--type-title);
+    text-transform: uppercase;
+  }
+
+  .empty-register p {
     max-width: 42ch;
+    margin: 0;
     font-size: var(--type-label);
     line-height: 1.45;
   }
