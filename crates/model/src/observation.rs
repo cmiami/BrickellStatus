@@ -43,6 +43,22 @@ pub enum BridgeObservation {
     Controller {
         state: BridgeControllerState,
     },
+    /// A river transit booked on the pilots' dispatch board.
+    ///
+    /// Unlike the other variants this is scheduled rather than observed: it
+    /// says a vessel is expected, not that one has been seen.
+    ScheduledTransit {
+        vessel: String,
+        /// Whether the movement is exempt from the bridge's ordinary schedule.
+        ///
+        /// 33 CFR 117.261 excuses public vessels, tugs with tows, and vessels
+        /// in distress from the Brickell blackout periods. Every RIVER movement
+        /// the pilots publish is a tug-assisted commercial tow, so the blackout
+        /// does not bind it: the bridge opens for cargo when it would refuse a
+        /// yacht.
+        exempt: bool,
+        eta: Option<EtaRangeMinutes>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

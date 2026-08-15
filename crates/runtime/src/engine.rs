@@ -1131,6 +1131,69 @@ fn update_bridge_transitions(
     }
 }
 
+/// Turns a pilots'-board movement into predictor evidence.
+///
+/// Only river traffic heading past the target counts. Deep-draft arrivals and
+/// departures at PortMiami never enter the river, and a movement whose bridge
+/// ETA has already passed describes a transit that is over.
+fn scheduled_transit_observation(
+    item: &CollectorItem,
+    channel_id: &str,
+    source_id: &str,
+    now_ms: i64,
+    availability: Availability,
+) -> Option<Observation> {
+    if item.attributes.get("river").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let vessel = item
+        .attributes
+        .get("vessel")
+        .and_then(Value::as_str)
+        .unwrap_or(&item.title)
+        .to_owned();
+
+    // Every RIVER movement the pilots publish is worked by a tug, which is the
+    // exemption 33 CFR 117.261 grants from the blackout periods. Requiring the
+    // tug explicitly rather than assuming it keeps the claim checkable: if the
+    // board ever lists an unassisted river movement, it is scored as ordinary
+    // traffic instead of silently inheriting an exemption it does not have.
+    let exempt = item.attributes.contains_key("tug");
+
+    let eta_at = item
+        .attributes
+        .get("bridge_eta_at")
+        .and_then(Value::as_str)
+        .and_then(|value| value.parse::<Timestamp>().ok())
+        .map(|value| value.as_millisecond())?;
+    let minutes_out = (eta_at - now_ms) / 60_000;
+    if !(0..=180).contains(&minutes_out) {
+        return None;
+    }
+    let minutes_out = u16::try_from(minutes_out).unwrap_or(u16::MAX);
+
+    Some(Observation {
+        id: ObservationId(format!("{source_id}:transit:{}", item.id)),
+        channel_id: ChannelId(channel_id.to_owned()),
+        source_id: SourceId(source_id.to_owned()),
+        observed_at: TimestampMillis(now_ms),
+        received_at: TimestampMillis(now_ms),
+        expires_at: None,
+        availability,
+        data: BridgeObservation::ScheduledTransit {
+            vessel,
+            exempt,
+            // The board publishes pilot boarding times, so this window is only
+            // as good as the transit allowance behind it; the collector marks
+            // it uncalibrated for the same reason.
+            eta: Some(EtaRangeMinutes::new(
+                minutes_out.saturating_sub(10),
+                minutes_out.saturating_add(15),
+            )),
+        },
+    })
+}
+
 /// Metres from each upstream bascule down to the Brickell Avenue Bridge, taken
 /// from the FL511 coordinates the selectors use.
 ///
@@ -1364,7 +1427,9 @@ fn bridge_evidence(
     let mut views = Vec::new();
     for (source_id, source_channel) in &state.active_sources {
         if source_channel != &channel.id
-            || !(source_id.starts_with("fl511.") || source_id.starts_with("aisstream."))
+            || !(source_id.starts_with("fl511.")
+                || source_id.starts_with("aisstream.")
+                || source_id.starts_with("bbpilots."))
         {
             continue;
         }
@@ -1374,7 +1439,7 @@ fn bridge_evidence(
         let outbound = detect_outbound_progress(&source.bridge_transitions, now_ms);
         let (availability, _) = source_availability(source, channel, now_ms);
         for item in &source.items {
-            if item.kind != ItemKind::Bridge {
+            if !matches!(item.kind, ItemKind::Bridge | ItemKind::VesselMovement) {
                 continue;
             }
             let observed_ms = item.observed_at.as_ref().map_or_else(
@@ -1404,7 +1469,15 @@ fn bridge_evidence(
                 .get("relation")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
-            let observation = if relation == "upstream" {
+            let observation = if item.kind == ItemKind::VesselMovement {
+                scheduled_transit_observation(
+                    item,
+                    &channel.id,
+                    source_id,
+                    now_ms,
+                    model_availability.clone(),
+                )
+            } else if relation == "upstream" {
                 let selector_key = item.attributes.get("selector_key").and_then(Value::as_str);
                 outbound
                     .as_ref()

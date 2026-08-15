@@ -104,6 +104,10 @@ pub struct EvidenceWeights {
     pub outbound_high: f32,
     /// Ordered movement has reached the nearest observed upstream bridge.
     pub outbound_very_high: f32,
+    /// A booked river transit that the bridge schedule cannot refuse.
+    pub transit_exempt: f32,
+    /// A booked river transit subject to the ordinary schedule.
+    pub transit_ordinary: f32,
     /// Bonus for at least two independent positive predictive sources.
     pub corroboration_bonus: f32,
 }
@@ -119,6 +123,8 @@ impl Default for EvidenceWeights {
             ais_stationary: 0.04,
             outbound_high: 0.68,
             outbound_very_high: 0.88,
+            transit_exempt: 0.72,
+            transit_ordinary: 0.5,
             corroboration_bonus: 0.08,
         }
     }
@@ -201,6 +207,11 @@ pub struct BridgePredictorConfig {
     pub decay: EvidenceDecay,
     /// Discounts for incomplete or less-immediate evidence.
     pub factors: EvidenceFactors,
+    /// Extra schedule weight as a scheduled opening slot approaches, when
+    /// vessels that have been refused are waiting to be released together.
+    pub schedule_slot_imminent: f32,
+    /// How close a scheduled slot must be, in minutes, to count as imminent.
+    pub schedule_slot_window_minutes: i64,
     /// Factor applied to predictive AIS/upstream evidence during blackouts.
     /// This is not zero because exception traffic can open at any time.
     pub blackout_predictive_factor: f32,
@@ -213,6 +224,8 @@ impl Default for BridgePredictorConfig {
             weights: EvidenceWeights::default(),
             decay: EvidenceDecay::default(),
             factors: EvidenceFactors::default(),
+            schedule_slot_imminent: 0.22,
+            schedule_slot_window_minutes: 12,
             blackout_predictive_factor: 0.75,
         }
     }
@@ -253,6 +266,8 @@ pub enum EvidenceKind {
     Outbound,
     /// Controller-backed ground truth.
     Controller,
+    /// A transit booked on the pilots' dispatch board.
+    Transit,
     /// Independent-source corroboration bonus.
     Corroboration,
 }
@@ -366,7 +381,50 @@ impl BridgePredictor {
         previous: Option<&BridgePrediction>,
     ) -> Result<BridgePrediction, PredictionError> {
         let schedule = self.schedule.evaluate(now)?;
-        let mut contributions = vec![schedule_contribution(schedule.mode, &self.config.weights)];
+        // An exempt transit makes the blackout inapplicable rather than merely
+        // less severe: the bridge opens for a tug with a tow at any hour. Score
+        // the rest of the evidence as if the blackout were not in force, while
+        // still reporting the real mode so the explanation stays truthful.
+        let exempt_transit = evidence.iter().any(|item| {
+            if !evidence_is_active(item, now, self.config.decay.upstream) {
+                return false;
+            }
+            match &item.fact {
+                // Stated: the pilots booked a tug-assisted tow.
+                BridgeObservation::ScheduledTransit { exempt, .. } => *exempt,
+                // Inferred: a bascule went up while the blackout was in force.
+                // Ordinary traffic would have been refused, so whatever moved
+                // was exempt. This inference has to exist because the pilots'
+                // board is only one source of commercial traffic -- plenty of
+                // commercial movements never appear on it, and keying the
+                // exemption solely to that board would miss them.
+                BridgeObservation::OutboundProgress { .. } => {
+                    schedule.mode == BridgeOperatingMode::Blackout
+                }
+                _ => false,
+            }
+        });
+        let scoring_mode = if exempt_transit && schedule.mode == BridgeOperatingMode::Blackout {
+            BridgeOperatingMode::OnSignal
+        } else {
+            schedule.mode
+        };
+        // Traffic refused during a restricted period does not disperse; it
+        // queues and leaves together on the hour or half-hour. The minutes
+        // before a slot are therefore the likeliest time for an opening, which
+        // a flat schedule weight cannot express.
+        let minutes_to_slot = schedule
+            .next_ordinary_opening_at
+            .map(|slot| (slot.0.saturating_sub(now.0)) / 60_000);
+        let slot_imminent = minutes_to_slot.is_some_and(|minutes| {
+            (0..=self.config.schedule_slot_window_minutes).contains(&minutes)
+        });
+        let mut contributions = vec![schedule_contribution(
+            schedule.mode,
+            exempt_transit,
+            slot_imminent,
+            &self.config,
+        )];
         let mut positive_sources = BTreeSet::new();
         let mut positive_kinds = BTreeSet::new();
         let mut valid_non_schedule = 0usize;
@@ -386,7 +444,7 @@ impl BridgePredictor {
                 latest_controller = Some((item, *state));
             }
 
-            let scored = self.score_evidence(item, now, schedule.mode);
+            let scored = self.score_evidence(item, now, scoring_mode);
             match scored.disposition {
                 ContributionDisposition::Applied
                 | ContributionDisposition::Informational
@@ -506,8 +564,16 @@ impl BridgePredictor {
         } else {
             2.0_f32.powf(-(effective_age as f32) / decay.half_life_seconds as f32)
         };
+        // A blackout describes what the bridge will do for *ordinary* traffic,
+        // and it discounts evidence about vessels that may simply be refused.
+        //
+        // It never applies to an observed upstream opening. That is a bascule
+        // that already went up for a vessel already under way, and a vessel
+        // that got a bridge raised during rush hour is exactly the exempt kind
+        // -- a tug with a tow -- which Brickell must also open for. Discounting
+        // it would hide the openings the blackout least predicts.
         let context_factor = if mode == BridgeOperatingMode::Blackout
-            && matches!(kind, EvidenceKind::Ais | EvidenceKind::Outbound)
+            && kind == EvidenceKind::Ais
             && raw_weight > 0.0
         {
             self.config.blackout_predictive_factor
@@ -606,16 +672,41 @@ fn validate_config(config: &BridgePredictorConfig) -> Result<(), PredictionError
 
 fn schedule_contribution(
     mode: BridgeOperatingMode,
-    weights: &EvidenceWeights,
+    exempt_transit: bool,
+    slot_imminent: bool,
+    config: &BridgePredictorConfig,
 ) -> ScoreContribution {
+    let weights = &config.weights;
+    if mode == BridgeOperatingMode::Blackout && exempt_transit {
+        return ScoreContribution {
+            observation_id: None,
+            source_id: None,
+            kind: EvidenceKind::Schedule,
+            label: "a booked tug-assisted transit is exempt from the traffic blackout".into(),
+            raw_weight: weights.schedule_on_signal,
+            reliability_factor: 1.0,
+            freshness_factor: 1.0,
+            context_factor: 1.0,
+            applied_score: weights.schedule_on_signal,
+            disposition: ContributionDisposition::Applied,
+        };
+    }
     let (raw_weight, label) = match mode {
         BridgeOperatingMode::OnSignal => (
             weights.schedule_on_signal,
             "ordinary openings are currently on signal",
         ),
+        BridgeOperatingMode::Scheduled if slot_imminent => (
+            weights.schedule_scheduled + config.schedule_slot_imminent,
+            "a scheduled opening slot is imminent and refused traffic waits for it",
+        ),
         BridgeOperatingMode::Scheduled => (
             weights.schedule_scheduled,
             "weekday hour/half-hour schedule applies",
+        ),
+        BridgeOperatingMode::Blackout if slot_imminent => (
+            weights.schedule_blackout + config.schedule_slot_imminent,
+            "the blackout ends shortly and refused traffic is waiting",
         ),
         BridgeOperatingMode::Blackout => (
             weights.schedule_blackout,
@@ -697,6 +788,21 @@ fn classify_fact(
                 OutboundProgressStage::VeryHigh => {
                     "outbound progression reached the nearest upstream bridge"
                 }
+            }
+            .into(),
+            config.decay.upstream,
+        ),
+        BridgeObservation::ScheduledTransit { exempt, .. } => (
+            EvidenceKind::Transit,
+            if *exempt {
+                config.weights.transit_exempt
+            } else {
+                config.weights.transit_ordinary
+            },
+            if *exempt {
+                "the pilots' board has a tug-assisted river transit booked, which the schedule cannot refuse"
+            } else {
+                "the pilots' board has a river transit booked"
             }
             .into(),
             config.decay.upstream,
@@ -1261,5 +1367,116 @@ mod tests {
             )
             .expect("prediction");
         assert_eq!(prediction.state, BridgeState::Clear);
+    }
+
+    fn blackout_now() -> TimestampMillis {
+        millis("2026-08-14T20:45:00Z") // Friday 16:45 EDT, inside the blackout.
+    }
+
+    fn outbound(at: TimestampMillis) -> BridgeEvidence {
+        evidence(
+            "outbound",
+            "fl511.bridge.brickell",
+            at,
+            BridgeObservation::OutboundProgress {
+                bridge: "SW 2 Ave".into(),
+                stage: OutboundProgressStage::VeryHigh,
+                eta: Some(EtaRangeMinutes::new(4, 9)),
+            },
+        )
+    }
+
+    #[test]
+    fn a_blackout_does_not_discount_an_observed_upstream_opening() {
+        // The bascule went up, so a vessel is already under way. Ordinary
+        // traffic would have been refused during the blackout, which makes the
+        // opening evidence of exempt traffic rather than a reason to doubt it.
+        let predictor = BridgePredictor::default();
+        let inside = predictor
+            .evaluate(blackout_now(), &[outbound(blackout_now())], None)
+            .expect("prediction");
+        let outside = predictor
+            .evaluate(scheduled_now(), &[outbound(scheduled_now())], None)
+            .expect("prediction");
+
+        let upstream_score = |prediction: &BridgePrediction| {
+            prediction
+                .contributions
+                .iter()
+                .find(|item| item.kind == EvidenceKind::Outbound)
+                .expect("outbound contribution")
+                .applied_score
+        };
+        assert!((upstream_score(&inside) - upstream_score(&outside)).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_booked_tug_transit_lifts_the_blackout() {
+        let now = blackout_now();
+        let predictor = BridgePredictor::default();
+        let transit = |exempt: bool| {
+            evidence(
+                "transit",
+                "bbpilots.bridge.brickell",
+                now,
+                BridgeObservation::ScheduledTransit {
+                    vessel: "PEPIN EXPRESS".into(),
+                    exempt,
+                    eta: Some(EtaRangeMinutes::new(0, 20)),
+                },
+            )
+        };
+        let exempt = predictor
+            .evaluate(now, &[transit(true)], None)
+            .expect("prediction");
+        let ordinary = predictor
+            .evaluate(now, &[transit(false)], None)
+            .expect("prediction");
+
+        let schedule_label = |prediction: &BridgePrediction| {
+            prediction
+                .contributions
+                .iter()
+                .find(|item| item.kind == EvidenceKind::Schedule)
+                .expect("schedule contribution")
+                .label
+                .clone()
+        };
+        assert!(
+            schedule_label(&exempt).contains("exempt"),
+            "got {:?}",
+            schedule_label(&exempt)
+        );
+        assert!(
+            !schedule_label(&ordinary).contains("exempt"),
+            "an unassisted movement must not inherit the exemption: {:?}",
+            schedule_label(&ordinary)
+        );
+        assert!(exempt.confidence.basis_points > ordinary.confidence.basis_points);
+    }
+
+    #[test]
+    fn an_imminent_slot_raises_the_schedule_contribution() {
+        // Refused traffic queues and leaves together on the hour or half-hour,
+        // so the minutes before a slot are the likeliest time for an opening.
+        let predictor = BridgePredictor::default();
+        let near = millis("2026-08-14T19:52:00Z"); // 15:52 EDT, 8 min to 16:00.
+        let far = millis("2026-08-14T19:35:00Z"); // 15:35 EDT, 25 min to 16:00.
+        let score = |at: TimestampMillis| {
+            predictor
+                .evaluate(at, &[], None)
+                .expect("prediction")
+                .contributions
+                .iter()
+                .find(|item| item.kind == EvidenceKind::Schedule)
+                .expect("schedule contribution")
+                .applied_score
+        };
+        assert!(
+            score(near) > score(far),
+            "{} should beat {}",
+            score(near),
+            score(far)
+        );
     }
 }
