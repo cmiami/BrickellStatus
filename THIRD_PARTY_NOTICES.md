@@ -1,8 +1,10 @@
 # Third-party notices
 
-PuenteGonorrea is distributed under **MIT OR Apache-2.0**, but that choice does
+PuenteGonorrea is distributed under the **MIT** license, but that choice does
 not replace the licenses or attribution requirements of third-party software,
-fonts, icons, services, or data.
+fonts, icons, services, or data. `LICENSE-APACHE` remains in the repository as
+the canonical Apache-2.0 text for bundled dependencies, not as a license for
+this project.
 
 This concise notice calls out the UI assets and map resources a user can see.
 The exact resolved software graph remains recorded in `Cargo.lock` and

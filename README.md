@@ -7,7 +7,7 @@
   <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-174F78?style=for-the-badge&logo=tauri&logoColor=white" />
   <img alt="Svelte 5" src="https://img.shields.io/badge/Svelte-5-F2A900?style=for-the-badge&logo=svelte&logoColor=111418" />
   <img alt="ESP32-S3" src="https://img.shields.io/badge/ESP32--S3-E213-46515B?style=for-the-badge&logo=espressif&logoColor=white" />
-  <img alt="License MIT or Apache 2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-176B47?style=for-the-badge" />
+  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-176B47?style=for-the-badge" />
 </p>
 
 <p align="center">
@@ -412,10 +412,13 @@ screenshots, or commits.
 
 ## License
 
-Dual-licensed under **MIT OR Apache-2.0**. See [`LICENSE-MIT`](LICENSE-MIT) and
-[`LICENSE-APACHE`](LICENSE-APACHE). Bundled fonts, icons, map software, and live
-map data keep their own terms and visible attribution; see
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+Licensed under the **MIT** license. See [`LICENSE-MIT`](LICENSE-MIT). Bundled
+fonts, icons, map software, and live map data keep their own terms and visible
+attribution; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+[`LICENSE-APACHE`](LICENSE-APACHE) is retained because the release bundler uses
+it as the canonical Apache-2.0 text for bundled dependencies that ship without
+their own copy. It no longer describes this project's own terms.
 
 <p align="center">
   <strong>WARN AHEAD. CONFIRM LATER. NEVER FAKE FRESHNESS.</strong><br />

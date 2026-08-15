@@ -35,6 +35,14 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm --prefix apps/console ci
 
+      # tauri.conf.json declares resources/licenses as a bundle resource, and the
+      # Tauri build script fails if it is missing. The directory is generated, not
+      # committed, so every cargo command that builds the desktop crate needs it
+      # to exist first -- including `cargo test`, long before the Tauri build step
+      # runs its own beforeBuildCommand.
+      - name: Generate bundled license texts
+        run: npm --prefix apps/console run licenses:bundle
+
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 

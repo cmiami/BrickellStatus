@@ -19,8 +19,8 @@ interface cleaner than you found it.
    fresh approval after later pushes, passing checks, and resolved discussion.
 
 By contributing, you agree that your contribution is licensed under the
-project's **MIT OR Apache-2.0** terms unless you explicitly say otherwise
-before it is accepted.
+project's **MIT** terms unless you explicitly say otherwise before it is
+accepted.
 
 ## Development setup
 
