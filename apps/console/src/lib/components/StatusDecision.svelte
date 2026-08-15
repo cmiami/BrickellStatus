@@ -8,67 +8,51 @@
 
   const timing = () => {
     if (decision.etaMin == null || decision.etaMax == null) return null;
-    return `${decision.etaMin}–${decision.etaMax}`;
+    return decision.etaMin === decision.etaMax
+      ? `${decision.etaMax}`
+      : `${decision.etaMin} to ${decision.etaMax}`;
   };
 </script>
 
-<section class="decision" aria-labelledby="decision-subject" aria-live="polite">
+<section class="decision" data-state={decision.state} aria-labelledby="decision-state" aria-live="polite">
   <header class="decision-header">
-    <p class="registration-label">Current status</p>
-    <span class="status-word" data-state={decision.availability}>{decision.availability}</span>
+    <p class="registration-label">{decision.subject}</p>
+    {#if decision.availability !== 'fresh'}
+      <span class="status-word" data-state={decision.availability}>{decision.availability}</span>
+    {/if}
   </header>
 
-  <div class="decision-subject">
-    <span class="registration-label">Bridge</span>
-    <h1 id="decision-subject">{decision.subject}</h1>
-  </div>
+  <!--
+    The state and the countdown, and as little else as will fit around them.
+    Everything the engine consulted to reach this answer is deliberately not
+    here: a driver deciding whether to turn needs the answer, not its sources.
+  -->
+  <h1 id="decision-state">{decision.stateLabel}</h1>
 
-  <div class="decision-outcome" data-state={decision.state}>
-    <span class="registration-label">Status</span>
-    <strong>{decision.stateLabel}</strong>
-  </div>
-
-  <div class="decision-readings">
-    <div>
-      <span class="registration-label">ETA window</span>
-      {#if timing()}
-        <strong>{timing()} <small>min</small></strong>
-      {:else}
-        <strong class="unavailable">Unavailable</strong>
-      {/if}
-    </div>
-    <div>
-      <span class="registration-label">Confidence</span>
+  <div class="decision-timing">
+    {#if timing()}
+      <strong class="countdown">T&#8209;{timing()}<small>min</small></strong>
       {#if confidence() != null}
-        <strong>{confidence()}<small>% · {decision.confidenceLabel ?? 'estimate'}</small></strong>
-      {:else}
-        <strong class="unavailable">Not applicable</strong>
+        <span class="confidence">{confidence()}% {decision.confidenceLabel ?? 'estimate'}</span>
       {/if}
-    </div>
+    {:else}
+      <strong class="road">{decision.meaning}</strong>
+    {/if}
   </div>
 
-  <div class="decision-explanation">
-    <p>{decision.meaning}</p>
-    <div class="status-detail">
-      <span class="registration-label">Status detail</span>
-      <strong>{decision.action}</strong>
-    </div>
-  </div>
+  <p class="action">{decision.action}</p>
 
   <footer>
-    <div>
-      <span class="registration-label">Schedule context</span>
-      <strong>
-        {decision.openingAllowedNow
-          ? 'Opening permitted on signal now'
-          : `Next permitted slot · ${decision.nextLegalSlot ?? 'unavailable'}`}
-      </strong>
-    </div>
-    <p>{decision.confidenceBasis ?? 'No predictive score is currently available.'}</p>
+    {decision.openingAllowedNow
+      ? 'Opening permitted on signal now'
+      : `Next permitted slot · ${decision.nextLegalSlot ?? 'unavailable'}`}
   </footer>
 </section>
 
 <style>
+  /* The state is the loudest thing on the page, and its colour carries the
+     same meaning as the spans below: red the bridge is up or going up, green
+     the road is clear. */
   .decision {
     display: grid;
     min-width: 0;
@@ -76,6 +60,22 @@
     padding: clamp(24px, 3.2vw, 48px);
     background: var(--frost);
     border-right: 1px solid var(--rule-strong);
+    border-left: 10px solid var(--success);
+  }
+
+  .decision[data-state='open'] {
+    background: var(--danger);
+    border-left-color: var(--graphite);
+    color: var(--white);
+  }
+
+  .decision[data-state='likely'] {
+    background: var(--amber-sheet);
+    border-left-color: var(--danger);
+  }
+
+  .decision[data-state='possible'] {
+    border-left-color: var(--amber);
   }
 
   .decision-header {
@@ -87,197 +87,93 @@
     border-bottom: 1px solid var(--rule-strong);
   }
 
-  .decision-subject {
-    display: grid;
-    gap: 12px;
-    margin-top: clamp(34px, 5vh, 58px);
+  .decision[data-state='open'] .decision-header {
+    border-bottom-color: rgba(255, 255, 255, 0.5);
   }
 
   h1 {
-    max-width: 9ch;
-    margin: 0;
-    color: var(--marine);
+    margin: clamp(24px, 4vh, 46px) 0 0;
+    font-family: var(--font-instrument);
     font-size: var(--type-display);
     font-weight: 700;
-    line-height: 0.78;
-    letter-spacing: -0.025em;
+    line-height: 0.82;
+    letter-spacing: -0.03em;
     text-transform: uppercase;
     text-wrap: balance;
   }
 
-  .decision-outcome {
+  .decision[data-state='likely'] h1 {
+    color: var(--danger);
+  }
+
+  .decision-timing {
     display: grid;
-    gap: 8px;
-    margin-top: clamp(36px, 6vh, 64px);
-    padding-bottom: 17px;
-    border-bottom: 1px solid var(--rule-strong);
+    gap: 6px;
+    margin-top: clamp(18px, 3vh, 34px);
+    padding-top: 16px;
+    border-top: 1px solid var(--rule-strong);
   }
 
-  .decision-outcome strong {
-    font-family: var(--font-instrument);
-    font-size: var(--type-display-compact);
-    font-weight: 700;
-    line-height: 0.84;
-    letter-spacing: -0.02em;
-    text-transform: uppercase;
+  .decision[data-state='open'] .decision-timing {
+    border-top-color: rgba(255, 255, 255, 0.5);
   }
 
-  .decision-outcome[data-state='open'] {
-    color: var(--white);
-    background: var(--graphite);
-    margin-inline: -18px;
-    padding: 18px;
-    border-bottom-color: var(--graphite);
-  }
-
-  .decision-outcome[data-state='likely'] {
-    margin-inline: -18px;
-    padding: 18px;
-    color: var(--graphite);
-    background: var(--amber-sheet);
-    border-bottom-color: var(--amber-ink);
-  }
-
-  .decision-readings {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    border-bottom: 1px solid var(--rule-strong);
-  }
-
-  .decision-readings > div {
-    display: grid;
-    min-width: 0;
-    gap: 8px;
-    padding: 18px 14px 18px 0;
-  }
-
-  .decision-readings > div + div {
-    border-left: 1px solid var(--rule);
-    padding-left: 20px;
-  }
-
-  .decision-readings strong {
+  .countdown {
     display: flex;
     align-items: baseline;
-    gap: 9px;
+    gap: 10px;
     font-family: var(--font-instrument);
-    font-size: var(--type-display-compact);
-    font-weight: 600;
+    font-size: var(--type-headline);
+    font-weight: 700;
     line-height: 0.9;
     letter-spacing: -0.02em;
   }
 
-  .decision-readings small {
-    max-width: 8ch;
+  .countdown small,
+  .confidence {
     color: var(--muted);
-    font-size: var(--type-body-small);
+    font-family: var(--font-instrument);
+    font-size: var(--type-title);
     font-weight: 600;
-    line-height: 1;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.04em;
     text-transform: uppercase;
   }
 
-  .decision-readings .unavailable {
-    align-items: center;
-    min-height: 68px;
-    color: var(--muted);
-    font-size: var(--type-title);
-    letter-spacing: 0;
+  .confidence {
+    font-size: var(--type-label);
   }
 
-  .decision-explanation {
-    display: grid;
-    gap: 10px;
-    padding: 22px 0 6px;
-  }
-
-  .decision-explanation p {
-    max-width: 58ch;
-    margin: 0;
-    color: var(--muted);
-    font-size: var(--type-body-small);
-    line-height: 1.5;
-  }
-
-  .status-detail {
-    display: grid;
-    gap: 6px;
-    padding-top: 4px;
-  }
-
-  .status-detail strong {
-    color: var(--graphite);
+  .road {
     font-family: var(--font-instrument);
+    font-size: var(--type-section);
+    font-weight: 700;
+    line-height: 1;
+    text-transform: uppercase;
+  }
+
+  .action {
+    margin: 16px 0 0;
     font-size: var(--type-body);
     font-weight: 600;
-    line-height: 1.25;
-    text-transform: uppercase;
   }
 
   footer {
-    display: grid;
-    gap: 12px;
-    margin-top: 24px;
-    padding-top: 16px;
-    border-top: 1px solid var(--rule);
-  }
-
-  footer > div {
-    display: grid;
-    gap: 6px;
-  }
-
-  footer strong {
-    font-family: var(--font-instrument);
-    font-size: var(--type-body);
-    font-weight: 600;
-    letter-spacing: 0.03em;
-    text-transform: uppercase;
-  }
-
-  footer p {
-    margin: 0;
+    margin-top: auto;
+    padding-top: 20px;
     color: var(--muted);
     font-size: var(--type-caption);
-    line-height: 1.45;
   }
 
-  @media (max-width: 1180px) {
+  .decision[data-state='open'] .countdown small,
+  .decision[data-state='open'] .confidence,
+  .decision[data-state='open'] footer {
+    color: rgba(255, 255, 255, 0.82);
+  }
+
+  @media (max-width: 900px) {
     .decision {
       border-right: 0;
       border-bottom: 1px solid var(--rule-strong);
-    }
-
-    h1 {
-      max-width: 13ch;
-    }
-  }
-
-  @media (max-width: 540px) {
-    .decision {
-      padding: 22px 18px 28px;
-    }
-
-    .decision-subject {
-      margin-top: 30px;
-    }
-
-    h1 {
-      font-size: var(--type-display-compact);
-    }
-
-    .decision-outcome {
-      margin-top: 38px;
-    }
-
-    .decision-readings {
-      grid-template-columns: 1fr;
-    }
-
-    .decision-readings > div + div {
-      border-top: 1px solid var(--rule);
-      border-left: 0;
-      padding-left: 0;
     }
   }
 </style>

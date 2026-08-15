@@ -66,6 +66,18 @@ pub(crate) fn strong(frame: &mut MonoFrame, x: i32, y: i32, value: &str, color: 
     );
 }
 
+/// Draws the largest available font with a faux-bold stroke.
+///
+/// embedded-graphics tops out at a 10x20 mono face, which is not enough weight
+/// to carry a status across a room. Overprinting at one-pixel offsets thickens
+/// every stem, which on a one-bit panel is the difference between text you read
+/// and a state you recognise.
+pub(crate) fn huge(frame: &mut MonoFrame, x: i32, y: i32, value: &str, color: BinaryColor) {
+    for (offset_x, offset_y) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        large(frame, x + offset_x, y + offset_y, value, color);
+    }
+}
+
 pub(crate) fn large(frame: &mut MonoFrame, x: i32, y: i32, value: &str, color: BinaryColor) {
     text(frame, x, y, value, MonoTextStyle::new(&FONT_10X20, color));
 }
