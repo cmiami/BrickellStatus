@@ -491,13 +491,20 @@ impl BridgePredictor {
         let availability_factor = availability_factor(item.availability);
         let age_seconds = item.observed_at.age_seconds_at(now);
         let explicitly_expired = item.expires_at.is_some_and(|expires| expires < now);
+        // Predictive evidence that carries its own arrival window does not get
+        // less true while that window is still ahead. An upstream opening says a
+        // vessel will reach the target in N minutes; decaying it from the moment
+        // it was seen scores the prediction lowest exactly when it is about to
+        // come true. Age it from the close of its window instead.
+        let pending_seconds = predicted_window_seconds(&item.fact);
+        let effective_age = age_seconds.saturating_sub(pending_seconds);
         let stale = explicitly_expired
             || item.availability == AvailabilityStatus::Stale
-            || age_seconds > u64::from(decay.stale_after_seconds);
+            || effective_age > u64::from(decay.stale_after_seconds);
         let freshness_factor = if stale {
             0.0
         } else {
-            2.0_f32.powf(-(age_seconds as f32) / decay.half_life_seconds as f32)
+            2.0_f32.powf(-(effective_age as f32) / decay.half_life_seconds as f32)
         };
         let context_factor = if mode == BridgeOperatingMode::Blackout
             && matches!(kind, EvidenceKind::Ais | EvidenceKind::Outbound)
@@ -731,6 +738,37 @@ fn evidence_eta(
             eta.latest.saturating_sub(elapsed),
         )
     })
+}
+
+/// A vessel that has reached the bridge and cannot pass does not leave; it
+/// waits. Restricted-period openings are on the hour and half-hour, so a
+/// transit that arrives at 15:40 can sit until 16:00 with the queue growing
+/// behind it.
+const QUEUE_GRACE_SECONDS: u64 = 20 * 60;
+
+/// How long a fact's own prediction stays pending, in seconds.
+///
+/// Zero for evidence that makes no forward claim, which leaves ordinary
+/// age-based decay untouched for everything else.
+///
+/// For an upstream opening this covers both halves of the vessel's journey: the
+/// run down to the target, then the wait at it. Evidence that a vessel is
+/// *queued* at the bridge is stronger than evidence it is on its way, so the
+/// contribution must not fade in between. Nothing here needs to expire the
+/// evidence when the vessel finally passes -- the detector stops reporting
+/// progress as soon as the target opens, which is what consumes it.
+fn predicted_window_seconds(fact: &BridgeObservation) -> u64 {
+    match fact {
+        BridgeObservation::OutboundProgress { eta, .. } => {
+            eta.map_or(0, |eta| u64::from(eta.latest) * 60) + QUEUE_GRACE_SECONDS
+        }
+        // AIS tracks keep plain age decay. A position report is a statement
+        // about where a vessel was, and a newer one always supersedes it, so
+        // age is the right measure there. An upstream bridge opening has no
+        // successor report -- nothing arrives to replace it until the target
+        // itself moves -- which is why only that class needs the window.
+        _ => 0,
+    }
 }
 
 fn availability_factor(status: AvailabilityStatus) -> f32 {
@@ -1135,5 +1173,93 @@ mod tests {
             .expect("AIS contribution");
         assert!((contribution.freshness_factor - 0.5).abs() < 0.001);
         assert!((contribution.applied_score - contribution.raw_weight * 0.5).abs() < 0.001);
+    }
+
+    /// Reproduces a false negative observed against the live river.
+    ///
+    /// SW 2 Ave opened at 15:31 as an outbound convoy worked downriver. At
+    /// 15:52 eight vessels were queued at Brickell waiting for the next
+    /// scheduled opening, and the app reported 8.6% confidence: weight 0.88
+    /// decayed by a six-minute half-life over twenty-one minutes.
+    ///
+    /// An upstream opening is not an observation that rots. It is a prediction
+    /// with a due time, and it is most informative as that time arrives.
+    #[test]
+    fn an_outbound_opening_does_not_decay_before_the_vessel_can_arrive() {
+        let opened = millis("2026-08-15T19:31:59Z");
+        let evaluated = millis("2026-08-15T19:52:08Z");
+        let predictor = BridgePredictor::default();
+
+        // SW 2 Ave is 759 m from Brickell: four to nine minutes at river speeds.
+        let with_window = predictor
+            .evaluate(
+                evaluated,
+                &[evidence(
+                    "outbound-1",
+                    "fl511.bridge.brickell",
+                    opened,
+                    BridgeObservation::OutboundProgress {
+                        bridge: "SW 2 Ave".into(),
+                        stage: OutboundProgressStage::VeryHigh,
+                        eta: Some(EtaRangeMinutes::new(4, 9)),
+                    },
+                )],
+                None,
+            )
+            .expect("prediction");
+
+        let without_window = predictor
+            .evaluate(
+                evaluated,
+                &[evidence(
+                    "outbound-2",
+                    "fl511.bridge.brickell",
+                    opened,
+                    BridgeObservation::OutboundProgress {
+                        bridge: "SW 2 Ave".into(),
+                        stage: OutboundProgressStage::VeryHigh,
+                        eta: None,
+                    },
+                )],
+                None,
+            )
+            .expect("prediction");
+
+        assert!(
+            with_window.confidence.basis_points > without_window.confidence.basis_points,
+            "an arrival window must outscore bare age decay: {} vs {}",
+            with_window.confidence.basis_points,
+            without_window.confidence.basis_points
+        );
+        assert!(
+            with_window.confidence.basis_points > 5_000,
+            "a vessel due or queued at the bridge is not a 50/50: got {}",
+            with_window.confidence.basis_points
+        );
+    }
+
+    #[test]
+    fn an_outbound_opening_still_expires_once_the_queue_grace_passes() {
+        // The vessel has to be somewhere. Long after transit plus a plausible
+        // wait, an opening that never happened stops being evidence.
+        let opened = millis("2026-08-15T19:31:59Z");
+        let much_later = millis("2026-08-15T21:20:00Z");
+        let prediction = BridgePredictor::default()
+            .evaluate(
+                much_later,
+                &[evidence(
+                    "outbound-stale",
+                    "fl511.bridge.brickell",
+                    opened,
+                    BridgeObservation::OutboundProgress {
+                        bridge: "SW 2 Ave".into(),
+                        stage: OutboundProgressStage::VeryHigh,
+                        eta: Some(EtaRangeMinutes::new(4, 9)),
+                    },
+                )],
+                None,
+            )
+            .expect("prediction");
+        assert_eq!(prediction.state, BridgeState::Clear);
     }
 }

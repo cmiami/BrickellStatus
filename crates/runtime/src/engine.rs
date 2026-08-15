@@ -1131,6 +1131,48 @@ fn update_bridge_transitions(
     }
 }
 
+/// Metres from each upstream bascule down to the Brickell Avenue Bridge, taken
+/// from the FL511 coordinates the selectors use.
+///
+/// An upstream opening only means something once it is turned into "when could
+/// that vessel be here", and that needs a distance.
+fn upstream_distance_meters(bridge_key: &str) -> Option<f64> {
+    match bridge_key {
+        "sw_2_ave" => Some(759.0),
+        "sw_1_st" => Some(1_112.0),
+        "w_flagler" => Some(1_223.0),
+        "nw_5_st" => Some(1_932.0),
+        "nw_12_ave" => Some(2_845.0),
+        "nw_17_ave" => Some(3_744.0),
+        "nw_22_ave" => Some(4_611.0),
+        "nw_27_ave" => Some(5_574.0),
+        _ => None,
+    }
+}
+
+/// Miami River transit speeds. Tug-assisted commercial traffic works the low
+/// end; the yachts and sailboats behind most openings work the high end. The
+/// span between them is why this is a window and not a point.
+const RIVER_SPEED_SLOW_KNOTS: f64 = 3.0;
+const RIVER_SPEED_FAST_KNOTS: f64 = 6.0;
+const METRES_PER_KNOT_MINUTE: f64 = 1_852.0 / 60.0;
+
+/// When a vessel that just cleared `bridge_key` could reach Brickell.
+///
+/// The distance is real and the speed range is observed, so this is a far
+/// better statement about an upstream opening than its age: a vessel that
+/// passed SW 2 Ave eight minutes ago is *more* likely to be at Brickell now
+/// than it was one minute after passing, not less.
+fn outbound_eta(bridge_key: &str) -> Option<EtaRangeMinutes> {
+    let metres = upstream_distance_meters(bridge_key)?;
+    let fastest = metres / (RIVER_SPEED_FAST_KNOTS * METRES_PER_KNOT_MINUTE);
+    let slowest = metres / (RIVER_SPEED_SLOW_KNOTS * METRES_PER_KNOT_MINUTE);
+    Some(EtaRangeMinutes::new(
+        fastest.floor().max(0.0) as u16,
+        slowest.ceil().max(1.0) as u16,
+    ))
+}
+
 /// Position in the river, counting upstream from the target.
 ///
 /// Outbound detection reads a *decreasing* rank over time as a vessel working
@@ -1381,7 +1423,7 @@ fn bridge_evidence(
                         data: BridgeObservation::OutboundProgress {
                             bridge: progress.bridge_name.clone(),
                             stage: progress.stage,
-                            eta: None,
+                            eta: outbound_eta(&progress.bridge_key),
                         },
                     })
             } else {

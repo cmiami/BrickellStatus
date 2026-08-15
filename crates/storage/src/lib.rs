@@ -770,7 +770,12 @@ impl Store {
                    request_json, status, attempts, provider_message_id,
                    last_error, created_at, delivery_outbox.updated_at
             FROM delivery_outbox
-            ORDER BY delivery_outbox.updated_at DESC, created_at DESC
+            -- rowid breaks ties on insertion order. Two rows enqueued inside the
+            -- same timestamp tick otherwise come back in whatever order SQLite
+            -- chooses, which makes "the newest row" a coin flip and any caller
+            -- reading history[0] intermittently wrong.
+            ORDER BY delivery_outbox.updated_at DESC, created_at DESC,
+                     delivery_outbox.rowid DESC
             LIMIT ?1
             "#,
         )
