@@ -113,6 +113,26 @@ pub struct BridgeStateInterval {
     pub state: String,
     pub started_at_ms: i64,
     pub ended_at_ms: Option<i64>,
+    /// Engine run that recorded the interval; NULL on rows written before
+    /// sessions were tracked.
+    pub session_id: Option<String>,
+}
+
+/// One FL511 reading for one bridge.
+///
+/// Grouped rather than passed positionally: the call carries four adjacent
+/// string fields, and transposing `relation` and `state` would write a
+/// well-formed row that means something else entirely.
+#[derive(Clone, Copy, Debug)]
+pub struct BridgeObservation<'a> {
+    pub source_id: &'a str,
+    pub bridge_key: &'a str,
+    pub bridge_name: &'a str,
+    pub relation: &'a str,
+    pub state: &'a str,
+    pub observed_at_ms: i64,
+    /// Engine run that took the reading.
+    pub session_id: &'a str,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -136,17 +156,21 @@ impl StoreTransaction<'_> {
     /// Extends the current interval or starts a new one when FL511 changes.
     pub async fn record_bridge_state(
         &mut self,
-        source_id: &str,
-        bridge_key: &str,
-        bridge_name: &str,
-        relation: &str,
-        state: &str,
-        observed_at_ms: i64,
+        observation: BridgeObservation<'_>,
     ) -> Result<(), StorageError> {
+        let BridgeObservation {
+            source_id,
+            bridge_key,
+            bridge_name,
+            relation,
+            state,
+            observed_at_ms,
+            session_id,
+        } = observation;
         let current = sqlx::query_as::<_, BridgeStateInterval>(
             r#"
             SELECT source_id, bridge_key, bridge_name, relation, state,
-                   started_at_ms, ended_at_ms
+                   started_at_ms, ended_at_ms, session_id
             FROM bridge_state_intervals
             WHERE source_id = ?1 AND bridge_key = ?2 AND ended_at_ms IS NULL
             "#,
@@ -182,8 +206,9 @@ impl StoreTransaction<'_> {
         sqlx::query(
             r#"
             INSERT INTO bridge_state_intervals(
-                source_id, bridge_key, bridge_name, relation, state, started_at_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                source_id, bridge_key, bridge_name, relation, state, started_at_ms,
+                session_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             "#,
         )
         .bind(source_id)
@@ -192,6 +217,7 @@ impl StoreTransaction<'_> {
         .bind(relation)
         .bind(state)
         .bind(observed_at_ms)
+        .bind(session_id)
         .execute(&mut *self.inner)
         .await?;
         Ok(())
@@ -297,6 +323,26 @@ impl Store {
 
     async fn create_schema(&self) -> Result<(), StorageError> {
         sqlx::raw_sql(SCHEMA_SQL).execute(&self.pool).await?;
+        self.ensure_bridge_session_column().await?;
+        Ok(())
+    }
+
+    /// Adds `session_id` to a database created before the column existed.
+    ///
+    /// `schema.sql` is applied with CREATE TABLE IF NOT EXISTS, so an existing
+    /// table is left untouched by it and needs the column added explicitly.
+    /// SQLite has no ADD COLUMN IF NOT EXISTS, hence the pragma check.
+    async fn ensure_bridge_session_column(&self) -> Result<(), StorageError> {
+        let present: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM pragma_table_info('bridge_state_intervals') WHERE name = 'session_id'",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        if present.is_none() {
+            sqlx::query("ALTER TABLE bridge_state_intervals ADD COLUMN session_id TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
         Ok(())
     }
 
@@ -333,7 +379,7 @@ impl Store {
         Ok(sqlx::query_as::<_, BridgeStateInterval>(
             r#"
             SELECT source_id, bridge_key, bridge_name, relation, state,
-                   started_at_ms, ended_at_ms
+                   started_at_ms, ended_at_ms, session_id
             FROM bridge_state_intervals
             WHERE source_id = ?1 AND bridge_key = ?2
             ORDER BY started_at_ms
@@ -354,7 +400,7 @@ impl Store {
         Ok(sqlx::query_as::<_, BridgeStateInterval>(
             r#"
             SELECT source_id, bridge_key, bridge_name, relation, state,
-                   started_at_ms, ended_at_ms
+                   started_at_ms, ended_at_ms, session_id
             FROM bridge_state_intervals
             ORDER BY started_at_ms DESC
             LIMIT ?1
@@ -1109,42 +1155,45 @@ mod tests {
 
         let mut transaction = store.begin_transaction().await.unwrap();
         transaction
-            .record_bridge_state(
-                "fl511.bridge.brickell",
-                "sw_2_ave",
-                "SW 2 Ave Bridge",
-                "upstream",
-                "down",
-                1_000,
-            )
+            .record_bridge_state(BridgeObservation {
+                source_id: "fl511.bridge.brickell",
+                bridge_key: "sw_2_ave",
+                bridge_name: "SW 2 Ave Bridge",
+                relation: "upstream",
+                state: "down",
+                observed_at_ms: 1_000,
+                session_id: "run-a",
+            })
             .await
             .unwrap();
         transaction.commit().await.unwrap();
 
         let mut unchanged = store.begin_transaction().await.unwrap();
         unchanged
-            .record_bridge_state(
-                "fl511.bridge.brickell",
-                "sw_2_ave",
-                "SW 2 Ave Bridge",
-                "upstream",
-                "down",
-                2_000,
-            )
+            .record_bridge_state(BridgeObservation {
+                source_id: "fl511.bridge.brickell",
+                bridge_key: "sw_2_ave",
+                bridge_name: "SW 2 Ave Bridge",
+                relation: "upstream",
+                state: "down",
+                observed_at_ms: 2_000,
+                session_id: "run-a",
+            })
             .await
             .unwrap();
         unchanged.commit().await.unwrap();
 
         let mut changed = store.begin_transaction().await.unwrap();
         changed
-            .record_bridge_state(
-                "fl511.bridge.brickell",
-                "sw_2_ave",
-                "SW 2 Ave Bridge",
-                "upstream",
-                "up",
-                3_000,
-            )
+            .record_bridge_state(BridgeObservation {
+                source_id: "fl511.bridge.brickell",
+                bridge_key: "sw_2_ave",
+                bridge_name: "SW 2 Ave Bridge",
+                relation: "upstream",
+                state: "up",
+                observed_at_ms: 3_000,
+                session_id: "run-b",
+            })
             .await
             .unwrap();
         changed.commit().await.unwrap();
@@ -1157,6 +1206,10 @@ mod tests {
         assert_eq!(intervals[0].state, "down");
         assert_eq!(intervals[0].started_at_ms, 1_000);
         assert_eq!(intervals[0].ended_at_ms, Some(3_000));
+        // The session stamp is what separates a real transition from one that
+        // only looks like a transition because the app restarted.
+        assert_eq!(intervals[0].session_id.as_deref(), Some("run-a"));
+        assert_eq!(intervals[1].session_id.as_deref(), Some("run-b"));
         assert_eq!(intervals[1].state, "up");
         assert_eq!(intervals[1].started_at_ms, 3_000);
         assert_eq!(intervals[1].ended_at_ms, None);

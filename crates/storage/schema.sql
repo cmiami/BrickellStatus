@@ -14,6 +14,10 @@ CREATE TABLE IF NOT EXISTS bridge_state_intervals (
     state TEXT NOT NULL CHECK (state IN ('up', 'down', 'unknown')),
     started_at_ms INTEGER NOT NULL,
     ended_at_ms INTEGER,
+    -- Engine run that observed this interval. Distinguishes a genuine bridge
+    -- transition from an artifact of the app restarting, which otherwise write
+    -- identical rows. NULL for rows recorded before sessions were tracked.
+    session_id TEXT,
     PRIMARY KEY (source_id, bridge_key, started_at_ms),
     CHECK (ended_at_ms IS NULL OR ended_at_ms >= started_at_ms)
 );

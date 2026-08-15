@@ -2232,3 +2232,119 @@ fn snapshot_area_context_names_enabled_selected_areas() {
         Some("Miami, Florida")
     );
 }
+
+/// Emits a fixed FL511 bridge set, so a test can stage an acquisition fault.
+struct StagedBridgeCollector {
+    items: Vec<CollectorItem>,
+}
+
+#[async_trait]
+impl Collector for StagedBridgeCollector {
+    fn name(&self) -> &'static str {
+        "fixture-staged-bridges"
+    }
+
+    async fn collect(&self, _context: &CollectContext) -> Result<CollectorBatch, CollectorError> {
+        Ok(CollectorBatch {
+            source: self.name().into(),
+            items: self.items.clone(),
+            health: CollectorHealth::healthy(),
+            cursor: CollectorCursor::default(),
+            not_modified: false,
+        })
+    }
+}
+
+async fn intervals_after(items: Vec<CollectorItem>, bridge_key: &str) -> Vec<String> {
+    let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
+    let engine = engine_with(Arc::new(StagedBridgeCollector { items }), clock).await;
+    engine.refresh_all().await.unwrap();
+    engine
+        .store
+        .list_bridge_state_intervals("fl511.bridge.brickell", bridge_key)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|interval| interval.state)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_single_unresolved_bridge_is_still_recorded() {
+    // One bridge FL511 cannot resolve is durable evidence about that span, so
+    // it must survive: suppressing it would hide a genuinely broken selector.
+    let states = intervals_after(
+        vec![
+            bridge_item("brickell", "Brickell Avenue Bridge", "target", "up"),
+            bridge_item("sw_2_ave", "SW 2 Ave Bridge", "upstream", "unknown"),
+            bridge_item("sw_1_st", "SW 1 St Bridge", "upstream", "down"),
+        ],
+        "sw_2_ave",
+    )
+    .await;
+    assert_eq!(states, vec!["unknown".to_string()]);
+}
+
+#[tokio::test]
+async fn correlated_unknown_readings_are_not_recorded_as_observations() {
+    // Two bridges cannot both become "unknown" because of anything on the
+    // river; that is a failed fetch. Recording it splits a real interval in two
+    // and inflates the opening count for the affected spans.
+    let states = intervals_after(
+        vec![
+            bridge_item("brickell", "Brickell Avenue Bridge", "target", "up"),
+            bridge_item("sw_2_ave", "SW 2 Ave Bridge", "upstream", "unknown"),
+            bridge_item("sw_1_st", "SW 1 St Bridge", "upstream", "unknown"),
+        ],
+        "sw_2_ave",
+    )
+    .await;
+    assert!(states.is_empty(), "expected no interval, got {states:?}");
+}
+
+#[tokio::test]
+async fn a_resolved_bridge_is_still_recorded_during_a_correlated_fault() {
+    // The fault is per-reading, not per-pass: bridges that did resolve are
+    // still trustworthy and must not be dropped alongside the bad ones.
+    let states = intervals_after(
+        vec![
+            bridge_item("brickell", "Brickell Avenue Bridge", "target", "up"),
+            bridge_item("sw_2_ave", "SW 2 Ave Bridge", "upstream", "unknown"),
+            bridge_item("sw_1_st", "SW 1 St Bridge", "upstream", "unknown"),
+        ],
+        "brickell",
+    )
+    .await;
+    assert_eq!(states, vec!["up".to_string()]);
+}
+
+#[tokio::test]
+async fn every_recorded_interval_carries_the_engine_session() {
+    let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
+    let engine = engine_with(
+        Arc::new(StagedBridgeCollector {
+            items: vec![bridge_item(
+                "brickell",
+                "Brickell Avenue Bridge",
+                "target",
+                "up",
+            )],
+        }),
+        clock,
+    )
+    .await;
+    engine.refresh_all().await.unwrap();
+    let intervals = engine
+        .store
+        .list_bridge_state_intervals("fl511.bridge.brickell", "brickell")
+        .await
+        .unwrap();
+    assert_eq!(intervals.len(), 1);
+    assert!(
+        intervals[0]
+            .session_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty()),
+        "an interval with no session cannot be told apart from a restart artifact"
+    );
+}

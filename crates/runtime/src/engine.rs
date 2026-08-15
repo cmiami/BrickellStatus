@@ -325,8 +325,18 @@ struct PersistedRuntimeState {
     active_sources: BTreeMap<String, String>,
 }
 
+/// Two or more bridges reporting `unknown` in the same pass is the signature of
+/// a failed FL511 fetch rather than anything happening on the river: a bascule
+/// cannot become "unknown", only our view of it can. Recording those readings
+/// splits genuine intervals in two and inflates the opening count, which is
+/// exactly the noise that makes upstream spans look like bad predictors.
+const CORRELATED_UNKNOWN_THRESHOLD: usize = 2;
+
 pub struct RuntimeEngine {
     store: Store,
+    /// Identifies this engine run in durable observations, so a restart is
+    /// distinguishable after the fact from a real state change.
+    session_id: String,
     config: RuntimeConfig,
     factory: Arc<dyn CollectorFactory>,
     clock: Arc<dyn Clock>,
@@ -398,6 +408,9 @@ impl RuntimeEngine {
         let location_search = LocationSearchService::new(&config.user_agent)?;
         Ok(Self {
             store,
+            // A v7 id sorts by creation time, so ordering rows by session_id
+            // matches the order the runs actually happened in.
+            session_id: uuid::Uuid::now_v7().to_string(),
             config,
             factory,
             clock,
@@ -805,6 +818,15 @@ impl RuntimeEngine {
             let Some(source) = state.sources.get(source_id) else {
                 continue;
             };
+            let correlated_unknown = source
+                .items
+                .iter()
+                .filter(|item| item.kind == ItemKind::Bridge)
+                .filter(|item| {
+                    item.attributes.get("state").and_then(Value::as_str) == Some("unknown")
+                })
+                .count()
+                >= CORRELATED_UNKNOWN_THRESHOLD;
             for item in &source.items {
                 if item.kind != ItemKind::Bridge {
                     continue;
@@ -823,15 +845,23 @@ impl RuntimeEngine {
                 else {
                     continue;
                 };
+                // Hold the previous state rather than recording an acquisition
+                // fault as an observation. A single unresolved bridge is still
+                // written: that is durable evidence about one span, not a
+                // correlated failure across the fetch.
+                if state == "unknown" && correlated_unknown {
+                    continue;
+                }
                 transaction
-                    .record_bridge_state(
+                    .record_bridge_state(tenders_storage::BridgeObservation {
                         source_id,
                         bridge_key,
-                        &item.title,
+                        bridge_name: &item.title,
                         relation,
                         state,
-                        now_ms,
-                    )
+                        observed_at_ms: now_ms,
+                        session_id: &self.session_id,
+                    })
                     .await?;
             }
         }
