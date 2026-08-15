@@ -23,7 +23,7 @@ image = { version = "0.25.8", default-features = false, features = ["png"] }
 jiff = { version = "0.2.32", features = ["serde"] }
 libsqlite3-sys = { version = "=0.37.0", features = ["bundled"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "query", "gzip", "brotli"] }
-scraper = "0.24.0"
+scraper = "0.27.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
