@@ -1,5 +1,11 @@
 <script lang="ts">
   import 'maplibre-gl/dist/maplibre-gl.css';
+  // MapLibre 6 derives its worker URL from `import.meta.url` and bails out to an
+  // empty string unless that URL is http(s). The packaged app is served from
+  // `tauri://localhost`, so the built-in lookup yields no worker: the style and
+  // background layer still paint, but nothing parses vector tiles and the map
+  // renders empty. Hand MapLibre a Vite-bundled worker URL instead.
+  import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
   import { onMount } from 'svelte';
   import { Crosshair, Globe2, MapPin, MousePointer2 } from '@lucide/svelte';
   import type { GeoJSONSource, Map as MapLibreMap, Marker as MapLibreMarker, ScaleControl } from 'maplibre-gl';
@@ -181,6 +187,7 @@
       .then((maplibre) => {
         if (disposed) return;
         maplibreModule = maplibre;
+        maplibre.setWorkerUrl(maplibreWorkerUrl);
         map = new maplibre.Map({
           container: mapHost,
           style: 'https://tiles.openfreemap.org/styles/liberty',

@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "bridgestatus-collectors"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "bridgestatus-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bridgestatus-collectors",
@@ -3643,7 +3643,7 @@ dependencies = [
 
 [[package]]
 name = "puente-gonorrea-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bridgestatus-delivery",
  "bridgestatus-eink",
@@ -3667,7 +3667,7 @@ dependencies = [
 
 [[package]]
 name = "puente-gonorrea-hub"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "tokio",
@@ -5297,7 +5297,7 @@ dependencies = [
 
 [[package]]
 name = "tenders-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libsqlite3-sys",
  "serde",

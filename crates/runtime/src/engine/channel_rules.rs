@@ -1071,7 +1071,7 @@ fn vessel_tracks(state: &PersistedRuntimeState, now_ms: i64) -> Vec<VesselTrackS
             Some((observed_ms, track))
         })
         .collect::<Vec<_>>();
-    tracks.sort_by(|left, right| right.0.cmp(&left.0));
+    tracks.sort_by_key(|(observed_ms, _)| std::cmp::Reverse(*observed_ms));
     tracks.truncate(MAX_MAP_VESSEL_TRACKS);
     tracks.into_iter().map(|(_, track)| track).collect()
 }
@@ -1083,6 +1083,9 @@ fn valid_map_coordinate(latitude: f64, longitude: f64) -> bool {
         && (-180.0..=180.0).contains(&longitude)
 }
 
+// Every argument is an independent input to the summary, so bundling them into
+// a parameter struct would only move the same list one level out.
+#[allow(clippy::too_many_arguments)]
 fn channel_summary(
     kind: ChannelKindDto,
     channel: &ChannelPreference,

@@ -13,6 +13,11 @@ export default defineConfig({
   optimizeDeps: {
     exclude: ['maplibre-gl']
   },
+  // MapLibre starts its worker with `{ type: 'module' }`, so the worker chunk
+  // Vite emits for it has to be an ES module too.
+  worker: {
+    format: 'es'
+  },
   server: {
     port: 1420,
     strictPort: true,

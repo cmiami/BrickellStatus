@@ -899,15 +899,14 @@ async fn save_preferences(
     };
     let _dispatch_guard = state.dispatch_lock.lock().await;
     let old = state.engine.get_preferences().await;
-    preferences.whatsapp.token_configured =
-        match state.secret_store.whatsapp_token().await {
-            Ok(token) => token.is_some(),
-            Err(error) => {
-                return Ok(mutation_error(format!(
-                    "Preferences were not saved because the Meta credential could not be read: {error}"
-                )));
-            }
-        };
+    preferences.whatsapp.token_configured = match state.secret_store.whatsapp_token().await {
+        Ok(token) => token.is_some(),
+        Err(error) => {
+            return Ok(mutation_error(format!(
+                "Preferences were not saved because the Meta credential could not be read: {error}"
+            )));
+        }
+    };
     preferences.ais.api_key_configured = ais_truth.present && !ais_truth.invalid;
     let result = state
         .engine

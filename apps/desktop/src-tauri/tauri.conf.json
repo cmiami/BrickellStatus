@@ -32,7 +32,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: blob: https://tiles.openfreemap.org; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost https://tiles.openfreemap.org https://geocoding-api.open-meteo.com; font-src 'self' data:; worker-src blob:; child-src blob:"
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: blob: https://tiles.openfreemap.org; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost https://tiles.openfreemap.org https://geocoding-api.open-meteo.com; font-src 'self' data:; worker-src 'self' blob:; child-src 'self' blob:"
     }
   },
   "bundle": {

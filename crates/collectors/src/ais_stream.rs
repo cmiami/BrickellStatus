@@ -336,7 +336,7 @@ impl Collector for AisStreamCollector {
                 .insert("last_position_at_ms".into(), latest_position_at.to_string());
         }
         let mut histories = state.histories.values().cloned().collect::<Vec<_>>();
-        histories.sort_by(|left, right| right.observed_at.cmp(&left.observed_at));
+        histories.sort_by_key(|track| std::cmp::Reverse(track.observed_at));
         histories.truncate(MAX_HISTORY_TRACKS);
         if let Ok(encoded) = serde_json::to_string(&histories) {
             cursor
