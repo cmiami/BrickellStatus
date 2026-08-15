@@ -527,7 +527,7 @@ impl BridgePredictor {
             confidence,
             urgency: urgency_for(state),
             availability,
-            eta: best_eta,
+            eta: self.scheduled_eta(best_eta, now, exempt_transit)?,
             schedule,
             contributions,
             transition: PredictionTransition {
@@ -537,6 +537,45 @@ impl BridgePredictor {
                 held_by_hysteresis,
             },
         })
+    }
+
+    /// Pushes a predicted arrival out to when the bridge may actually open.
+    ///
+    /// The arrival window says when a vessel reaches the bridge. During the
+    /// hour/half-hour period that is not when the bridge opens: an ordinary
+    /// vessel arriving at 18:32 waits for 19:00. Reporting the arrival as the
+    /// opening promises a time the bridge legally cannot open, which is worse
+    /// than reporting nothing.
+    ///
+    /// Exempt traffic is left alone. A tug with a tow opens the bridge when it
+    /// gets there, which is the entire point of the exemption.
+    fn scheduled_eta(
+        &self,
+        eta: Option<EtaRangeMinutes>,
+        now: TimestampMillis,
+        exempt_transit: bool,
+    ) -> Result<Option<EtaRangeMinutes>, PredictionError> {
+        let Some(eta) = eta else {
+            return Ok(None);
+        };
+        if exempt_transit {
+            return Ok(Some(eta));
+        }
+        let shift = |minutes: u16| -> Result<u16, PredictionError> {
+            let arrival = TimestampMillis::new(
+                now.0
+                    .saturating_add(i64::from(minutes).saturating_mul(60_000)),
+            );
+            let Some(slot) = self.schedule.ordinary_opening_at_or_after(arrival)? else {
+                return Ok(minutes);
+            };
+            let waited = (slot.0.saturating_sub(now.0)) / 60_000;
+            Ok(u16::try_from(waited).unwrap_or(u16::MAX).max(minutes))
+        };
+        Ok(Some(EtaRangeMinutes::new(
+            shift(eta.earliest)?,
+            shift(eta.latest)?,
+        )))
     }
 
     fn score_evidence(
@@ -834,7 +873,8 @@ fn evidence_eta(
 ) -> Option<EtaRangeMinutes> {
     let eta = match fact {
         BridgeObservation::AisTrack { eta, .. }
-        | BridgeObservation::OutboundProgress { eta, .. } => *eta,
+        | BridgeObservation::OutboundProgress { eta, .. }
+        | BridgeObservation::ScheduledTransit { eta, .. } => *eta,
         _ => None,
     }?;
     let elapsed = u16::try_from(observed_at.age_seconds_at(now) / 60).unwrap_or(u16::MAX);
@@ -1057,7 +1097,12 @@ mod tests {
             .expect("prediction");
 
         assert_eq!(prediction.state, BridgeState::Likely);
-        assert_eq!(prediction.eta, Some(EtaRangeMinutes::new(8, 12)));
+        // 15:10 EDT is inside the hour/half-hour period, so an arrival eight to
+        // twelve minutes out cannot open the bridge on arrival: the vessel
+        // waits for 15:30, which is twenty minutes away. The window used to be
+        // reported as the arrival, which promised a time the bridge could not
+        // legally open.
+        assert_eq!(prediction.eta, Some(EtaRangeMinutes::new(20, 20)));
         assert!(prediction.confidence.as_score() >= 0.58);
     }
 
@@ -1478,5 +1523,83 @@ mod tests {
             score(near),
             score(far)
         );
+    }
+
+    #[test]
+    fn an_ordinary_arrival_waits_for_the_next_legal_slot() {
+        // 18:22 EDT on a weekday is inside the hour/half-hour period. An
+        // arrival window of 10 to 21 minutes lands at 18:32 to 18:43, which has
+        // already missed 18:30, so an ordinary vessel opens the bridge at 19:00.
+        // Reporting T-10 promises a time the bridge cannot legally open.
+        let now = millis("2026-08-14T22:22:00Z");
+        let prediction = BridgePredictor::default()
+            .evaluate(
+                now,
+                &[evidence(
+                    "outbound",
+                    "fl511.bridge.brickell",
+                    now,
+                    BridgeObservation::OutboundProgress {
+                        bridge: "NW 5 ST".into(),
+                        stage: OutboundProgressStage::High,
+                        eta: Some(EtaRangeMinutes::new(10, 21)),
+                    },
+                )],
+                None,
+            )
+            .expect("prediction");
+        let eta = prediction.eta.expect("an eta");
+        assert_eq!(eta.earliest, 38, "18:22 to 19:00 is 38 minutes");
+        assert_eq!(eta.latest, 38);
+    }
+
+    #[test]
+    fn an_exempt_transit_keeps_its_own_arrival_window() {
+        // A tug with a tow opens the bridge when it arrives; that is the whole
+        // point of the exemption, so its window must not be pushed to a slot.
+        let now = millis("2026-08-14T22:22:00Z");
+        let prediction = BridgePredictor::default()
+            .evaluate(
+                now,
+                &[evidence(
+                    "transit",
+                    "bbpilots.bridge.brickell",
+                    now,
+                    BridgeObservation::ScheduledTransit {
+                        vessel: "PEPIN EXPRESS".into(),
+                        exempt: true,
+                        eta: Some(EtaRangeMinutes::new(10, 21)),
+                    },
+                )],
+                None,
+            )
+            .expect("prediction");
+        let eta = prediction.eta.expect("an eta");
+        assert_eq!((eta.earliest, eta.latest), (10, 21));
+    }
+
+    #[test]
+    fn an_on_signal_period_imposes_no_wait() {
+        // Outside the restricted hours the bridge opens on signal, so the
+        // arrival window is the answer.
+        let now = millis("2026-08-15T14:00:00Z"); // Saturday, on signal.
+        let prediction = BridgePredictor::default()
+            .evaluate(
+                now,
+                &[evidence(
+                    "outbound",
+                    "fl511.bridge.brickell",
+                    now,
+                    BridgeObservation::OutboundProgress {
+                        bridge: "SW 2 Ave".into(),
+                        stage: OutboundProgressStage::VeryHigh,
+                        eta: Some(EtaRangeMinutes::new(4, 9)),
+                    },
+                )],
+                None,
+            )
+            .expect("prediction");
+        let eta = prediction.eta.expect("an eta");
+        assert_eq!((eta.earliest, eta.latest), (4, 9));
     }
 }

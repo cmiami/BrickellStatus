@@ -170,6 +170,27 @@ impl BrickellSchedule {
         })
     }
 
+    /// First ordinary opening opportunity at or after `instant`.
+    ///
+    /// `None` when the bridge is on signal then, which is the same as saying
+    /// the schedule imposes no wait. A prediction has to ask this rather than
+    /// assume its arrival window is the answer: an ordinary vessel that reaches
+    /// the bridge at 18:32 during the hour/half-hour period does not open it at
+    /// 18:32, it waits for 19:00.
+    pub fn ordinary_opening_at_or_after(
+        &self,
+        instant: TimestampMillis,
+    ) -> Result<Option<TimestampMillis>, ScheduleError> {
+        let status = self.evaluate(instant)?;
+        if status.mode == BridgeOperatingMode::OnSignal {
+            return Ok(None);
+        }
+        if status.ordinary_opening_allowed {
+            return Ok(Some(instant));
+        }
+        Ok(status.next_ordinary_opening_at)
+    }
+
     fn next_ordinary_opening(
         &self,
         local: &jiff::Zoned,
