@@ -23,6 +23,8 @@
 
 The flagship channel predicts a likely Brickell Avenue Bridge opening *before* cars stack up. The same engine also handles rain heads-ups, NWS warnings, tropical systems, user-chosen news feeds, earthquakes, and future channels without turning your life into a notification casino.
 
+> **Proof-of-concept status · August 15, 2026:** AISStream accepts the Brickell subscription but is not returning usable vessel detail; [similar no-message reports remain open](https://github.com/aisstream/aisstream/issues/30). We are monitoring the feed. [Concurrent Namecheap VPS maintenance](https://www.namecheap.com/status-updates/planned-hardware-maintenance-on-vps-hosting-august-14-2026/) may be relevant, but no causal link is confirmed. FL511 is collecting Brickell and upstream bridge events into a local event graph; after several days of real data, alert thresholds and timing will be tuned against those patterns.
+
 ## The whole signal desk
 
 Every channel below has a real master switch, visible operating state, source
@@ -236,10 +238,10 @@ The desktop app is the primary configuration surface:
 | **Policy** | Named profiles, quiet hours, explicit critical bypass, per-channel interrupt register |
 | **Outputs** | AISStream source/key/radius/health, E213 USB/BLE/render-only mode, frame cadence, WhatsApp template and recipient, native notices |
 | **Log** | Durable FL511 bridge intervals plus WhatsApp revisions, provider-acceptance outcomes, filters, and sanitized JSON export |
-| **System** | Collector age, source health, SQLite/runtime versions, fail-safe boundaries, redacted diagnostics |
+| **System** | Collector age, source health, live SQLite use, runtime version, redacted diagnostics |
 
-Meta tokens are Keychain-only. AISStream keys come from Keychain or the ignored
-local `.env` development file. The rest of the local-data
+Meta and AISStream secrets live in a private per-user credential file; AISStream
+can also use the ignored local `.env` development file. The rest of the local-data
 boundary is intentionally plain: saved exact areas, WhatsApp recipient and
 consent records and pending or retryable message
 envelopes live in ordinary **unencrypted per-user SQLite** until the user edits
@@ -363,7 +365,7 @@ cooldown; those still require human review and the full protected-branch check.
 - **AISStream:** optional live WSS source, local secret API key, bridge-derived bounded coverage, explicit source health, and position freshness. It is beta/no-SLA evidence—not official bridge authority, universal vessel coverage, or reliable air-draft data.
 - **FL511:** undocumented first-party route isolated behind a fixture-tested adapter with explicit stale/unknown behavior.
 - **Yahoo Chart:** enabling Markets starts the credential-free chart source for the saved symbols; disabling Markets stops those requests. Provider delay and source failures remain visible. It is informational—not an execution feed.
-- **WhatsApp:** official Cloud API sender, recipient-bound opt-in gate, keychain token, atomic outbox, stale/superseded suppression, and redacted terminal rows. The desktop records provider acceptance and does not claim delivered/read reconciliation.
+- **WhatsApp:** official Cloud API sender, recipient-bound opt-in gate, local credential-file token, atomic outbox, stale/superseded suppression, and redacted terminal rows. The desktop records provider acceptance and does not claim delivered/read reconciliation.
 
 This is a decision-support project. It does not control the bridge, replace official emergency guidance, promise an opening, or guarantee a warning interval.
 
