@@ -101,8 +101,18 @@ jobs:
       - name: Build E213 firmware
         run: python3 firmware/e213/scripts/bundle_firmware.py
 
-      - name: Install Rust target
-        run: rustup target add "${{ matrix.target }}" --toolchain 1.97.1
+      # `rustup target add --toolchain` assumes that toolchain is already
+      # present and intact. When a runner image ships a partial 1.97.1 the step
+      # dies with "Missing manifest in toolchain", which is exactly what took
+      # out the Apple Silicon leg on 2026-08-15 while the identical step had
+      # passed hours earlier. Installing it explicitly first makes the build
+      # independent of whatever Rust the image happens to carry.
+      - name: Install the pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          rustup target add "${{ matrix.target }}" --toolchain 1.97.1
+          rustup run 1.97.1 rustc --version
 
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
