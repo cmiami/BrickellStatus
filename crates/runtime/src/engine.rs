@@ -275,6 +275,14 @@ struct SourceState {
     last_error: Option<String>,
     #[serde(default)]
     fail_closed_on_error: bool,
+    /// How often this source is polled, in milliseconds.
+    ///
+    /// Freshness has to be judged against a source's own cadence. A feed that
+    /// is only collected every ten minutes spends most of its life older than a
+    /// two-minute channel budget, and calling that "stale" reports a fault
+    /// where there is only a schedule.
+    #[serde(default)]
+    poll_interval_ms: Option<i64>,
     #[serde(default)]
     bridge_transitions: Vec<BridgeStateTransition>,
 }
@@ -311,6 +319,7 @@ impl SourceState {
             failure_count: 0,
             last_error: None,
             fail_closed_on_error: false,
+            poll_interval_ms: None,
             bridge_transitions: Vec::new(),
         }
     }
@@ -690,6 +699,8 @@ impl RuntimeEngine {
                 .or_insert_with(|| SourceState::empty(&registration.channel_id));
             source.channel_id.clone_from(&registration.channel_id);
             source.fail_closed_on_error = registration.fail_closed_on_error;
+            source.poll_interval_ms = (!registration.minimum_interval.is_zero())
+                .then(|| duration_millis(registration.minimum_interval));
             source.last_attempt_ms = Some(now_ms);
             match outcome {
                 CollectionOutcome::Batch(batch) => {

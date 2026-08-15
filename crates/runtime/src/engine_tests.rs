@@ -2399,3 +2399,48 @@ async fn a_scheduled_vessel_movement_never_appears_as_a_bridge_reading() {
         "the bascule reading itself must still be shown"
     );
 }
+
+#[test]
+fn a_slow_source_is_not_stale_merely_for_keeping_its_own_schedule() {
+    // The pilots' board is collected every ten minutes while the bridge channel
+    // tolerates two. Judging it against the channel budget alone marks it stale
+    // for eight minutes out of every ten and reports a permanent fault that is
+    // really a schedule.
+    let now_ms = 1_786_741_200_000;
+    let mut channel = AppPreferences::default()
+        .profile
+        .channels
+        .into_iter()
+        .find(|channel| channel.kind == ChannelKindDto::Bridge)
+        .expect("the default profile has a bridge channel");
+    channel.max_age_minutes = 2;
+
+    let mut slow = SourceState::empty(&channel.id);
+    slow.reported_health = HealthState::Healthy;
+    slow.last_success_ms = Some(now_ms - 5 * 60 * 1_000);
+    slow.poll_interval_ms = Some(10 * 60 * 1_000);
+    assert_eq!(
+        source_availability(&slow, &channel, now_ms).0,
+        AvailabilityDto::Fresh,
+        "a five-minute-old reading from a ten-minute feed is on schedule"
+    );
+
+    // A fast source gets no such latitude.
+    let mut fast = SourceState::empty(&channel.id);
+    fast.reported_health = HealthState::Healthy;
+    fast.last_success_ms = Some(now_ms - 5 * 60 * 1_000);
+    fast.poll_interval_ms = Some(15 * 1_000);
+    assert_eq!(
+        source_availability(&fast, &channel, now_ms).0,
+        AvailabilityDto::Stale,
+        "a five-minute-old reading from a fifteen-second feed is genuinely late"
+    );
+
+    // And a slow source that has missed well past its own cadence still trips.
+    let mut overdue = slow.clone();
+    overdue.last_success_ms = Some(now_ms - 30 * 60 * 1_000);
+    assert_eq!(
+        source_availability(&overdue, &channel, now_ms).0,
+        AvailabilityDto::Stale
+    );
+}

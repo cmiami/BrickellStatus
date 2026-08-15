@@ -726,7 +726,18 @@ fn source_availability(
     {
         return (AvailabilityDto::Offline, age_seconds);
     }
-    let stale_after = u64::from(channel.max_age_minutes) * 60;
+    // The channel budget says how old an answer may be before it stops being
+    // useful. It cannot also serve as the staleness test for a source that is
+    // deliberately collected less often than that: the pilots' board is polled
+    // every ten minutes, so a two-minute budget would mark it stale for eight
+    // minutes out of every ten and report a permanent fault that is really a
+    // schedule. Allow a source its own cadence on top of the budget.
+    let budget = u64::from(channel.max_age_minutes) * 60;
+    let cadence = source
+        .poll_interval_ms
+        .and_then(|ms| u64::try_from(ms / 1_000).ok())
+        .unwrap_or(0);
+    let stale_after = budget.saturating_add(cadence);
     if age_seconds > stale_after {
         return (AvailabilityDto::Stale, age_seconds);
     }
