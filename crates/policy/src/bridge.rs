@@ -569,8 +569,12 @@ impl BridgePredictor {
             let Some(slot) = self.schedule.ordinary_opening_at_or_after(arrival)? else {
                 return Ok(minutes);
             };
-            let waited = (slot.0.saturating_sub(now.0)) / 60_000;
-            Ok(u16::try_from(waited).unwrap_or(u16::MAX).max(minutes))
+            // The vessel still has to arrive, so the lead can never pull the
+            // opening earlier than the transit allows.
+            let waited = (slot.0.saturating_sub(now.0)) / 60_000 - SLOT_LEAD_MINUTES;
+            Ok(u16::try_from(waited.max(0))
+                .unwrap_or(u16::MAX)
+                .max(minutes))
         };
         Ok(Some(EtaRangeMinutes::new(
             shift(eta.earliest)?,
@@ -892,6 +896,16 @@ fn evidence_eta(
 /// behind it.
 const QUEUE_GRACE_SECONDS: u64 = 20 * 60;
 
+/// How far before a nominal slot an opening actually begins.
+///
+/// The tender starts the sequence early so the span is up *on* the hour rather
+/// than starting to move then. Across the first eight observed Brickell
+/// openings every one fell within nine minutes of a slot and five of them
+/// started before it, averaging about four minutes early. Snapping a prediction
+/// to the exact slot therefore runs late by roughly that much, on the reading
+/// the panel now spends its largest type on.
+const SLOT_LEAD_MINUTES: i64 = 4;
+
 /// How long a fact's own prediction stays pending, in seconds.
 ///
 /// Zero for evidence that makes no forward claim, which leaves ordinary
@@ -1102,7 +1116,7 @@ mod tests {
         // waits for 15:30, which is twenty minutes away. The window used to be
         // reported as the arrival, which promised a time the bridge could not
         // legally open.
-        assert_eq!(prediction.eta, Some(EtaRangeMinutes::new(20, 20)));
+        assert_eq!(prediction.eta, Some(EtaRangeMinutes::new(16, 16)));
         assert!(prediction.confidence.as_score() >= 0.58);
     }
 
@@ -1549,8 +1563,9 @@ mod tests {
             )
             .expect("prediction");
         let eta = prediction.eta.expect("an eta");
-        assert_eq!(eta.earliest, 38, "18:22 to 19:00 is 38 minutes");
-        assert_eq!(eta.latest, 38);
+        // 18:22 to 19:00 is 38 minutes, less the four the tender starts early.
+        assert_eq!(eta.earliest, 34);
+        assert_eq!(eta.latest, 34);
     }
 
     #[test]
@@ -1601,5 +1616,35 @@ mod tests {
             .expect("prediction");
         let eta = prediction.eta.expect("an eta");
         assert_eq!((eta.earliest, eta.latest), (4, 9));
+    }
+
+    #[test]
+    fn the_slot_lead_never_predicts_an_opening_before_the_vessel_arrives() {
+        // The tender starting early cannot help a vessel that is not there yet.
+        // An arrival two minutes out with a slot three minutes out must report
+        // the arrival, not the slot minus four.
+        let now = millis("2026-08-14T22:27:00Z"); // 18:27 EDT, slot at 18:30.
+        let prediction = BridgePredictor::default()
+            .evaluate(
+                now,
+                &[evidence(
+                    "outbound",
+                    "fl511.bridge.brickell",
+                    now,
+                    BridgeObservation::OutboundProgress {
+                        bridge: "SW 2 Ave".into(),
+                        stage: OutboundProgressStage::VeryHigh,
+                        eta: Some(EtaRangeMinutes::new(2, 6)),
+                    },
+                )],
+                None,
+            )
+            .expect("prediction");
+        let eta = prediction.eta.expect("an eta");
+        assert!(
+            eta.earliest >= 2,
+            "an opening cannot precede the vessel: got {}",
+            eta.earliest
+        );
     }
 }
