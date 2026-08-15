@@ -137,4 +137,43 @@ describe('BridgeSpans', () => {
     );
     expect(names).toEqual(['SW 2 Ave', 'SW 1 St', 'NW 5 St', 'NW 12 Ave']);
   });
+
+  it('nests the upstream spans inside Brickell rather than beside it', () => {
+    // Brickell is the subject; every other span is context for it. If the
+    // upstream list is a sibling it competes for the same attention, which is
+    // the opposite of what this panel is for.
+    render(BridgeSpans, {
+      intervals: [
+        interval({ state: 'down' }),
+        upstream('sw_2_ave', 'SW 2 Ave'),
+        upstream('sw_1_st', 'SW 1 St')
+      ],
+      localTimeZone: ZONE
+    });
+    const target = document.querySelector('.target');
+    expect(target).toBeTruthy();
+    expect(target?.querySelectorAll('.upstream li').length).toBe(2);
+    expect(document.querySelectorAll('.spans > .upstream').length).toBe(0);
+  });
+
+  it('carries the open/closed state onto both the target and each child', () => {
+    // The colour is driven entirely by data-state, on the target block, the
+    // bascule drawing, and every child row.
+    render(BridgeSpans, {
+      intervals: [
+        interval({ state: 'up', startedAt: '2026-08-15T18:00:00Z' }),
+        upstream('sw_2_ave', 'SW 2 Ave', { state: 'down' }),
+        upstream('sw_1_st', 'SW 1 St', { state: 'up', startedAt: '2026-08-15T18:05:00Z' })
+      ],
+      localTimeZone: ZONE
+    });
+    expect(document.querySelector('.target')?.getAttribute('data-state')).toBe('up');
+    const rows = Array.from(document.querySelectorAll('.upstream li')).map((node) =>
+      node.getAttribute('data-state')
+    );
+    expect(rows).toEqual(['down', 'up']);
+    // Both the target and the children draw a bascule, not just a label.
+    expect(document.querySelectorAll('.bascule').length).toBe(1);
+    expect(document.querySelectorAll('.mini-bascule').length).toBe(2);
+  });
 });

@@ -231,10 +231,16 @@ try {
   styled = layout.status === 0 && waitForNonemptyFile(dsStore, 5_000);
 
   if (styled) {
-    console.log('Applied the Tender\'s Log DMG background and icon layout.');
+    console.log('Applied the Tender\'s Log DMG icon layout.');
   } else {
+    // Without a .DS_Store the installer window falls back to Finder's default
+    // arrangement, which stacks the app on top of the Applications alias and
+    // makes the drag the window exists for impossible. That is a broken
+    // installer, not a cosmetic downgrade, so say so loudly.
     const detail = layout.error?.message ?? layout.stderr?.trim() ?? 'Finder wrote no .DS_Store';
-    console.warn(`Finder layout unavailable; continuing with a plain deterministic DMG. ${detail}`);
+    console.warn(
+      `DMG icon layout failed; the app and Applications alias will overlap. ${detail}`
+    );
     if (existsSync(dsStore)) unlinkSync(dsStore);
     rmSync(join(mountDirectory, '.background'), { recursive: true, force: true });
   }

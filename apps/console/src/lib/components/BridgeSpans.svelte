@@ -112,7 +112,7 @@
 
 <section class="spans" aria-label="Miami River bascule spans">
   <header class="spans-header">
-    <p class="registration-label">River spans</p>
+    <p class="registration-label">Miami River</p>
     <span class="spans-legend" aria-hidden="true">
       <em data-state="up"></em> Open
       <em data-state="down"></em> Closed
@@ -120,82 +120,99 @@
   </header>
 
   {#if target}
-    <figure class="target" data-state={target.state} aria-label={spanLabel(target)}>
-      <!--
-        Double-leaf bascule: each leaf is hinged over its own pier and the free
-        ends meet at midspan when closed. Opening lifts both leaves away from
-        the centre, which is the movement drivers actually see from Brickell.
-      -->
-      <svg viewBox="0 0 200 92" role="img" aria-hidden="true" class="bascule">
-        <line class="water" x1="0" y1="74" x2="200" y2="74" />
-        <line class="water water-low" x1="0" y1="80" x2="200" y2="80" />
+    <!--
+      Brickell is the subject of this app; every other span on the river is
+      context for it. The markup says so: the target owns the block and the
+      upstream spans are nested inside it as children, rather than sitting
+      beside it as peers competing for the same attention.
+    -->
+    <article class="target" data-state={target.state} aria-label={spanLabel(target)}>
+      <div class="target-head">
+        <!--
+          Double-leaf bascule: each leaf is hinged over its own pier and the
+          free ends meet at midspan when closed. Opening lifts both away from
+          the centre, which is the movement drivers actually see.
+        -->
+        <svg viewBox="0 0 200 92" role="img" aria-hidden="true" class="bascule">
+          <line class="water" x1="0" y1="74" x2="200" y2="74" />
+          <line class="water water-low" x1="0" y1="80" x2="200" y2="80" />
+          <rect class="approach" x="0" y="41" width="28" height="6" />
+          <rect class="approach" x="172" y="41" width="28" height="6" />
+          <rect class="pier" x="20" y="47" width="12" height="27" />
+          <rect class="pier" x="168" y="47" width="12" height="27" />
+          <g class="leaf leaf-left">
+            <rect x="28" y="41" width="72" height="6" />
+            <path class="rail" d="M32 41 L32 34 M52 41 L52 34 M72 41 L72 34 M92 41 L92 34" />
+          </g>
+          <g class="leaf leaf-right">
+            <rect x="100" y="41" width="72" height="6" />
+            <path class="rail" d="M108 41 L108 34 M128 41 L128 34 M148 41 L148 34 M168 41 L168 34" />
+          </g>
+        </svg>
 
-        <rect class="approach" x="0" y="41" width="28" height="6" />
-        <rect class="approach" x="172" y="41" width="28" height="6" />
-        <rect class="pier" x="20" y="47" width="12" height="27" />
-        <rect class="pier" x="168" y="47" width="12" height="27" />
+        <div class="target-read">
+          <span class="registration-label">{target.name}</span>
+          <strong class="target-state">{stateWord(target.state)}</strong>
+          {#if openedAt(target)}
+            <small>Opened {openedAt(target)} · {openMinutes(target)} min</small>
+          {:else if target.state === 'down'}
+            <small>Deck down · traffic moving</small>
+          {:else}
+            <small>No confirmed reading</small>
+          {/if}
+        </div>
+      </div>
 
-        <g class="leaf leaf-left">
-          <rect x="28" y="41" width="72" height="6" />
-          <path class="rail" d="M32 41 L32 34 M52 41 L52 34 M72 41 L72 34 M92 41 L92 34" />
-        </g>
-        <g class="leaf leaf-right">
-          <rect x="100" y="41" width="72" height="6" />
-          <path class="rail" d="M108 41 L108 34 M128 41 L128 34 M148 41 L148 34 M168 41 L168 34" />
-        </g>
-      </svg>
-
-      <figcaption>
-        <span class="registration-label">{target.name}</span>
-        <strong>{stateWord(target.state)}</strong>
-        {#if openedAt(target)}
-          <small>Opened {openedAt(target)} · {openMinutes(target)} min</small>
-        {:else if target.state === 'down'}
-          <small>Deck down · traffic moving</small>
-        {:else}
-          <small>No confirmed reading</small>
-        {/if}
-      </figcaption>
-    </figure>
-  {/if}
-
-  {#if upstream.length}
-    <ul class="upstream">
+      {#if upstream.length}
+        <div class="upstream-group">
+          <p class="upstream-caption">
+            Upstream of Brickell · an opening walking down this list is a vessel
+            on its way here
+          </p>
+          <ul class="upstream">
+            {#each upstream as span (span.key)}
+              <li data-state={span.state} title={spanLabel(span)}>
+                <span class="pip" aria-hidden="true">
+                  <svg viewBox="0 0 24 14" class="mini-bascule">
+                    <line class="water" x1="0" y1="11" x2="24" y2="11" />
+                    <rect class="approach" x="0" y="5" width="4" height="2.4" />
+                    <rect class="approach" x="20" y="5" width="4" height="2.4" />
+                    <rect class="leaf mini-left" x="4" y="5" width="8" height="2.4" />
+                    <rect class="leaf mini-right" x="12" y="5" width="8" height="2.4" />
+                  </svg>
+                </span>
+                <span class="pip-text">
+                  <strong>{span.name}</strong>
+                  {#if openedAt(span)}
+                    <small>Open {openedAt(span)} · {openMinutes(span)} min</small>
+                  {:else}
+                    <small>{stateWord(span.state)}</small>
+                  {/if}
+                </span>
+              </li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
+    </article>
+  {:else if upstream.length}
+    <ul class="upstream orphan">
       {#each upstream as span (span.key)}
         <li data-state={span.state} title={spanLabel(span)}>
-          <span class="pip" aria-hidden="true">
-            <svg viewBox="0 0 24 14" class="mini-bascule">
-              <line class="water" x1="0" y1="11" x2="24" y2="11" />
-              <rect class="approach" x="0" y="5" width="4" height="2.4" />
-              <rect class="approach" x="20" y="5" width="4" height="2.4" />
-              <rect class="leaf mini-left" x="4" y="5" width="8" height="2.4" />
-              <rect class="leaf mini-right" x="12" y="5" width="8" height="2.4" />
-            </svg>
-          </span>
           <span class="pip-text">
             <strong>{span.name}</strong>
-            {#if openedAt(span)}
-              <small>Open {openedAt(span)} · {openMinutes(span)} min</small>
-            {:else}
-              <small>{stateWord(span.state)}</small>
-            {/if}
+            <small>{stateWord(span.state)}</small>
           </span>
         </li>
       {/each}
     </ul>
-    <p class="upstream-note">
-      An upstream span opening minutes before or after Brickell is the same vessel
-      working the river.
-    </p>
   {/if}
 </section>
 
 <style>
   .spans {
     display: grid;
-    grid-template-columns: minmax(230px, 330px) minmax(0, 1fr);
-    gap: 16px clamp(20px, 3vw, 40px);
-    align-items: start;
+    gap: 14px;
     padding: clamp(18px, 2.4vw, 30px) clamp(20px, 3vw, 42px);
     background: var(--frost);
     border-top: 1px solid var(--rule-strong);
@@ -203,7 +220,6 @@
 
   .spans-header {
     display: flex;
-    grid-column: 1 / -1;
     align-items: center;
     justify-content: space-between;
     gap: 14px;
@@ -241,18 +257,133 @@
     background: var(--success);
   }
 
+  /* The target owns the block; the state colour banding it is the loudest
+     thing in the panel because it is the answer the app exists to give. */
   .target {
     display: grid;
-    gap: 12px;
-    margin: 0;
+    gap: 0;
+    border: 1px solid var(--marine);
+    border-left: 6px solid var(--steel);
+    background: var(--white);
+  }
+
+  .target[data-state='up'] {
+    border-left-color: var(--danger);
+  }
+
+  .target[data-state='down'] {
+    border-left-color: var(--success);
+  }
+
+  .target-head {
+    display: grid;
+    grid-template-columns: minmax(150px, 220px) minmax(0, 1fr);
+    gap: clamp(16px, 2.5vw, 32px);
+    align-items: center;
+    padding: clamp(14px, 2vw, 22px) clamp(16px, 2.2vw, 26px);
   }
 
   .bascule {
     display: block;
     width: 100%;
     height: auto;
-    background: var(--white);
+    background: var(--frost);
     border: 1px solid var(--rule);
+  }
+
+  .target-read {
+    display: grid;
+    gap: 6px;
+  }
+
+  .target-state {
+    font-family: var(--font-instrument);
+    font-size: var(--type-headline);
+    font-weight: 700;
+    line-height: 0.85;
+    letter-spacing: -0.02em;
+    text-transform: uppercase;
+  }
+
+  .target[data-state='up'] .target-state {
+    color: var(--danger);
+  }
+
+  .target[data-state='down'] .target-state {
+    color: var(--success);
+  }
+
+  .target[data-state='unknown'] .target-state {
+    color: var(--muted);
+  }
+
+  .target-read small {
+    color: var(--muted);
+    font-size: var(--type-caption);
+  }
+
+  /* Children: indented under the target and visually quieter, so the eye
+     reaches Brickell first and treats these as its context. */
+  .upstream-group {
+    padding: 12px clamp(16px, 2.2vw, 26px) clamp(14px, 2vw, 20px)
+      calc(clamp(16px, 2.2vw, 26px) + 18px);
+    border-top: 1px solid var(--rule);
+    background: var(--frost);
+  }
+
+  .upstream-caption {
+    margin: 0 0 9px;
+    color: var(--muted);
+    font-family: var(--font-instrument);
+    font-size: var(--type-micro);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .upstream {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(184px, 1fr));
+    gap: 1px;
+    margin: 0;
+    padding: 0;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    list-style: none;
+  }
+
+  .upstream.orphan {
+    margin-top: 0;
+  }
+
+  .upstream li {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    background: var(--white);
+    border-left: 4px solid var(--steel);
+  }
+
+  .upstream li[data-state='up'] {
+    background: var(--amber-sheet);
+    border-left-color: var(--danger);
+  }
+
+  .upstream li[data-state='down'] {
+    border-left-color: var(--success);
+  }
+
+  .pip {
+    display: block;
+    flex: none;
+    width: 38px;
+  }
+
+  .mini-bascule {
+    display: block;
+    width: 100%;
+    height: auto;
   }
 
   .water {
@@ -270,9 +401,9 @@
     fill: var(--steel);
   }
 
+  /* Green closed, red open, on both the target and the children. */
   .leaf rect,
-  .leaf.mini-left,
-  .leaf.mini-right {
+  .mini-bascule .leaf {
     fill: var(--success);
   }
 
@@ -282,10 +413,30 @@
     fill: none;
   }
 
-  /* Each leaf turns about its own pier, so the free end at midspan is what
-     rises. view-box keeps the origin in the same units as the geometry. */
+  .target[data-state='up'] .leaf rect {
+    fill: var(--danger);
+  }
+
+  .target[data-state='unknown'] .leaf rect {
+    fill: var(--steel);
+  }
+
+  .target[data-state='unknown'] .leaf .rail {
+    stroke: var(--paper);
+  }
+
+  li[data-state='up'] .mini-bascule .leaf {
+    fill: var(--danger);
+  }
+
+  li[data-state='unknown'] .mini-bascule .leaf {
+    fill: var(--steel);
+  }
+
+  /* Each leaf turns about its own pier, so the free end at midspan rises. */
   .leaf-left,
-  .leaf-right {
+  .leaf-right,
+  .mini-bascule .leaf {
     transform-box: view-box;
     transition: transform 900ms cubic-bezier(0.32, 0.06, 0.2, 1);
   }
@@ -306,94 +457,6 @@
     transform: rotate(64deg);
   }
 
-  .target[data-state='up'] .leaf rect {
-    fill: var(--danger);
-  }
-
-  .target[data-state='unknown'] .leaf rect {
-    fill: var(--steel);
-  }
-
-  .target[data-state='unknown'] .leaf .rail {
-    stroke: var(--paper);
-  }
-
-  figcaption {
-    display: grid;
-    gap: 5px;
-  }
-
-  figcaption strong {
-    font-family: var(--font-instrument);
-    font-size: var(--type-section);
-    font-weight: 700;
-    line-height: 1;
-    text-transform: uppercase;
-  }
-
-  .target[data-state='up'] figcaption strong {
-    color: var(--danger);
-  }
-
-  .target[data-state='down'] figcaption strong {
-    color: var(--success);
-  }
-
-  .target[data-state='unknown'] figcaption strong {
-    color: var(--muted);
-  }
-
-  figcaption small {
-    color: var(--muted);
-    font-size: var(--type-caption);
-  }
-
-  .upstream {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-    gap: 1px;
-    margin: 0;
-    padding: 0;
-    background: var(--rule);
-    border: 1px solid var(--rule);
-    list-style: none;
-  }
-
-  .upstream li {
-    display: flex;
-    align-items: center;
-    gap: 11px;
-    padding: 9px 11px;
-    background: var(--white);
-    border-left: 4px solid var(--steel);
-  }
-
-  .upstream li[data-state='up'] {
-    background: var(--amber-sheet);
-    border-left-color: var(--danger);
-  }
-
-  .upstream li[data-state='down'] {
-    border-left-color: var(--success);
-  }
-
-  .pip {
-    display: block;
-    flex: none;
-    width: 42px;
-  }
-
-  .mini-bascule {
-    display: block;
-    width: 100%;
-    height: auto;
-  }
-
-  .mini-bascule .leaf {
-    transform-box: view-box;
-    transition: transform 700ms cubic-bezier(0.32, 0.06, 0.2, 1);
-  }
-
   .mini-left {
     transform-origin: 4px 6.2px;
   }
@@ -408,14 +471,6 @@
 
   li[data-state='up'] .mini-right {
     transform: rotate(62deg);
-  }
-
-  li[data-state='up'] .leaf {
-    fill: var(--danger);
-  }
-
-  li[data-state='unknown'] .leaf {
-    fill: var(--steel);
   }
 
   .pip-text {
@@ -442,20 +497,9 @@
     font-weight: 700;
   }
 
-  .upstream-note {
-    grid-column: 2;
-    margin: 0;
-    color: var(--muted);
-    font-size: var(--type-caption);
-  }
-
-  @media (max-width: 900px) {
-    .spans {
+  @media (max-width: 720px) {
+    .target-head {
       grid-template-columns: minmax(0, 1fr);
-    }
-
-    .upstream-note {
-      grid-column: 1;
     }
   }
 

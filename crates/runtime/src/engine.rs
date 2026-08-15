@@ -1511,11 +1511,18 @@ fn bridge_evidence(
             let normalized = observation.map(|observation| {
                 BridgeEvidence::from_observation(
                     &observation,
-                    match relation {
-                        "target" => Confidence::from_basis_points(9_900),
-                        "ais" => Confidence::from_basis_points(8_500),
-                        "upstream" => Confidence::CERTAIN,
-                        _ => Confidence::ZERO,
+                    if item.kind == ItemKind::VesselMovement {
+                        // A booked transit is a plan, not a reading. It is good
+                        // evidence about intent and useless as a statement of
+                        // where the bascule is right now.
+                        Confidence::from_basis_points(8_000)
+                    } else {
+                        match relation {
+                            "target" => Confidence::from_basis_points(9_900),
+                            "ais" => Confidence::from_basis_points(8_500),
+                            "upstream" => Confidence::CERTAIN,
+                            _ => Confidence::ZERO,
+                        }
                     },
                 )
             });
@@ -1523,6 +1530,14 @@ fn bridge_evidence(
                 .as_ref()
                 .map_or(observed_ms, |item| item.observed_at.0);
             evidence.extend(normalized.clone());
+
+            // A scheduled vessel movement feeds the prediction but is not a
+            // bridge reading, and this list is what the bridge status surfaces
+            // show. Mixing a ship's timetable into the readings for the bascule
+            // buries the one thing those surfaces exist to report.
+            if item.kind == ItemKind::VesselMovement {
+                continue;
+            }
             views.push(BridgeEvidenceView {
                 evidence: normalized,
                 item: item.clone(),

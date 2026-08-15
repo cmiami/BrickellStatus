@@ -2348,3 +2348,54 @@ async fn every_recorded_interval_carries_the_engine_session() {
         "an interval with no session cannot be told apart from a restart artifact"
     );
 }
+
+#[tokio::test]
+async fn a_scheduled_vessel_movement_never_appears_as_a_bridge_reading() {
+    // The bridge surfaces exist to report the state of the bascule. A ship's
+    // timetable belongs in the prediction, not in the list of readings for the
+    // bridge itself, where it buries the one thing those surfaces are for.
+    let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
+    let mut movement = bridge_item("brickell", "PEPIN EXPRESS", "target", "up");
+    movement.kind = ItemKind::VesselMovement;
+    movement.attributes.insert("river".into(), json!(true));
+    movement
+        .attributes
+        .insert("vessel".into(), json!("PEPIN EXPRESS"));
+    movement.attributes.insert("tug".into(), json!("MRT"));
+    movement
+        .attributes
+        .insert("bridge_eta_at".into(), json!("2026-08-13T22:30:00+00:00"));
+
+    let engine = engine_with(
+        Arc::new(StagedBridgeCollector {
+            items: vec![
+                bridge_item("brickell", "Brickell Avenue Bridge", "target", "down"),
+                movement,
+            ],
+        }),
+        clock,
+    )
+    .await;
+    engine.refresh_all().await.unwrap();
+    let snapshot = engine.get_snapshot().await.unwrap();
+
+    assert!(
+        snapshot
+            .evidence
+            .iter()
+            .all(|strip| !strip.title.contains("PEPIN")),
+        "a booked transit must not be listed as a bridge reading: {:?}",
+        snapshot
+            .evidence
+            .iter()
+            .map(|strip| strip.title.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        snapshot
+            .evidence
+            .iter()
+            .any(|strip| strip.source_label.contains("511")),
+        "the bascule reading itself must still be shown"
+    );
+}
