@@ -1644,7 +1644,91 @@ fn display_snapshot(snapshot: &AppSnapshot) -> LiveSnapshot {
             )
         })
         .collect();
+    output.spans = upstream_spans(
+        &snapshot.bridge_intervals,
+        TimeZone::get(&snapshot.local_time_zone).ok().as_ref(),
+    );
     output
+}
+
+/// Condenses a bridge name into the two or three characters the E213 has room
+/// for beside a clock time. Falls back to the leading alphanumerics of the key
+/// so an unrecognized upstream span still appears rather than vanishing.
+fn span_code(bridge_key: &str, bridge_name: &str) -> String {
+    match bridge_key {
+        "sw_2_ave" => "2AV".into(),
+        "sw_1_st" => "1ST".into(),
+        "w_flagler" => "FLG".into(),
+        "nw_5_st" => "5ST".into(),
+        "nw_12_ave" => "12A".into(),
+        _ => {
+            let source = if bridge_key.is_empty() {
+                bridge_name
+            } else {
+                bridge_key
+            };
+            let code: String = source
+                .chars()
+                .filter(|character| character.is_ascii_alphanumeric())
+                .take(3)
+                .collect();
+            code.to_ascii_uppercase()
+        }
+    }
+}
+
+/// Current state of each upstream span, newest observation per bridge.
+///
+/// Only an interval that has not ended describes the present. A completed one
+/// is history, and reporting it as still up would tell a driver the river is
+/// blocked when it is not.
+fn upstream_spans(
+    intervals: &[bridgestatus_runtime::BridgeStateIntervalDto],
+    zone: Option<&TimeZone>,
+) -> Vec<bridgestatus_eink::SpanStatus> {
+    let mut latest: BTreeMap<&str, &bridgestatus_runtime::BridgeStateIntervalDto> = BTreeMap::new();
+    for interval in intervals {
+        if interval.relation != bridgestatus_runtime::BridgeRelationDto::Upstream {
+            continue;
+        }
+        let winner = match latest.get(interval.bridge_key.as_str()) {
+            None => true,
+            // An in-progress interval always beats a completed one, however
+            // recent the completed one is; otherwise the later start wins.
+            Some(held) => match (held.ended_at.is_none(), interval.ended_at.is_none()) {
+                (false, true) => true,
+                (true, false) => false,
+                _ => interval.started_at > held.started_at,
+            },
+        };
+        if winner {
+            latest.insert(interval.bridge_key.as_str(), interval);
+        }
+    }
+
+    latest
+        .values()
+        .map(|interval| {
+            let open = interval.ended_at.is_none()
+                && interval.state == bridgestatus_runtime::ObservedBridgeStateDto::Up;
+            let mut span = bridgestatus_eink::SpanStatus::new(
+                span_code(&interval.bridge_key, &interval.bridge_name),
+                open,
+            );
+            if open {
+                span.opened_at = zone.and_then(|zone| local_clock(&interval.started_at, zone));
+            }
+            span
+        })
+        .collect()
+}
+
+/// Formats an RFC 3339 instant as a bare local `HH:MM`, which is all the E213
+/// has room for and all a reader needs to line two openings up.
+fn local_clock(instant: &str, zone: &TimeZone) -> Option<String> {
+    let timestamp: Timestamp = instant.parse().ok()?;
+    let zoned = timestamp.to_zoned(zone.clone());
+    Some(format!("{:02}:{:02}", zoned.hour(), zoned.minute()))
 }
 
 /// Renders the current runtime snapshot through the same E213 path used by the

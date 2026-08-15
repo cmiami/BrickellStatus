@@ -6,6 +6,7 @@ FIRST VIEWPORT: Decision field left, off-centre live time rail and evidence cent
 FORM: Grounded direction 3, approved Live Time Rail composition, concept seed 1400f3c1.
 -->
 <script lang="ts">
+  import BridgeSpans from '$lib/components/BridgeSpans.svelte';
   import ChannelLedger from '$lib/components/ChannelLedger.svelte';
   import DispatchLedger from '$lib/components/DispatchLedger.svelte';
   import StatusDecision from '$lib/components/StatusDecision.svelte';
@@ -40,6 +41,10 @@ FORM: Grounded direction 3, approved Live Time Rail composition, concept seed 14
       />
       <ChannelLedger channels={$snapshot.channels} outputs={$snapshot.outputs} />
     </div>
+    <BridgeSpans
+      intervals={$snapshot.bridgeIntervals}
+      localTimeZone={$snapshot.localTimeZone}
+    />
     {#if $snapshot.dispatches.length}
       <DispatchLedger dispatches={$snapshot.dispatches} channels={$snapshot.channels} />
     {/if}

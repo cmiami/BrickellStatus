@@ -1220,3 +1220,137 @@ async fn off_messages_only_and_inactive_active_only_never_reach_epaper() {
         Some(&expected)
     );
 }
+
+mod river_spans {
+    use bridgestatus_runtime::{BridgeRelationDto, BridgeStateIntervalDto, ObservedBridgeStateDto};
+    use jiff::tz::TimeZone;
+
+    use super::super::{local_clock, span_code, upstream_spans};
+
+    fn interval(
+        key: &str,
+        state: ObservedBridgeStateDto,
+        started_at: &str,
+        ended_at: Option<&str>,
+    ) -> BridgeStateIntervalDto {
+        BridgeStateIntervalDto {
+            source_id: "fl511.bridge.brickell".into(),
+            bridge_key: key.into(),
+            bridge_name: key.to_uppercase(),
+            relation: BridgeRelationDto::Upstream,
+            state,
+            started_at: started_at.into(),
+            ended_at: ended_at.map(Into::into),
+        }
+    }
+
+    fn miami() -> TimeZone {
+        TimeZone::get("America/New_York").unwrap()
+    }
+
+    #[test]
+    fn only_an_unfinished_interval_reports_a_span_as_open() {
+        let spans = upstream_spans(
+            &[
+                interval(
+                    "sw_2_ave",
+                    ObservedBridgeStateDto::Up,
+                    "2026-08-15T18:20:00Z",
+                    None,
+                ),
+                // Ended, so it is history. Reporting it as up would tell a
+                // driver the river is blocked when it is not.
+                interval(
+                    "sw_1_st",
+                    ObservedBridgeStateDto::Up,
+                    "2026-08-15T17:00:00Z",
+                    Some("2026-08-15T17:10:00Z"),
+                ),
+            ],
+            Some(&miami()),
+        );
+        assert_eq!(spans.len(), 2);
+        let two_ave = spans.iter().find(|span| span.code == "2AV").unwrap();
+        assert!(two_ave.open);
+        assert_eq!(two_ave.opened_at.as_deref(), Some("14:20"));
+        let first_st = spans.iter().find(|span| span.code == "1ST").unwrap();
+        assert!(!first_st.open);
+        assert!(first_st.opened_at.is_none());
+    }
+
+    #[test]
+    fn an_in_progress_interval_beats_a_newer_completed_one() {
+        let spans = upstream_spans(
+            &[
+                interval(
+                    "sw_2_ave",
+                    ObservedBridgeStateDto::Up,
+                    "2026-08-15T18:00:00Z",
+                    None,
+                ),
+                interval(
+                    "sw_2_ave",
+                    ObservedBridgeStateDto::Down,
+                    "2026-08-15T18:05:00Z",
+                    Some("2026-08-15T18:06:00Z"),
+                ),
+            ],
+            Some(&miami()),
+        );
+        assert_eq!(spans.len(), 1);
+        assert!(spans[0].open);
+    }
+
+    #[test]
+    fn the_target_bridge_is_not_listed_among_upstream_spans() {
+        let mut target = interval(
+            "brickell",
+            ObservedBridgeStateDto::Up,
+            "2026-08-15T18:00:00Z",
+            None,
+        );
+        target.relation = BridgeRelationDto::Target;
+        assert!(upstream_spans(&[target], Some(&miami())).is_empty());
+    }
+
+    #[test]
+    fn opening_times_resolve_in_the_bridge_zone_not_utc() {
+        // 18:20Z in August is 14:20 in Miami.
+        assert_eq!(
+            local_clock("2026-08-15T18:20:00Z", &miami()).as_deref(),
+            Some("14:20")
+        );
+        // Midnight rollover backwards across the offset.
+        assert_eq!(
+            local_clock("2026-08-16T02:30:00Z", &miami()).as_deref(),
+            Some("22:30")
+        );
+        assert!(local_clock("not a timestamp", &miami()).is_none());
+    }
+
+    #[test]
+    fn span_codes_stay_within_the_three_characters_the_panel_allows() {
+        assert_eq!(span_code("sw_2_ave", "SW 2 Ave"), "2AV");
+        assert_eq!(span_code("sw_1_st", "SW 1 St"), "1ST");
+        assert_eq!(span_code("w_flagler", "W Flagler"), "FLG");
+        // An unknown span still shows up rather than disappearing.
+        let unknown = span_code("some_new_bridge", "Some New Bridge");
+        assert!(!unknown.is_empty());
+        assert!(unknown.chars().count() <= 3);
+    }
+
+    #[test]
+    fn a_missing_time_zone_still_reports_the_span_as_open() {
+        let spans = upstream_spans(
+            &[interval(
+                "sw_2_ave",
+                ObservedBridgeStateDto::Up,
+                "2026-08-15T18:20:00Z",
+                None,
+            )],
+            None,
+        );
+        assert!(spans[0].open);
+        assert!(spans[0].opened_at.is_none());
+    }
+}

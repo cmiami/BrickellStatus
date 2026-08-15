@@ -25,6 +25,7 @@ pub use channel_render::{ChannelRenderError, render_channel_card, render_channel
 pub use frame::MonoFrame;
 pub use model::{
     ConfidenceBand, EtaRange, Evidence, Freshness, LiveSnapshot, SnapshotError, SnapshotState,
+    SpanStatus,
 };
 pub use preview::{PreviewError, preview_png_bytes, save_preview_png, save_scaled_preview_png};
 pub use protocol::{

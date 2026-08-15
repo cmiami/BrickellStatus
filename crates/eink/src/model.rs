@@ -172,6 +172,41 @@ impl Freshness {
     }
 }
 
+/// One upstream Miami River span, shown beside the target bridge so a reader can
+/// tell whether an opening lines up with a vessel working the river.
+///
+/// An upstream span lifting shortly before or after Brickell is the same vessel
+/// under way. That correlation is the whole reason these appear on a display
+/// this small, so the opening time matters as much as the state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpanStatus {
+    /// Two- or three-character mark, e.g. `2AV`. The display has room for
+    /// nothing longer beside a clock time.
+    pub code: String,
+    /// Whether the span is up right now.
+    pub open: bool,
+    /// Pre-formatted local clock time the span opened, e.g. `14:20`. Rendering
+    /// stays free of time-zone logic; the caller has already resolved it.
+    pub opened_at: Option<String>,
+}
+
+impl SpanStatus {
+    /// Creates a span status with no recorded opening time.
+    pub fn new(code: impl Into<String>, open: bool) -> Self {
+        Self {
+            code: code.into(),
+            open,
+            opened_at: None,
+        }
+    }
+
+    /// Attaches the pre-formatted local clock time the span opened.
+    pub fn opened_at(mut self, at: impl Into<String>) -> Self {
+        self.opened_at = Some(at.into());
+        self
+    }
+}
+
 /// Complete, transport-neutral content for one live e-paper frame.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveSnapshot {
@@ -189,6 +224,9 @@ pub struct LiveSnapshot {
     pub evidence: Vec<Evidence>,
     /// Source identity and age.
     pub freshness: Freshness,
+    /// Upstream river spans, in river order. At most two are drawn.
+    #[serde(default)]
+    pub spans: Vec<SpanStatus>,
 }
 
 impl LiveSnapshot {
@@ -202,6 +240,7 @@ impl LiveSnapshot {
             road_meaning: state.road_meaning().into(),
             evidence: Vec::new(),
             freshness,
+            spans: Vec::new(),
         }
     }
 
@@ -231,6 +270,9 @@ impl LiveSnapshot {
         {
             return Err(SnapshotError::EmptyEvidence);
         }
+        if self.spans.iter().any(|span| span.code.trim().is_empty()) {
+            return Err(SnapshotError::EmptySpanCode);
+        }
         Ok(())
     }
 }
@@ -250,6 +292,9 @@ pub enum SnapshotError {
     /// Evidence text or source is blank.
     #[error("snapshot evidence needs both a summary and source")]
     EmptyEvidence,
+    /// An upstream span carried no display code.
+    #[error("span code cannot be empty")]
+    EmptySpanCode,
     /// Confidence exceeded 100%.
     #[error("confidence must be 0..=100, got {0}")]
     Confidence(u8),
