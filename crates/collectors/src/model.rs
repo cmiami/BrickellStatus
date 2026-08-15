@@ -36,6 +36,10 @@ pub enum ItemKind {
     Earthquake,
     News,
     MarketQuote,
+    /// A scheduled ship movement. Unlike [`ItemKind::Bridge`], which reports a
+    /// bridge that has already moved, this is a forward-looking event: a Miami
+    /// River transit that will require the bascule bridges to open.
+    VesselMovement,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

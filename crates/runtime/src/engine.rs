@@ -63,7 +63,11 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             user_agent: "PuenteGonorrea/0.1 (+https://github.com/cmiami/PuenteGonorrea)".into(),
-            poll_interval: Duration::from_secs(60),
+            // The tick is the scheduler's granularity, not any source's rate.
+            // It is set by the fastest consumer -- FL511 bridge status at 15s --
+            // and every collector declares its own floor in the factory, so a
+            // fast tick does not translate into fast polling for anything else.
+            poll_interval: Duration::from_secs(15),
             collector_timeout: Duration::from_secs(20),
             max_concurrent_collectors: 4,
             backoff_initial: Duration::from_secs(15),

@@ -7,11 +7,11 @@ use std::{
 
 use async_trait::async_trait;
 use bridgestatus_collectors::{
-    AisStreamApiKey, AisStreamCollector, AisStreamConfig, AisStreamSubscription, BridgeRelation,
-    CollectContext, Collector, CollectorBatch, CollectorError, Fl511BridgeCollector, Fl511Config,
-    NhcCurrentStormsCollector, NhcRssCollector, NwsAlertsCollector, OpenMeteoCollector,
-    SyndicationCollector, SyndicationConfig, UsgsEarthquakesCollector, UsgsWindow,
-    YahooChartCollector, YahooChartConfig,
+    AisStreamApiKey, AisStreamCollector, AisStreamConfig, AisStreamSubscription, BbPilotsCollector,
+    BbPilotsConfig, BridgeRelation, CollectContext, Collector, CollectorBatch, CollectorError,
+    Fl511BridgeCollector, Fl511Config, NhcCurrentStormsCollector, NhcRssCollector,
+    NwsAlertsCollector, OpenMeteoCollector, SyndicationCollector, SyndicationConfig,
+    UsgsEarthquakesCollector, UsgsWindow, YahooChartCollector, YahooChartConfig,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -21,6 +21,22 @@ use crate::{
     AisStreamKeyChange, AlertArea, AlertAreaSource, AppPreferences, ChannelKindDto,
     ChannelPreference, CollectorFactory, CollectorRegistration, RuntimeError,
 };
+
+/// Bridge status is the one signal worth polling hard: an opening lasts minutes
+/// and a stale answer is worse than none. This matches the engine tick, so FL511
+/// is collected on every pass.
+const BRIDGE_POLL_INTERVAL: Duration = Duration::from_secs(15);
+
+/// The pilots' board is a planning document republished on the order of
+/// minutes; the movements it lists are hours out.
+const BBPILOTS_POLL_INTERVAL: Duration = Duration::from_secs(600);
+
+/// Floor for every other source. The engine tick is set by the fastest consumer
+/// (FL511), so each remaining collector declares its own rate explicitly --
+/// otherwise lowering the tick for bridge status would silently quadruple the
+/// request volume this app sends to NWS, USGS, NHC, Open-Meteo, and arbitrary
+/// user RSS feeds, none of which change that quickly.
+const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct CredentialFreeCollectorFactory {
@@ -224,11 +240,28 @@ impl CollectorFactory for CredentialFreeCollectorFactory {
                             .bridges
                             .retain(|selector| selector.relation == BridgeRelation::Target);
                     }
-                    registrations.push(CollectorRegistration::new(
-                        format!("fl511.{}", channel.id),
-                        &channel.id,
-                        Arc::new(Fl511BridgeCollector::new(config)?),
-                    ));
+                    registrations.push(
+                        CollectorRegistration::new(
+                            format!("fl511.{}", channel.id),
+                            &channel.id,
+                            Arc::new(Fl511BridgeCollector::new(config)?),
+                        )
+                        .with_minimum_interval(BRIDGE_POLL_INTERVAL),
+                    );
+                }
+
+                // The pilots' board is the forward-looking half of bridge
+                // prediction: FL511 confirms an opening that already happened,
+                // while a scheduled Miami River transit implies one to come.
+                if scope_bool(&channel.scope, "useBbPilots", true, &channel.id)? {
+                    registrations.push(
+                        CollectorRegistration::new(
+                            format!("bbpilots.{}", channel.id),
+                            &channel.id,
+                            Arc::new(BbPilotsCollector::new(BbPilotsConfig::default())?),
+                        )
+                        .with_minimum_interval(BBPILOTS_POLL_INTERVAL),
+                    );
                 }
 
                 if preferences.ais.enabled && self.aisstream_key_configured()? {
@@ -250,11 +283,14 @@ impl CollectorFactory for CredentialFreeCollectorFactory {
                 for area in selected_areas(preferences, channel, AreaCapability::Weather) {
                     let collector =
                         Arc::new(OpenMeteoCollector::new(area.latitude, area.longitude, 24)?);
-                    registrations.push(CollectorRegistration::new(
-                        format!("open_meteo.{}.{}", channel.id, short_hash(&area.id)),
-                        &channel.id,
-                        Arc::new(AreaContextCollector::single(collector, area)),
-                    ));
+                    registrations.push(
+                        CollectorRegistration::new(
+                            format!("open_meteo.{}.{}", channel.id, short_hash(&area.id)),
+                            &channel.id,
+                            Arc::new(AreaContextCollector::single(collector, area)),
+                        )
+                        .with_minimum_interval(DEFAULT_POLL_INTERVAL),
+                    );
                 }
             } else if channel.kind == ChannelKindDto::Official {
                 for area in selected_areas(preferences, channel, AreaCapability::Official)
@@ -266,33 +302,42 @@ impl CollectorFactory for CredentialFreeCollectorFactory {
                         area.longitude,
                         self.user_agent.clone(),
                     )?);
-                    registrations.push(CollectorRegistration::new(
-                        format!("nws.{}.{}", channel.id, short_hash(&area.id)),
-                        &channel.id,
-                        Arc::new(AreaContextCollector::single(collector, area)),
-                    ));
+                    registrations.push(
+                        CollectorRegistration::new(
+                            format!("nws.{}.{}", channel.id, short_hash(&area.id)),
+                            &channel.id,
+                            Arc::new(AreaContextCollector::single(collector, area)),
+                        )
+                        .with_minimum_interval(DEFAULT_POLL_INTERVAL),
+                    );
                 }
             } else if channel.kind == ChannelKindDto::Hurricane {
                 let areas = selected_areas(preferences, channel, AreaCapability::Tropical);
                 if areas.is_empty() {
                     continue;
                 }
-                registrations.push(CollectorRegistration::new(
-                    format!("nhc.current_storms.{}", channel.id),
-                    &channel.id,
-                    Arc::new(AreaContextCollector::multiple(
-                        Arc::new(NhcCurrentStormsCollector::new()),
-                        &areas,
-                    )),
-                ));
-                registrations.push(CollectorRegistration::new(
-                    format!("nhc.atlantic_rss.{}", channel.id),
-                    &channel.id,
-                    Arc::new(AreaContextCollector::multiple(
-                        Arc::new(NhcRssCollector::atlantic()?),
-                        &areas,
-                    )),
-                ));
+                registrations.push(
+                    CollectorRegistration::new(
+                        format!("nhc.current_storms.{}", channel.id),
+                        &channel.id,
+                        Arc::new(AreaContextCollector::multiple(
+                            Arc::new(NhcCurrentStormsCollector::new()),
+                            &areas,
+                        )),
+                    )
+                    .with_minimum_interval(DEFAULT_POLL_INTERVAL),
+                );
+                registrations.push(
+                    CollectorRegistration::new(
+                        format!("nhc.atlantic_rss.{}", channel.id),
+                        &channel.id,
+                        Arc::new(AreaContextCollector::multiple(
+                            Arc::new(NhcRssCollector::atlantic()?),
+                            &areas,
+                        )),
+                    )
+                    .with_minimum_interval(DEFAULT_POLL_INTERVAL),
+                );
             } else if channel.kind == ChannelKindDto::News {
                 for feed in string_array(channel.scope.get("feeds")) {
                     if feed == "User-configured RSS" || feed.trim().is_empty() {
@@ -307,11 +352,14 @@ impl CollectorFactory for CredentialFreeCollectorFactory {
                     let mut config = SyndicationConfig::new(url);
                     config.max_items = channel.max_items;
                     config.user_agent = self.user_agent.clone();
-                    registrations.push(CollectorRegistration::new(
-                        format!("rss.{}.{}", short_hash(&channel.id), short_hash(feed)),
-                        &channel.id,
-                        Arc::new(SyndicationCollector::new(config)?),
-                    ));
+                    registrations.push(
+                        CollectorRegistration::new(
+                            format!("rss.{}.{}", short_hash(&channel.id), short_hash(feed)),
+                            &channel.id,
+                            Arc::new(SyndicationCollector::new(config)?),
+                        )
+                        .with_minimum_interval(DEFAULT_POLL_INTERVAL),
+                    );
                 }
             } else if channel.kind == ChannelKindDto::Earthquake {
                 let window = channel
@@ -321,11 +369,14 @@ impl CollectorFactory for CredentialFreeCollectorFactory {
                     .map(window_from_text)
                     .transpose()?
                     .unwrap_or(UsgsWindow::Hour);
-                registrations.push(CollectorRegistration::new(
-                    format!("usgs.significant.{}", channel.id),
-                    &channel.id,
-                    Arc::new(UsgsEarthquakesCollector::new(window)),
-                ));
+                registrations.push(
+                    CollectorRegistration::new(
+                        format!("usgs.significant.{}", channel.id),
+                        &channel.id,
+                        Arc::new(UsgsEarthquakesCollector::new(window)),
+                    )
+                    .with_minimum_interval(DEFAULT_POLL_INTERVAL),
+                );
             } else if channel.kind == ChannelKindDto::Markets {
                 let poll_seconds = scope_number(
                     &channel.scope,
@@ -664,6 +715,81 @@ mod tests {
             .collect()
     }
 
+    /// The engine tick is 15s so FL511 can be polled at 15s. A collector with a
+    /// zero `minimum_interval` runs on *every* tick, so any registration that
+    /// forgets its floor silently inherits bridge-status cadence and starts
+    /// hammering a public API four times faster than it used to. Only the AIS
+    /// stream may do that, because its `collect` drains an already-open
+    /// websocket buffer instead of issuing a request.
+    #[test]
+    fn every_polled_collector_declares_a_rate_slower_than_the_engine_tick() {
+        let preferences = AppPreferences::default();
+        let registrations = CredentialFreeCollectorFactory::new(
+            "PuenteGonorrea fixture (+https://example.invalid)",
+        )
+        .unwrap()
+        .build(&preferences)
+        .unwrap();
+        assert!(!registrations.is_empty());
+
+        for registration in &registrations {
+            if registration.id.starts_with("aisstream.") {
+                continue;
+            }
+            assert!(
+                !registration.minimum_interval.is_zero(),
+                "{} has no minimum_interval and would poll on every 15s tick",
+                registration.id
+            );
+            assert!(
+                registration.minimum_interval >= BRIDGE_POLL_INTERVAL,
+                "{} polls faster than bridge status",
+                registration.id
+            );
+            if !registration.id.starts_with("fl511.") {
+                assert!(
+                    registration.minimum_interval >= DEFAULT_POLL_INTERVAL,
+                    "{} polls faster than the default floor",
+                    registration.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bridge_channel_registers_fl511_fast_and_the_pilots_board_slow() {
+        let registrations = CredentialFreeCollectorFactory::new(
+            "PuenteGonorrea fixture (+https://example.invalid)",
+        )
+        .unwrap()
+        .build(&AppPreferences::default())
+        .unwrap();
+        let interval = |prefix: &str| {
+            registrations
+                .iter()
+                .find(|registration| registration.id.starts_with(prefix))
+                .unwrap_or_else(|| panic!("no registration for {prefix}"))
+                .minimum_interval
+        };
+        assert_eq!(interval("fl511."), Duration::from_secs(15));
+        assert_eq!(interval("bbpilots."), Duration::from_secs(600));
+    }
+
+    #[test]
+    fn the_pilots_board_can_be_switched_off_without_disabling_fl511() {
+        let mut preferences = AppPreferences::default();
+        let bridge = preferences
+            .profile
+            .channels
+            .iter_mut()
+            .find(|channel| channel.kind == ChannelKindDto::Bridge)
+            .expect("the default profile has a bridge channel");
+        bridge.scope.insert("useBbPilots".into(), json!(false));
+        let ids = collector_ids(&preferences);
+        assert!(!ids.iter().any(|id| id.starts_with("bbpilots.")));
+        assert!(ids.iter().any(|id| id.starts_with("fl511.")));
+    }
+
     fn second_area() -> AlertArea {
         AlertArea {
             id: "area.boston".into(),
@@ -693,8 +819,9 @@ mod tests {
     #[test]
     fn defaults_build_only_the_enabled_credential_free_sources() {
         let ids = collector_ids(&AppPreferences::default());
-        assert_eq!(ids.len(), 8);
+        assert_eq!(ids.len(), 9);
         assert!(ids.iter().any(|id| id == "fl511.bridge.brickell"));
+        assert!(ids.iter().any(|id| id == "bbpilots.bridge.brickell"));
         assert!(
             ids.iter()
                 .any(|id| id.starts_with("open_meteo.weather.miami."))

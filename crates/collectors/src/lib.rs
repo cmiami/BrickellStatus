@@ -6,6 +6,7 @@
 //! source adapter aware of policy, persistence, or presentation concerns.
 
 mod ais_stream;
+mod bbpilots;
 mod collection;
 mod fl511;
 mod geo;
@@ -21,6 +22,10 @@ mod yahoo_chart;
 pub use ais_stream::{
     AIS_VESSEL_TRACKS_CURSOR_KEY, AisStreamApiKey, AisStreamCollector, AisStreamConfig,
     AisStreamSubscription,
+};
+pub use bbpilots::{
+    BbPilotsCollector, BbPilotsConfig, BbpMovement, BbpParseError, BbpSchedule, MovementAction,
+    MovementStatus, RiverDirection, parse_bbp_schedule,
 };
 pub use fl511::{
     BridgeRelation, BridgeSelector, BridgeState, BridgeTooltip, Fl511BridgeCollector, Fl511Config,

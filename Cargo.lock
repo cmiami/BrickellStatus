@@ -397,6 +397,7 @@ dependencies = [
  "chrono",
  "feed-rs",
  "futures",
+ "jiff",
  "reqwest",
  "scraper",
  "serde",

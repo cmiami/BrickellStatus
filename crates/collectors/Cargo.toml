@@ -11,6 +11,7 @@ async-trait.workspace = true
 chrono.workspace = true
 feed-rs.workspace = true
 futures.workspace = true
+jiff.workspace = true
 reqwest.workspace = true
 scraper.workspace = true
 serde.workspace = true
