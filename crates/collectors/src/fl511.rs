@@ -55,8 +55,14 @@ pub struct Fl511Config {
 }
 
 impl Fl511Config {
-    /// Brickell plus the closest Miami River bridges whose openings are useful
-    /// upstream evidence. Names are still verified from FL511 tooltips.
+    /// Brickell plus every Miami River bascule FL511 publishes upstream of it,
+    /// in river order. Names are still verified from FL511 tooltips.
+    ///
+    /// The South Miami Avenue bridge sits between Brickell and SW 2 Ave and is
+    /// deliberately absent: FL511 does not publish it, so there is no selector
+    /// that could match it. That leaves a 759 m blind spot immediately upstream
+    /// of the target, and any transit time measured across it includes an
+    /// opening this app cannot see.
     pub fn brickell_and_upstream() -> Self {
         Self {
             layer_url: Url::parse(DEFAULT_LAYER_URL).expect("constant URL is valid"),
@@ -91,6 +97,46 @@ impl Fl511Config {
                     name_contains: "W FLAGLER".into(),
                     latitude: 25.774205,
                     longitude: -80.201287,
+                    search_radius_meters: 250.0,
+                    relation: BridgeRelation::Upstream,
+                },
+                BridgeSelector {
+                    key: "nw_5_st".into(),
+                    name_contains: "NW 5 ST".into(),
+                    latitude: 25.778307,
+                    longitude: -80.206931,
+                    search_radius_meters: 250.0,
+                    relation: BridgeRelation::Upstream,
+                },
+                BridgeSelector {
+                    key: "nw_12_ave".into(),
+                    name_contains: "NW 12 Ave".into(),
+                    latitude: 25.782594,
+                    longitude: -80.214716,
+                    search_radius_meters: 250.0,
+                    relation: BridgeRelation::Upstream,
+                },
+                BridgeSelector {
+                    key: "nw_17_ave".into(),
+                    name_contains: "NW 17 AVE".into(),
+                    latitude: 25.785884,
+                    longitude: -80.222961,
+                    search_radius_meters: 250.0,
+                    relation: BridgeRelation::Upstream,
+                },
+                BridgeSelector {
+                    key: "nw_22_ave".into(),
+                    name_contains: "NW 22 AVE".into(),
+                    latitude: 25.788202,
+                    longitude: -80.231373,
+                    search_radius_meters: 250.0,
+                    relation: BridgeRelation::Upstream,
+                },
+                BridgeSelector {
+                    key: "nw_27_ave".into(),
+                    name_contains: "NW 27 Ave".into(),
+                    latitude: 25.792670,
+                    longitude: -80.239650,
                     search_radius_meters: 250.0,
                     relation: BridgeRelation::Upstream,
                 },

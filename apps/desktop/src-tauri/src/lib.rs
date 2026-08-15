@@ -1662,6 +1662,9 @@ fn span_code(bridge_key: &str, bridge_name: &str) -> String {
         "w_flagler" => "FLG".into(),
         "nw_5_st" => "5ST".into(),
         "nw_12_ave" => "12A".into(),
+        "nw_17_ave" => "17A".into(),
+        "nw_22_ave" => "22A".into(),
+        "nw_27_ave" => "27A".into(),
         _ => {
             let source = if bridge_key.is_empty() {
                 bridge_name
@@ -1707,8 +1710,10 @@ fn upstream_spans(
         }
     }
 
-    latest
-        .values()
+    let mut ordered = latest.values().copied().collect::<Vec<_>>();
+    ordered.sort_by_key(|interval| interval.river_order);
+    ordered
+        .into_iter()
         .map(|interval| {
             let open = interval.ended_at.is_none()
                 && interval.state == bridgestatus_runtime::ObservedBridgeStateDto::Up;

@@ -150,6 +150,8 @@ export interface BridgeStateInterval {
   bridgeKey: string;
   bridgeName: string;
   relation: 'target' | 'upstream';
+  /** Position upstream from the target; 0 is the target itself. */
+  riverOrder: number;
   state: 'up' | 'down' | 'unknown';
   startedAt: string;
   endedAt?: string;

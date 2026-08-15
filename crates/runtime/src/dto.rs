@@ -336,6 +336,10 @@ pub struct BridgeStateIntervalDto {
     pub bridge_key: String,
     pub bridge_name: String,
     pub relation: BridgeRelationDto,
+    /// Position counting upstream from the target, 0 for the target itself.
+    /// Surfaces exist so a client can present spans in river order rather than
+    /// inventing an ordering that would drift from the engine's.
+    pub river_order: u8,
     pub state: ObservedBridgeStateDto,
     pub started_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]

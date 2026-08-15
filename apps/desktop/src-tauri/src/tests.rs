@@ -1238,6 +1238,12 @@ mod river_spans {
             bridge_key: key.into(),
             bridge_name: key.to_uppercase(),
             relation: BridgeRelationDto::Upstream,
+            river_order: match key {
+                "sw_2_ave" => 1,
+                "sw_1_st" => 2,
+                "w_flagler" => 3,
+                _ => 9,
+            },
             state,
             started_at: started_at.into(),
             ended_at: ended_at.map(Into::into),

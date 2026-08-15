@@ -12,6 +12,8 @@
     key: string;
     name: string;
     relation: 'target' | 'upstream';
+    /** Position upstream from Brickell; the engine owns this ordering. */
+    riverOrder: number;
     state: SpanState;
     since?: string;
   }
@@ -66,18 +68,16 @@
         key: interval.bridgeKey,
         name: interval.bridgeName,
         relation: interval.relation,
+        riverOrder: interval.riverOrder ?? 0,
         // A closed-out interval describes history, not the present. Only an
         // open-ended one lets us claim the span is up right now.
         state: (interval.endedAt ? 'down' : interval.state) as SpanState,
         since: interval.endedAt ? undefined : interval.startedAt
       }))
-      .sort((left, right) =>
-        left.relation === right.relation
-          ? left.name.localeCompare(right.name)
-          : left.relation === 'target'
-            ? -1
-            : 1
-      );
+      // River order, not alphabetical. With eight spans an alphabetical list
+      // puts NW 12 Ave before SW 2 Ave and destroys the one property that makes
+      // the row readable: an opening propagating along it is a vessel under way.
+      .sort((left, right) => left.riverOrder - right.riverOrder);
   });
 
   const target = $derived(spans.find((span) => span.relation === 'target') ?? null);

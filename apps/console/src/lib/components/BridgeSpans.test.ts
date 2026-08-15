@@ -13,14 +13,30 @@ function interval(overrides: Partial<BridgeStateInterval> = {}): BridgeStateInte
     bridgeKey: 'brickell',
     bridgeName: 'Brickell Avenue Bridge',
     relation: 'target',
+    riverOrder: 0,
     state: 'down',
     startedAt: '2026-08-15T17:00:00Z',
     ...overrides
   };
 }
 
+const RIVER_ORDER: Record<string, number> = {
+  brickell: 0,
+  sw_2_ave: 1,
+  sw_1_st: 2,
+  w_flagler: 3,
+  nw_5_st: 4,
+  nw_12_ave: 5
+};
+
 function upstream(key: string, name: string, extra: Partial<BridgeStateInterval> = {}) {
-  return interval({ bridgeKey: key, bridgeName: name, relation: 'upstream', ...extra });
+  return interval({
+    bridgeKey: key,
+    bridgeName: name,
+    relation: 'upstream',
+    riverOrder: RIVER_ORDER[key] ?? 9,
+    ...extra
+  });
 }
 
 afterEach(cleanup);
@@ -100,5 +116,25 @@ describe('BridgeSpans', () => {
   it('renders with no intervals at all', () => {
     render(BridgeSpans, { intervals: [], localTimeZone: ZONE });
     expect(screen.getByLabelText('Miami River bascule spans')).toBeTruthy();
+  });
+
+  it('lists upstream spans in river order, not alphabetical order', () => {
+    // Alphabetically NW 12 Ave precedes SW 2 Ave, which would scramble the one
+    // property that makes the row readable: an opening walking along it is a
+    // vessel under way.
+    render(BridgeSpans, {
+      intervals: [
+        interval({ state: 'down' }),
+        upstream('nw_12_ave', 'NW 12 Ave'),
+        upstream('sw_2_ave', 'SW 2 Ave'),
+        upstream('nw_5_st', 'NW 5 St'),
+        upstream('sw_1_st', 'SW 1 St')
+      ],
+      localTimeZone: ZONE
+    });
+    const names = Array.from(document.querySelectorAll('.upstream li strong')).map(
+      (node) => node.textContent
+    );
+    expect(names).toEqual(['SW 2 Ave', 'SW 1 St', 'NW 5 St', 'NW 12 Ave']);
   });
 });

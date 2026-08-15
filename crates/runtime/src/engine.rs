@@ -1131,11 +1131,25 @@ fn update_bridge_transitions(
     }
 }
 
+/// Position in the river, counting upstream from the target.
+///
+/// Outbound detection reads a *decreasing* rank over time as a vessel working
+/// downriver toward Brickell, so this ordering is load-bearing: get it wrong and
+/// an outbound convoy reads as inbound. Ranks follow the FL511 longitudes, which
+/// run monotonically west as the river climbs.
+///
+/// South Miami Avenue would sit between Brickell and SW 2 Ave, but FL511 does
+/// not publish it, so the sequence steps over an opening we never observe.
 fn upstream_rank(bridge_key: &str) -> Option<u8> {
     match bridge_key {
-        "w_flagler" => Some(3),
-        "sw_1_st" => Some(2),
         "sw_2_ave" => Some(1),
+        "sw_1_st" => Some(2),
+        "w_flagler" => Some(3),
+        "nw_5_st" => Some(4),
+        "nw_12_ave" => Some(5),
+        "nw_17_ave" => Some(6),
+        "nw_22_ave" => Some(7),
+        "nw_27_ave" => Some(8),
         _ => None,
     }
 }
@@ -1681,7 +1695,9 @@ fn bridge_interval_dto(
             ));
         }
     };
+    let river_order = upstream_rank(&interval.bridge_key).unwrap_or(0);
     Ok(BridgeStateIntervalDto {
+        river_order,
         source_id: interval.source_id,
         bridge_key: interval.bridge_key,
         bridge_name: interval.bridge_name,

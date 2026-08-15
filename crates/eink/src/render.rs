@@ -68,16 +68,32 @@ pub fn render_snapshot(
     };
     draw_evidence(&mut frame, snapshot, evidence_lines);
     if !spans.is_empty() {
-        draw_spans(&mut frame, spans);
+        draw_spans(&mut frame, &spans);
     }
     draw_source_tape(&mut frame, snapshot, config.show_source_age);
     draw_rail(&mut frame, snapshot, config);
     Ok(frame)
 }
 
-fn spans_to_draw(snapshot: &LiveSnapshot) -> &[SpanStatus] {
-    let count = snapshot.spans.len().min(2);
-    &snapshot.spans[..count]
+/// Picks the two upstream spans worth the row.
+///
+/// The river carries eight bascules upstream of Brickell and the panel has room
+/// for two, so the choice is the message. An open span is the news -- it is
+/// evidence of a vessel under way right now -- and the nearest open one is the
+/// most imminent. Falling back to the nearest spans keeps the row stable and
+/// legible when nothing is moving. Callers supply spans in river order.
+fn spans_to_draw(snapshot: &LiveSnapshot) -> Vec<&SpanStatus> {
+    let mut chosen: Vec<&SpanStatus> = snapshot.spans.iter().filter(|span| span.open).collect();
+    for span in &snapshot.spans {
+        if chosen.len() >= 2 {
+            break;
+        }
+        if !span.open {
+            chosen.push(span);
+        }
+    }
+    chosen.truncate(2);
+    chosen
 }
 
 /// Double-leaf bascule glyph in a 78x24 box anchored at `x, y`.
@@ -124,7 +140,7 @@ fn draw_bascule(frame: &mut MonoFrame, x: i32, y: i32, open: bool, color: Binary
     }
 }
 
-fn draw_spans(frame: &mut MonoFrame, spans: &[SpanStatus]) {
+fn draw_spans(frame: &mut MonoFrame, spans: &[&SpanStatus]) {
     let top = 91;
     for (index, span) in spans.iter().enumerate() {
         let x = 5 + i32::try_from(index).unwrap_or(0) * 112;
@@ -402,20 +418,49 @@ mod tests {
 
     #[test]
     fn at_most_two_spans_are_drawn() {
+        // Eight bascules upstream, room for two. Extra closed spans must not
+        // change the frame, and must not panic on the slice.
         let mut two = snapshot(SnapshotState::Clear);
         two.confidence_percent = None;
         two.spans = vec![SpanStatus::new("2AV", false), SpanStatus::new("1ST", false)];
-        let mut four = two.clone();
-        four.spans
-            .push(SpanStatus::new("FLG", true).opened_at("10:00"));
-        four.spans
-            .push(SpanStatus::new("5ST", true).opened_at("10:02"));
+        let mut many = two.clone();
+        many.spans.push(SpanStatus::new("FLG", false));
+        many.spans.push(SpanStatus::new("5ST", false));
 
-        // Extra spans have nowhere to go on a 250x122 panel; dropping them must
-        // not change the frame, and must not panic on the slice.
         let two = render_snapshot(&two, &RenderConfig::default()).unwrap();
-        let four = render_snapshot(&four, &RenderConfig::default()).unwrap();
-        assert_eq!(two.packed(), four.packed());
+        let many = render_snapshot(&many, &RenderConfig::default()).unwrap();
+        assert_eq!(two.packed(), many.packed());
+    }
+
+    #[test]
+    fn an_open_span_displaces_a_nearer_closed_one() {
+        // A span that is up is evidence of a vessel under way; a span that is
+        // down is not news. With only two slots, showing two closed spans while
+        // an open one exists further upriver hides the only useful reading.
+        let mut base = snapshot(SnapshotState::Clear);
+        base.confidence_percent = None;
+
+        let mut nearest_two_closed = base.clone();
+        nearest_two_closed.spans = vec![
+            SpanStatus::new("2AV", false),
+            SpanStatus::new("1ST", false),
+            SpanStatus::new("FLG", false),
+        ];
+        let mut one_open_upriver = base.clone();
+        one_open_upriver.spans = vec![
+            SpanStatus::new("2AV", false),
+            SpanStatus::new("1ST", false),
+            SpanStatus::new("FLG", true).opened_at("10:00"),
+        ];
+
+        let closed = render_snapshot(&nearest_two_closed, &RenderConfig::default()).unwrap();
+        let opened = render_snapshot(&one_open_upriver, &RenderConfig::default()).unwrap();
+        assert_ne!(
+            closed.packed(),
+            opened.packed(),
+            "an open upstream span must reach the panel"
+        );
+        assert!(opened.black_pixel_count() > closed.black_pixel_count());
     }
 
     #[test]
