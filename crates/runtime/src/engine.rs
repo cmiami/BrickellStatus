@@ -1849,27 +1849,28 @@ fn bridge_interval_dto(
     })
 }
 
+/// Label, meaning, and action for each state.
+///
+/// None of these name a source. Which feed produced the reading is not the
+/// driver's problem, and putting it in the copy is how it ends up on every
+/// surface after being deliberately removed from the panels.
 fn decision_copy(state: BridgeStateDto) -> (&'static str, &'static str, &'static str) {
     match state {
-        BridgeStateDto::Clear => (
-            "No opening likely",
-            "No current predictive evidence points to an opening.",
-            "No opening activity is currently detected.",
-        ),
+        BridgeStateDto::Clear => ("Road open", "No opening expected.", "Traffic is moving."),
         BridgeStateDto::Possible => (
-            "Opening possible",
-            "The legal window or weak evidence makes an opening possible, not predicted.",
-            "Schedule context is present; predictive evidence remains below the alert threshold.",
+            "Watch",
+            "An opening is possible but not predicted.",
+            "Nothing to do yet.",
         ),
         BridgeStateDto::Likely => (
             "Opening likely",
-            "Current predictive evidence indicates a meaningful opening risk.",
-            "Predictive evidence is above the Likely threshold.",
+            "An opening is expected shortly.",
+            "Consider another route.",
         ),
         BridgeStateDto::Open => (
             "Bridge open",
-            "Florida 511 reports the span open to marine traffic.",
-            "Florida 511 reports the roadway span open for marine traffic.",
+            "The span is up.",
+            "Road blocked. Take another route.",
         ),
     }
 }

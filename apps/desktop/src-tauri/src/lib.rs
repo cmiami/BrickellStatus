@@ -440,6 +440,40 @@ impl DisplayController {
         Ok(status)
     }
 
+    /// Frees the serial interface so the flasher can take it.
+    ///
+    /// Flashing drives the same USB CDC device the display transport holds
+    /// open, and macOS hands that out exclusively: leaving the connection up
+    /// makes espflash fail immediately with "Device or resource busy".
+    /// Automatic reconnect is suppressed for the same reason -- a background
+    /// reconnect that wins the port mid-write would leave a half-written
+    /// bootloader, which is the one outcome that actually bricks the board.
+    ///
+    /// Returns whether a display was connected, so it can be restored after.
+    async fn release_port_for_flash(&self) -> bool {
+        let was_connected = self.active.read().await.is_some();
+        let _ = self.disconnect(true).await;
+        was_connected
+    }
+
+    /// Restores the display connection after flashing.
+    async fn restore_port_after_flash(&self, preferences: &AppPreferences) {
+        self.automatic_reconnect.store(true, Ordering::Relaxed);
+        let _ = self.reconnect_preferred(preferences).await;
+    }
+
+    /// Whether a connected USB display already announced itself.
+    ///
+    /// Reusing the live connection's observation avoids opening the port a
+    /// second time just to ask a question it already answered, which would
+    /// contend with the transport on every status poll.
+    async fn usb_ready_observed(&self) -> Option<bool> {
+        match self.active.read().await.as_ref() {
+            Some(ActiveDisplay::Usb { ready_observed, .. }) => Some(*ready_observed),
+            _ => None,
+        }
+    }
+
     async fn disconnect_locked(&self) -> Result<(), String> {
         let active = self.active.write().await.take();
         *self.last_frame.lock().await = None;
@@ -715,7 +749,11 @@ fn firmware_root(app: &AppHandle) -> Option<std::path::PathBuf> {
 /// be: both builds run on the same ESP32-S3 with the same USB identifiers, and
 /// only the physical display differs, so the variant stays an operator choice.
 #[tauri::command]
-async fn get_firmware_status(app: AppHandle) -> Result<FirmwareStatus, String> {
+async fn get_firmware_status(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<FirmwareStatus, String> {
+    let connected_ready = state.display.usb_ready_observed().await;
     let devices = bridgestatus_eink::transport::discover_espressif_devices()
         .await
         .unwrap_or_default();
@@ -755,6 +793,13 @@ async fn get_firmware_status(app: AppHandle) -> Result<FirmwareStatus, String> {
     // reading: it works, and we cannot say which build it is.
     let banner = match port.as_deref() {
         None => None,
+        // A connected display already answered this question when it connected,
+        // so reuse that rather than opening the port a second time and
+        // contending with the transport on every status poll.
+        Some(_) if connected_ready.is_some() => Some(firmware::DeviceBanner {
+            saw_ready: connected_ready.unwrap_or(false),
+            build: None,
+        }),
         Some(port) => {
             let transport = bridgestatus_eink::transport::UsbTransport::new(
                 bridgestatus_eink::transport::UsbConfig {
@@ -797,7 +842,12 @@ async fn get_firmware_status(app: AppHandle) -> Result<FirmwareStatus, String> {
 
 /// Writes a bundled variant to the attached board, emitting progress events.
 #[tauri::command]
-async fn flash_firmware(app: AppHandle, variant_id: String, port: String) -> Result<(), String> {
+async fn flash_firmware(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    variant_id: String,
+    port: String,
+) -> Result<(), String> {
     let root = firmware_root(&app).ok_or("this build ships no firmware")?;
     let bundle = firmware::FirmwareBundle::load(&root).map_err(|error| error.to_string())?;
     let variant = bundle
@@ -805,10 +855,21 @@ async fn flash_firmware(app: AppHandle, variant_id: String, port: String) -> Res
         .ok_or_else(|| format!("unknown firmware variant {variant_id:?}"))?
         .clone();
 
+    // The display transport holds this same USB CDC device open and macOS hands
+    // it out exclusively, so flashing while connected fails instantly with
+    // "Device or resource busy". Release it first, and keep automatic reconnect
+    // suppressed: a reconnect that wins the port mid-write would leave a
+    // half-written bootloader, which is the one outcome that truly bricks the
+    // board.
+    let was_connected = state.display.release_port_for_flash().await;
+    // The kernel does not always free the descriptor the instant the handle
+    // drops; espflash sees the stale one and reports it busy.
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
     // espflash drives the serial bootloader synchronously and a flash takes
     // tens of seconds, so it must not run on the async runtime.
     let emitter = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
         let mut progress = EmitProgress {
             app: emitter,
             total: variant.total_bytes(),
@@ -818,8 +879,15 @@ async fn flash_firmware(app: AppHandle, variant_id: String, port: String) -> Res
         firmware::flash_variant(&port, &variant, &mut progress)
     })
     .await
-    .map_err(|error| error.to_string())?
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+
+    // Restore the display whether or not the flash worked. A failed flash that
+    // also leaves the display disconnected turns one problem into two.
+    if was_connected {
+        let preferences = state.engine.get_preferences().await;
+        state.display.restore_port_after_flash(&preferences).await;
+    }
+    outcome.map_err(|error| error.to_string())
 }
 
 struct EmitProgress {

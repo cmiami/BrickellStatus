@@ -65,8 +65,12 @@
               <span class="status-word" data-state={strip.availability}>{strip.availability}</span>
             </div>
             <p>{strip.detail}</p>
+            <!--
+              The feed behind a reading is not shown. It is not the driver's
+              problem, and naming it here is how it reappears on every surface
+              after being taken off the panels.
+            -->
             <div class="strip-meta">
-              <span>{strip.sourceLabel}</span>
               <time datetime={strip.observedAt}>{formatTime(strip.observedAt)}</time>
               <span>Age {formatAge(strip.ageSeconds)}</span>
               {#if strip.contributionBps != null}
