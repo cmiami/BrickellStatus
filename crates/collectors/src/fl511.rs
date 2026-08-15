@@ -159,6 +159,32 @@ pub struct Fl511LayerEntry {
     pub state_hint: BridgeState,
 }
 
+/// What a previous poll established about one selector.
+///
+/// FL511 charges a tooltip request per bridge per poll, and the identity half
+/// of that answer never changes: bridges do not move or get renamed. Only the
+/// status does, and the layer already carries it in the marker icon. Caching
+/// the identity turns a steady-state poll into a single layer request.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct ResolvedBridge {
+    item_id: String,
+    name: String,
+    /// Last state confirmed from a tooltip.
+    state: BridgeState,
+    /// Layer hint that accompanied that confirmation, so a later poll can tell
+    /// whether anything actually moved.
+    hint: BridgeState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    roadway: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    location: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    county: Option<String>,
+}
+
+/// Cursor metadata key holding the resolved selector map.
+const RESOLVED_BRIDGES_KEY: &str = "resolved_bridges";
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct BridgeTooltip {
     pub name: String,
@@ -389,10 +415,39 @@ impl Fl511BridgeCollector {
     async fn discover(
         &self,
         entries: &[Fl511LayerEntry],
+        cache: &mut BTreeMap<String, ResolvedBridge>,
     ) -> Result<(Vec<Fl511Discovery>, Vec<&BridgeSelector>), CollectorError> {
         let mut discoveries = Vec::new();
         let mut missing = Vec::new();
         for selector in &self.config.bridges {
+            // A selector already resolved to a marker that is still present in
+            // the layer, showing the same icon it showed when the tooltip last
+            // confirmed it, has not changed. Re-reading the tooltip would spend
+            // a request to be told what the layer already said.
+            if let Some(resolved) = cache.get(&selector.key)
+                && let Some((entry, distance_meters)) =
+                    layer_entry(entries, &resolved.item_id, selector)
+                && entry.state_hint == resolved.hint
+            {
+                discoveries.push(Fl511Discovery {
+                    selector_key: selector.key.clone(),
+                    relation: selector.relation,
+                    item_id: resolved.item_id.clone(),
+                    name: resolved.name.clone(),
+                    state: resolved.state,
+                    state_hint: entry.state_hint,
+                    state_conflict: false,
+                    roadway: resolved.roadway.clone(),
+                    location: resolved.location.clone(),
+                    county: resolved.county.clone(),
+                    latitude: entry.latitude,
+                    longitude: entry.longitude,
+                    distance_meters,
+                    tooltip_url: self.tooltip_url(&resolved.item_id)?,
+                });
+                continue;
+            }
+
             let mut candidates: Vec<_> = entries
                 .iter()
                 .filter_map(|entry| {
@@ -450,8 +505,23 @@ impl Fl511BridgeCollector {
                 }
             }
             if let Some(found) = found {
+                cache.insert(
+                    selector.key.clone(),
+                    ResolvedBridge {
+                        item_id: found.item_id.clone(),
+                        name: found.name.clone(),
+                        state: found.state,
+                        hint: found.state_hint,
+                        roadway: found.roadway.clone(),
+                        location: found.location.clone(),
+                        county: found.county.clone(),
+                    },
+                );
                 discoveries.push(found);
             } else {
+                // A selector that no longer resolves must not keep answering
+                // from a stale cache entry on the next poll.
+                cache.remove(&selector.key);
                 missing.push(selector);
             }
         }
@@ -496,7 +566,15 @@ impl Collector for Fl511BridgeCollector {
                 collector: "fl511",
                 detail: error.to_string(),
             })?;
-        let (discoveries, missing) = self.discover(&entries).await?;
+        // The resolved-selector map rides on the cursor so it survives restarts
+        // and costs nothing to carry.
+        let mut cache: BTreeMap<String, ResolvedBridge> = context
+            .cursor
+            .as_ref()
+            .and_then(|cursor| cursor.metadata.get(RESOLVED_BRIDGES_KEY))
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_default();
+        let (discoveries, missing) = self.discover(&entries, &mut cache).await?;
         let has_unknown = discoveries
             .iter()
             .any(|bridge| bridge.state == BridgeState::Unknown);
@@ -528,7 +606,15 @@ impl Collector for Fl511BridgeCollector {
                     )
                 }),
             },
-            cursor: response.cursor,
+            cursor: {
+                let mut cursor = response.cursor;
+                if let Ok(encoded) = serde_json::to_string(&cache) {
+                    cursor
+                        .metadata
+                        .insert(RESOLVED_BRIDGES_KEY.into(), encoded);
+                }
+                cursor
+            },
             not_modified: false,
         })
     }
@@ -575,6 +661,23 @@ fn discovery_item(bridge: Fl511Discovery) -> CollectorItem {
         },
         attributes,
     }
+}
+
+/// Finds a previously resolved marker in the current layer, if it is still
+/// within the selector's radius.
+fn layer_entry<'a>(
+    entries: &'a [Fl511LayerEntry],
+    item_id: &str,
+    selector: &BridgeSelector,
+) -> Option<(&'a Fl511LayerEntry, f64)> {
+    let entry = entries.iter().find(|entry| entry.item_id == item_id)?;
+    let distance = haversine_meters(
+        selector.latitude,
+        selector.longitude,
+        entry.latitude,
+        entry.longitude,
+    );
+    (distance <= selector.search_radius_meters).then_some((entry, distance))
 }
 
 fn reconcile_bridge_state(
@@ -630,6 +733,138 @@ mod tests {
     use super::*;
     use crate::FetchResponse;
     use std::sync::Mutex;
+
+    /// Counts tooltip requests so a test can assert on FL511 load, and can
+    /// flip the layer icon to simulate a bridge actually moving.
+    struct CountingFetcher {
+        tooltip_requests: Mutex<usize>,
+        layer_requests: Mutex<usize>,
+        brickell_up: Mutex<bool>,
+    }
+
+    impl CountingFetcher {
+        fn new() -> Self {
+            Self {
+                tooltip_requests: Mutex::new(0),
+                layer_requests: Mutex::new(0),
+                brickell_up: Mutex::new(true),
+            }
+        }
+
+        fn tooltips(&self) -> usize {
+            *self.tooltip_requests.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl HttpFetcher for CountingFetcher {
+        async fn get(
+            &self,
+            url: &Url,
+            _cursor: Option<&CollectorCursor>,
+            _headers: &[(&str, &str)],
+        ) -> Result<FetchResponse, CollectorError> {
+            let body = match url.path() {
+                "/map/mapIcons/Bridge" => {
+                    *self.layer_requests.lock().unwrap() += 1;
+                    let icon = if *self.brickell_up.lock().unwrap() {
+                        "map_drawBridgeUp.svg"
+                    } else {
+                        "map_drawBridgeDown.svg"
+                    };
+                    format!(
+                        r#"{{"item2":[
+                          {{"itemId":"253","location":[25.7699,-80.19005],
+                            "icon":{{"url":"/x/{icon}"}},"title":""}}
+                        ]}}"#
+                    )
+                    .into_bytes()
+                }
+                path if path.starts_with("/tooltip/Bridge/") => {
+                    *self.tooltip_requests.lock().unwrap() += 1;
+                    if *self.brickell_up.lock().unwrap() {
+                        include_bytes!("../fixtures/fl511-tooltip-brickell-up.html").to_vec()
+                    } else {
+                        include_bytes!("../fixtures/fl511-tooltip-brickell-down.html").to_vec()
+                    }
+                }
+                path => panic!("unexpected request for {path}"),
+            };
+            Ok(FetchResponse {
+                status: 200,
+                final_url: url.clone(),
+                body,
+                cursor: CollectorCursor::default(),
+                not_modified: false,
+                content_type: None,
+            })
+        }
+    }
+
+    fn brickell_only_config() -> Fl511Config {
+        let mut config = Fl511Config::brickell_and_upstream();
+        config
+            .bridges
+            .retain(|selector| selector.relation == BridgeRelation::Target);
+        config
+    }
+
+    #[tokio::test]
+    async fn a_settled_bridge_costs_no_tooltip_request() {
+        // FL511 is a public DOT service and this app polls it every 15 seconds.
+        // Identity never changes and the layer already carries the status, so a
+        // poll where nothing moved must not spend a tooltip request per bridge.
+        let fetcher = Arc::new(CountingFetcher::new());
+        let collector =
+            Fl511BridgeCollector::with_fetcher(brickell_only_config(), fetcher.clone()).unwrap();
+
+        let first = collector.collect(&CollectContext::default()).await.unwrap();
+        assert_eq!(
+            fetcher.tooltips(),
+            1,
+            "the first poll must resolve identity"
+        );
+
+        let mut context = CollectContext {
+            cursor: Some(first.cursor),
+        };
+        for _ in 0..12 {
+            let batch = collector.collect(&context).await.unwrap();
+            context.cursor = Some(batch.cursor);
+        }
+        assert_eq!(
+            fetcher.tooltips(),
+            1,
+            "twelve settled polls must not re-request a tooltip"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bridge_that_moves_is_reconfirmed_from_its_tooltip() {
+        // The cache must not paper over a real transition: a changed icon is
+        // exactly when the tooltip cross-check earns its request.
+        let fetcher = Arc::new(CountingFetcher::new());
+        let collector =
+            Fl511BridgeCollector::with_fetcher(brickell_only_config(), fetcher.clone()).unwrap();
+
+        let first = collector.collect(&CollectContext::default()).await.unwrap();
+        let mut context = CollectContext {
+            cursor: Some(first.cursor),
+        };
+        let settled = collector.collect(&context).await.unwrap();
+        context.cursor = Some(settled.cursor);
+        assert_eq!(fetcher.tooltips(), 1);
+
+        *fetcher.brickell_up.lock().unwrap() = false;
+        let moved = collector.collect(&context).await.unwrap();
+        assert_eq!(
+            fetcher.tooltips(),
+            2,
+            "a changed layer icon must trigger one confirmation"
+        );
+        let state = moved.items[0].attributes.get("state").unwrap();
+        assert_eq!(state, &json!(BridgeState::Down));
+    }
 
     struct FixtureFetcher {
         seen_cursors: Mutex<Vec<Option<CollectorCursor>>>,

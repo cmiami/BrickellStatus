@@ -678,6 +678,193 @@ pub fn set_e213_transport_status(app: &AppHandle, status: DisplayConnectionStatu
     }
 }
 
+/// What the app knows about firmware on an attached board, for the UI.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirmwareStatus {
+    /// Serial port of the attached Espressif board, when one is present.
+    pub port: Option<String>,
+    /// Build this app ships, when it ships one.
+    pub bundled_build: Option<String>,
+    /// Variants available to flash.
+    pub variants: Vec<FirmwareVariantSummary>,
+    /// Whether the operator should be prompted, and why.
+    pub requirement: firmware::FlashRequirement,
+    /// Why firmware is unavailable, when it is.
+    pub unavailable: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirmwareVariantSummary {
+    pub id: String,
+    pub label: String,
+    pub panel_revision: firmware::PanelRevision,
+    pub total_bytes: usize,
+}
+
+fn firmware_root(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .resolve("firmware", tauri::path::BaseDirectory::Resource)
+        .ok()
+}
+
+/// Reports whether an attached board needs the bundled firmware.
+///
+/// Detection of the board is automatic. The panel revision is not and cannot
+/// be: both builds run on the same ESP32-S3 with the same USB identifiers, and
+/// only the physical display differs, so the variant stays an operator choice.
+#[tauri::command]
+async fn get_firmware_status(app: AppHandle) -> Result<FirmwareStatus, String> {
+    let devices = bridgestatus_eink::transport::discover_espressif_devices()
+        .await
+        .unwrap_or_default();
+    let port = devices.first().map(|device| device.port.clone());
+
+    let Some(root) = firmware_root(&app) else {
+        return Ok(FirmwareStatus {
+            port,
+            bundled_build: None,
+            variants: Vec::new(),
+            requirement: firmware::FlashRequirement::NoDevice,
+            unavailable: Some("this build ships no firmware".into()),
+        });
+    };
+
+    let bundle = match firmware::FirmwareBundle::load(&root) {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            return Ok(FirmwareStatus {
+                port,
+                bundled_build: None,
+                variants: Vec::new(),
+                requirement: firmware::FlashRequirement::NoDevice,
+                unavailable: Some(error.to_string()),
+            });
+        }
+    };
+
+    // Enumeration alone cannot say whether the board is running our firmware,
+    // only that something Espressif is attached. Opening the port and waiting
+    // for the READY INK1 banner is the only way to tell a working device from a
+    // blank one, and a blank one is the case worth prompting about.
+    //
+    // The banner does not yet carry a build id in the field -- the firmware that
+    // reports one has not shipped to any device -- so a board that answers is
+    // reported as an unknown build rather than as matching. That is the honest
+    // reading: it works, and we cannot say which build it is.
+    let banner = match port.as_deref() {
+        None => None,
+        Some(port) => {
+            let transport = bridgestatus_eink::transport::UsbTransport::new(
+                bridgestatus_eink::transport::UsbConfig {
+                    port: Some(port.to_owned()),
+                    ..Default::default()
+                },
+            );
+            let ready = transport
+                .ensure_connected()
+                .await
+                .map(|info| info.ready_observed)
+                .unwrap_or(false);
+            transport.disconnect().await;
+            Some(firmware::DeviceBanner {
+                saw_ready: ready,
+                build: None,
+            })
+        }
+    };
+    let requirement =
+        firmware::evaluate_flash_requirement(banner.as_ref(), bundle.source_revision.as_deref());
+
+    Ok(FirmwareStatus {
+        port,
+        bundled_build: bundle.source_revision.clone(),
+        variants: bundle
+            .variants()
+            .iter()
+            .map(|variant| FirmwareVariantSummary {
+                id: variant.id.clone(),
+                label: variant.label.clone(),
+                panel_revision: variant.panel_revision,
+                total_bytes: variant.total_bytes(),
+            })
+            .collect(),
+        requirement,
+        unavailable: None,
+    })
+}
+
+/// Writes a bundled variant to the attached board, emitting progress events.
+#[tauri::command]
+async fn flash_firmware(app: AppHandle, variant_id: String, port: String) -> Result<(), String> {
+    let root = firmware_root(&app).ok_or("this build ships no firmware")?;
+    let bundle = firmware::FirmwareBundle::load(&root).map_err(|error| error.to_string())?;
+    let variant = bundle
+        .variant(&variant_id)
+        .ok_or_else(|| format!("unknown firmware variant {variant_id:?}"))?
+        .clone();
+
+    // espflash drives the serial bootloader synchronously and a flash takes
+    // tens of seconds, so it must not run on the async runtime.
+    let emitter = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut progress = EmitProgress {
+            app: emitter,
+            total: variant.total_bytes(),
+            done: 0,
+            current: 0,
+        };
+        firmware::flash_variant(&port, &variant, &mut progress)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
+
+struct EmitProgress {
+    app: AppHandle,
+    total: usize,
+    done: usize,
+    current: usize,
+}
+
+impl EmitProgress {
+    fn emit(&self, stage: &str) {
+        let written = self.done + self.current;
+        let _ = self.app.emit(
+            "firmware://progress",
+            serde_json::json!({
+                "stage": stage,
+                "written": written,
+                "total": self.total,
+            }),
+        );
+    }
+}
+
+impl firmware::FlashProgress for EmitProgress {
+    fn segment_started(&mut self, _offset: u32, _total: usize) {
+        self.current = 0;
+        self.emit("writing");
+    }
+
+    fn segment_advanced(&mut self, written: usize) {
+        self.current = written;
+        self.emit("writing");
+    }
+
+    fn verifying(&mut self) {
+        self.emit("verifying");
+    }
+
+    fn segment_finished(&mut self, _skipped: bool) {
+        self.done += self.current;
+        self.current = 0;
+        self.emit("writing");
+    }
+}
+
 #[tauri::command]
 fn get_display_status(state: State<'_, E213TrayState>) -> DisplayConnectionStatus {
     state
@@ -2323,6 +2510,8 @@ pub fn run() {
             disconnect_display_device,
             send_display_test_frame,
             get_eink_preview,
+            get_firmware_status,
+            flash_firmware,
             set_whatsapp_token,
             clear_whatsapp_token,
             set_aisstream_api_key,

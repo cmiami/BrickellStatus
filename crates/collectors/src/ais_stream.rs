@@ -173,6 +173,15 @@ impl AisStreamSubscription {
 pub struct AisStreamConfig {
     api_key: AisStreamApiKey,
     subscription: AisStreamSubscription,
+    /// Oldest position report still treated as describing the present.
+    ///
+    /// This has to clear the transmitter's own reporting interval or the
+    /// vessels that matter most are structurally invisible. Class B carriage --
+    /// the yachts and sailboats behind most Brickell openings -- reports every
+    /// three minutes below two knots, and Class A drops to three minutes at
+    /// anchor or moored. A vessel *stopped and waiting at the bridge* is
+    /// therefore the slowest reporter there is, and a window shorter than its
+    /// interval discards it every time.
     max_report_age: Duration,
     track_retention: Duration,
     history_retention: Duration,
@@ -186,8 +195,10 @@ impl AisStreamConfig {
         Self {
             api_key,
             subscription,
-            max_report_age: Duration::from_secs(60),
-            track_retention: Duration::from_secs(60),
+            // Twice the three-minute Class B interval, so a queued vessel
+            // survives a missed report rather than vanishing between them.
+            max_report_age: Duration::from_secs(6 * 60),
+            track_retention: Duration::from_secs(6 * 60),
             history_retention: Duration::from_secs(60 * 60),
             idle_timeout: Duration::from_secs(90),
             reconnect_initial: Duration::from_secs(1),

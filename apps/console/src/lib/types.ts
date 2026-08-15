@@ -298,3 +298,31 @@ export interface EinkPreview {
   channelId: string;
   png: number[];
 }
+
+export type PanelRevision = 'original' | 'v11';
+
+export type FlashRequirement =
+  | { state: 'noDevice' }
+  | { state: 'upToDate'; build: string }
+  | { state: 'unknownBuild' }
+  | {
+      state: 'required';
+      reason:
+        | { kind: 'notResponding' }
+        | { kind: 'buildMismatch'; device: string; bundled: string };
+    };
+
+export interface FirmwareVariantSummary {
+  id: string;
+  label: string;
+  panelRevision: PanelRevision;
+  totalBytes: number;
+}
+
+export interface FirmwareStatus {
+  port?: string;
+  bundledBuild?: string;
+  variants: FirmwareVariantSummary[];
+  requirement: FlashRequirement;
+  unavailable?: string;
+}

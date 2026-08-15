@@ -3,6 +3,7 @@
 
   import '../app.css';
   import AppNav from '$lib/components/AppNav.svelte';
+  import FirmwarePrompt from '$lib/components/FirmwarePrompt.svelte';
   import TopBar from '$lib/components/TopBar.svelte';
   import { openExternalUrl } from '$lib/api';
   import { loadApp, startSnapshotRefresh, stopSnapshotRefresh, loadError, notice } from '$lib/state';
@@ -58,6 +59,10 @@
 
   {@render children()}
 </main>
+
+<!-- Sits outside the page flow so a connected board is offered firmware
+     wherever the operator happens to be. -->
+<FirmwarePrompt />
 
 <style>
   .app-main {
