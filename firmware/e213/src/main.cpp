@@ -240,8 +240,12 @@ void setup() {
   Serial.setTimeout(50);
   drawWaitingScreen();
   setupBle();
-  Serial.printf("READY INK1 %ux%u %u\n", kWidth, kHeight,
-                static_cast<unsigned>(kPayloadSize));
+  // The build id lets the host tell whether the device is running the firmware
+  // the app ships. Without it a working board can only be reported as "unknown
+  // build", never as up to date, so the app would have no basis for offering a
+  // flash and no basis for staying quiet.
+  Serial.printf("READY INK1 %ux%u %u %s\n", kWidth, kHeight,
+                static_cast<unsigned>(kPayloadSize), TENDERS_LOG_BUILD_ID);
 }
 
 void loop() {

@@ -1,5 +1,6 @@
 //! Native Tender's Log companion: runtime, tray lifetime, delivery, and E213 I/O.
 
+pub mod firmware;
 mod secret_store;
 
 use std::{

@@ -20,6 +20,9 @@ bridgestatus-eink = { path = "../../../crates/eink" }
 bridgestatus-runtime = { path = "../../../crates/runtime" }
 dotenvy.workspace = true
 jiff.workspace = true
+espflash.workspace = true
+serialport.workspace = true
+thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
