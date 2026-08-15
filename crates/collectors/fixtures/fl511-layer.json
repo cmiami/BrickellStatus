@@ -1,0 +1,36 @@
+{
+  "item1": {
+    "size": [29, 35],
+    "origin": [0, 0],
+    "anchor": [14, 34],
+    "zindex": 0,
+    "preventClustering": false,
+    "isClickable": true
+  },
+  "item2": [
+    {
+      "itemId": "253",
+      "location": [25.7699, -80.19005],
+      "icon": {"url": "/Generated/Content/Images/511/map_drawBridgeUp.svg"},
+      "title": ""
+    },
+    {
+      "itemId": "261",
+      "location": [25.768907, -80.197552],
+      "icon": {"url": "/Generated/Content/Images/511/map_drawBridgeDown.svg"},
+      "title": ""
+    },
+    {
+      "itemId": "264",
+      "location": [25.773038, -80.200591],
+      "icon": {"url": "/Generated/Content/Images/511/map_drawBridgeDown.svg"},
+      "title": ""
+    },
+    {
+      "itemId": "265",
+      "location": [25.774205, -80.201287],
+      "icon": {"url": "/Generated/Content/Images/511/map_drawBridgeDown.svg"},
+      "title": ""
+    }
+  ]
+}

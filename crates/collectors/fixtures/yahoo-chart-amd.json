@@ -1,0 +1,35 @@
+{
+  "chart": {
+    "result": [
+      {
+        "meta": {
+          "currency": "USD",
+          "symbol": "AMD",
+          "exchangeName": "NMS",
+          "fullExchangeName": "NasdaqGS",
+          "regularMarketPrice": 172.4,
+          "chartPreviousClose": 161.94,
+          "regularMarketTime": 1786741185,
+          "regularMarketDayHigh": 173.08,
+          "regularMarketDayLow": 164.21,
+          "regularMarketVolume": 48214538,
+          "exchangeDataDelayedBy": 15,
+          "currentTradingPeriod": {
+            "pre": { "start": 1786712400, "end": 1786732200 },
+            "regular": { "start": 1786732200, "end": 1786755600 },
+            "post": { "start": 1786755600, "end": 1786770000 }
+          }
+        },
+        "timestamp": [1786740600, 1786740900, 1786741200],
+        "indicators": {
+          "quote": [
+            {
+              "close": [171.92, null, 172.4]
+            }
+          ]
+        }
+      }
+    ],
+    "error": null
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Tender's Log",
+  "version": "../../console/package.json",
+  "identifier": "com.cmiami.puentegonorrea",
+  "build": {
+    "beforeDevCommand": {
+      "script": "npm run dev",
+      "cwd": "../../console"
+    },
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": {
+      "script": "npm run desktop:prepare",
+      "cwd": "../../console"
+    },
+    "frontendDist": "../../console/build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Tender's Log",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 960,
+        "minHeight": 680,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false,
+        "backgroundColor": "#DDE3E8"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: blob: https://tiles.openfreemap.org; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost https://tiles.openfreemap.org https://geocoding-api.open-meteo.com; font-src 'self' data:; worker-src blob:; child-src blob:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns"
+    ],
+    "resources": {
+      "resources/licenses/": "licenses/"
+    },
+    "copyright": "Copyright © 2026 PuenteGonorrea contributors",
+    "category": "Utility",
+    "shortDescription": "A configurable personal signal console.",
+    "longDescription": "Tender's Log monitors user-selected signals, predicts Brickell Avenue Bridge openings, and routes trusted updates to desktop, WhatsApp, and a Heltec E213 display.",
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "hardenedRuntime": true,
+      "infoPlist": "Info.plist",
+      "dmg": {
+        "background": "icons/dmg-background.png",
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        },
+        "appPosition": {
+          "x": 180,
+          "y": 210
+        },
+        "applicationFolderPosition": {
+          "x": 480,
+          "y": 210
+        }
+      }
+    }
+  }
+}

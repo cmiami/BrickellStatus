@@ -1,0 +1,40 @@
+{
+  "activeStorms": [
+    {
+      "id": "al092026",
+      "binNumber": "AT4",
+      "name": "Iris",
+      "classification": "TS",
+      "intensity": 50,
+      "pressure": 997,
+      "latitude": "21.4N",
+      "longitude": "71.2W",
+      "latitudeNumeric": 21.4,
+      "longitudeNumeric": -71.2,
+      "movementDir": 285,
+      "movementSpeed": 12,
+      "lastUpdate": "2026-08-14T21:00:00.000Z",
+      "publicAdvisory": {
+        "advNum": "010",
+        "issuance": "2026-08-14T21:00:00.000Z",
+        "fileUpdateTime": "2026-08-14T20:34:27.382Z",
+        "url": "https://www.nhc.noaa.gov/text/MIATCPAT4.shtml"
+      },
+      "forecastAdvisory": {
+        "advNum": "010",
+        "issuance": "2026-08-14T21:00:00.000Z",
+        "url": "https://www.nhc.noaa.gov/text/MIATCMAT4.shtml"
+      },
+      "forecastDiscussion": {
+        "advNum": "010",
+        "issuance": "2026-08-14T21:00:00.000Z",
+        "url": "https://www.nhc.noaa.gov/text/MIATCDAT4.shtml"
+      },
+      "forecastGraphics": {
+        "advNum": "010",
+        "issuance": "2026-08-14T21:00:00.000Z",
+        "url": "https://www.nhc.noaa.gov/graphics_at4.shtml"
+      }
+    }
+  ]
+}

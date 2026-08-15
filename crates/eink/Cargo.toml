@@ -1,0 +1,27 @@
+[package]
+name = "bridgestatus-eink"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Tender's Log monochrome renderer and E213 USB/BLE transport"
+
+[dependencies]
+async-trait.workspace = true
+btleplug = "0.12.0"
+crc32fast.workspace = true
+embedded-graphics = "0.8.1"
+futures.workspace = true
+image.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-serial = "5.5.0"
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"

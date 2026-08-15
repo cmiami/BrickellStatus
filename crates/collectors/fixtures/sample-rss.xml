@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Miami Signals</title>
+    <link>https://example.com/</link>
+    <description>Selected local updates</description>
+    <item>
+      <guid isPermaLink="false">maintenance-42</guid>
+      <title>Bridge maintenance update</title>
+      <link>https://example.com/maintenance-42</link>
+      <description><![CDATA[<p>Work is <strong>complete</strong> &amp; lanes are open.</p>]]></description>
+      <pubDate>Fri, 14 Aug 2026 20:00:00 GMT</pubDate>
+      <category>transportation</category>
+    </item>
+    <item>
+      <guid>https://example.com/weather-7</guid>
+      <title>Evening showers</title>
+      <description>Brief heavy rainfall is possible.</description>
+      <pubDate>Fri, 14 Aug 2026 21:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

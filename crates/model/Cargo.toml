@@ -1,0 +1,16 @@
+[package]
+name = "bridgestatus-model"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Transport-neutral domain models for the BridgeStatus signal console"
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"

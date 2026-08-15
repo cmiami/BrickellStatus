@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>NHC Atlantic</title>
+    <description>Active tropical cyclones in the Atlantic, Caribbean, and Gulf</description>
+    <link>https://www.nhc.noaa.gov/</link>
+    <item>
+      <title>Atlantic Tropical Weather Outlook</title>
+      <description><![CDATA[Tropical development has a <b>medium</b> chance during the next seven days.]]></description>
+      <pubDate>Fri, 14 Aug 2026 17:53:27 GMT</pubDate>
+      <link>https://www.nhc.noaa.gov/gtwo.php?basin=atlc</link>
+      <guid>https://www.nhc.noaa.gov/gtwo.php?basin=atlc&amp;202608141753</guid>
+    </item>
+  </channel>
+</rss>

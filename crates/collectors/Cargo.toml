@@ -1,0 +1,29 @@
+[package]
+name = "bridgestatus-collectors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Normalized public-feed and optional secret-backed signal collectors for Tender's Log"
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+feed-rs.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+scraper.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tokio-util.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

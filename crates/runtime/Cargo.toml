@@ -1,0 +1,32 @@
+[package]
+name = "bridgestatus-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Tauri-ready application engine for Tender's Log"
+
+[dependencies]
+async-trait.workspace = true
+bridgestatus-collectors = { path = "../collectors" }
+bridgestatus-model = { path = "../model" }
+bridgestatus-policy = { path = "../policy" }
+tenders-storage = { path = "../storage" }
+futures.workspace = true
+jiff.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+sqlx.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

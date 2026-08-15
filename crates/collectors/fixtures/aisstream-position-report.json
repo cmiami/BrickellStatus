@@ -1,0 +1,21 @@
+{
+  "MessageType": "PositionReport",
+  "MetaData": {
+    "MMSI": 367719770,
+    "ShipName": "RIVER RUNNER@@@@",
+    "latitude": 25.76975,
+    "longitude": -80.1788,
+    "time_utc": "2026-08-14T16:20:00Z"
+  },
+  "Message": {
+    "PositionReport": {
+      "Cog": 274.0,
+      "Latitude": 25.76975,
+      "Longitude": -80.1788,
+      "Sog": 5.4,
+      "TrueHeading": 274,
+      "UserID": 367719770,
+      "Valid": true
+    }
+  }
+}

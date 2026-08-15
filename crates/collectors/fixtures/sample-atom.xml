@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example Atom</title>
+  <id>https://example.com/</id>
+  <updated>2026-08-14T21:05:00Z</updated>
+  <entry>
+    <title>Marine notice</title>
+    <id>urn:uuid:8a984e78-04bf-4e33-991a-32f1638f3901</id>
+    <updated>2026-08-14T21:00:00Z</updated>
+    <link href="https://example.com/marine-notice" />
+    <author><name>Signals Desk</name></author>
+    <summary type="html">Vessel traffic is &lt;em&gt;heavy&lt;/em&gt;.</summary>
+  </entry>
+</feed>

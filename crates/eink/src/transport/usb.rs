@@ -1,0 +1,340 @@
+use std::time::Duration;
+
+use async_trait::async_trait;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::Mutex,
+    time::{sleep, timeout},
+};
+use tokio_serial::{
+    FlowControl, SerialPort as _, SerialPortBuilderExt, SerialPortType, SerialStream,
+};
+
+use super::{
+    DeviceReply, PacketTransport, TransportError, TransportKind, TransportReceipt, device_reply,
+    validate_for_transport,
+};
+
+/// One Espressif-compatible native USB serial interface discovered on the host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UsbDeviceInfo {
+    /// Stable serial device path used to open this interface.
+    pub port: String,
+    /// Concise device label assembled from USB descriptors.
+    pub name: String,
+    /// Additional non-secret descriptor text for setup UI.
+    pub detail: String,
+}
+
+/// Result of opening a native USB serial interface without writing a frame.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UsbConnectionInfo {
+    /// Exact serial path which was opened.
+    pub port: String,
+    /// Whether the firmware's `READY INK1` banner was observed.
+    pub ready_observed: bool,
+}
+
+/// USB vendor ID used by the ESP32-S3 native USB/JTAG interface.
+pub const ESPRESSIF_USB_VID: u16 = 0x303a;
+
+/// Native USB CDC configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UsbConfig {
+    /// Explicit device path; `None` discovers an Espressif interface.
+    pub port: Option<String>,
+    /// Firmware serial rate.
+    pub baud_rate: u32,
+    /// Packet chunk size used to protect the ESP32 receive FIFO.
+    pub chunk_size: usize,
+    /// Delay between bounded chunks.
+    pub chunk_delay: Duration,
+    /// Settling time after opening the native USB device.
+    pub startup_delay: Duration,
+    /// Short compatibility probe for `READY INK1`.
+    pub ready_timeout: Duration,
+    /// Maximum display-refresh/acknowledgement time.
+    pub acknowledgement_timeout: Duration,
+}
+
+impl Default for UsbConfig {
+    fn default() -> Self {
+        Self {
+            port: None,
+            baud_rate: 115_200,
+            chunk_size: 256,
+            chunk_delay: Duration::from_millis(4),
+            startup_delay: Duration::from_millis(750),
+            ready_timeout: Duration::from_millis(300),
+            acknowledgement_timeout: Duration::from_secs(15),
+        }
+    }
+}
+
+struct UsbState {
+    stream: Option<SerialStream>,
+    ready_observed: bool,
+}
+
+/// Tokio serial writer for the E213 native USB interface.
+pub struct UsbTransport {
+    config: UsbConfig,
+    state: Mutex<UsbState>,
+}
+
+impl UsbTransport {
+    /// Creates a lazily connected USB transport.
+    pub fn new(config: UsbConfig) -> Self {
+        Self {
+            config,
+            state: Mutex::new(UsbState {
+                stream: None,
+                ready_observed: false,
+            }),
+        }
+    }
+
+    async fn connect(&self) -> Result<(SerialStream, bool, String), TransportError> {
+        let port_name = match &self.config.port {
+            Some(port) => {
+                let attached = discover_espressif_devices().await?;
+                if !attached.iter().any(|device| device.port == *port) {
+                    return Err(TransportError::Io {
+                        transport: TransportKind::Usb,
+                        message: format!(
+                            "{port} is not an attached Espressif USB display interface"
+                        ),
+                    });
+                }
+                port.clone()
+            }
+            None => discover_espressif_port()
+                .await?
+                .ok_or(TransportError::NoUsbDevice)?,
+        };
+        let builder = tokio_serial::new(&port_name, self.config.baud_rate)
+            .flow_control(FlowControl::None)
+            .dtr_on_open(false)
+            .timeout(Duration::from_millis(250));
+        let mut stream = builder
+            .open_native_async()
+            .map_err(|error| usb_io(error.to_string()))?;
+
+        // Clearing both modem-control signals avoids the ESP32 auto-reset
+        // circuit and protects the first frame after connect.
+        stream
+            .write_data_terminal_ready(false)
+            .map_err(|error| usb_io(error.to_string()))?;
+        stream
+            .write_request_to_send(false)
+            .map_err(|error| usb_io(error.to_string()))?;
+
+        sleep(self.config.startup_delay).await;
+        let ready = probe_ready(&mut stream, self.config.ready_timeout).await?;
+        Ok((stream, ready, port_name))
+    }
+
+    /// Opens the configured interface and retains it for later frame writes.
+    ///
+    /// A successful result proves only that the operating system accepted the
+    /// serial connection. `ready_observed` is the non-destructive firmware
+    /// identity check; callers must not present a silent port as a verified
+    /// E213 route before an explicit frame receives `ACK INK1`.
+    pub async fn ensure_connected(&self) -> Result<UsbConnectionInfo, TransportError> {
+        let mut state = self.state.lock().await;
+        if state.stream.is_none() {
+            let (stream, ready, port) = self.connect().await?;
+            state.stream = Some(stream);
+            state.ready_observed = ready;
+            return Ok(UsbConnectionInfo {
+                port,
+                ready_observed: ready,
+            });
+        }
+        Ok(UsbConnectionInfo {
+            port: self
+                .config
+                .port
+                .clone()
+                .unwrap_or_else(|| "Espressif USB".into()),
+            ready_observed: state.ready_observed,
+        })
+    }
+
+    /// Closes the retained serial interface without sending data.
+    pub async fn disconnect(&self) {
+        let mut state = self.state.lock().await;
+        state.stream = None;
+        state.ready_observed = false;
+    }
+
+    async fn send_on_stream(
+        &self,
+        stream: &mut SerialStream,
+        packet: &[u8],
+    ) -> Result<(), TransportError> {
+        let chunk_size = self.config.chunk_size.max(1);
+        for chunk in packet.chunks(chunk_size) {
+            stream
+                .write_all(chunk)
+                .await
+                .map_err(|error| usb_io(error.to_string()))?;
+            sleep(self.config.chunk_delay).await;
+        }
+        stream
+            .flush()
+            .await
+            .map_err(|error| usb_io(error.to_string()))?;
+        wait_for_ack(stream, self.config.acknowledgement_timeout).await
+    }
+}
+
+#[async_trait]
+impl PacketTransport for UsbTransport {
+    fn kind(&self) -> TransportKind {
+        TransportKind::Usb
+    }
+
+    async fn send_packet(&self, packet: &[u8]) -> Result<TransportReceipt, TransportError> {
+        validate_for_transport(packet)?;
+        let mut state = self.state.lock().await;
+        if state.stream.is_none() {
+            let (stream, ready, _) = self.connect().await?;
+            state.stream = Some(stream);
+            state.ready_observed = ready;
+        }
+
+        let result = self
+            .send_on_stream(state.stream.as_mut().expect("connected above"), packet)
+            .await;
+        match result {
+            Ok(()) => Ok(TransportReceipt {
+                transport: TransportKind::Usb,
+                ready_observed: state.ready_observed,
+                acknowledgement: "ACK INK1".into(),
+            }),
+            Err(error) => {
+                state.stream = None;
+                state.ready_observed = false;
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Finds the best available Espressif USB CDC path without opening it.
+pub async fn discover_espressif_port() -> Result<Option<String>, TransportError> {
+    Ok(discover_espressif_devices()
+        .await?
+        .into_iter()
+        .next()
+        .map(|device| device.port))
+}
+
+/// Lists compatible Espressif USB serial interfaces without opening them.
+pub async fn discover_espressif_devices() -> Result<Vec<UsbDeviceInfo>, TransportError> {
+    tokio::task::spawn_blocking(|| {
+        let ports = tokio_serial::available_ports().map_err(|error| usb_io(error.to_string()))?;
+        let mut devices = ports
+            .into_iter()
+            .filter_map(|port| match port.port_type {
+                SerialPortType::UsbPort(details) => {
+                    let product = details.product.as_deref().unwrap_or_default().trim();
+                    let manufacturer = details.manufacturer.as_deref().unwrap_or_default().trim();
+                    let descriptor = format!("{product} {manufacturer}").to_ascii_lowercase();
+                    let compatible = details.vid == ESPRESSIF_USB_VID
+                        || descriptor.contains("espressif")
+                        || descriptor.contains("usb jtag");
+                    compatible.then(|| {
+                        let name = if product.is_empty() {
+                            "Unverified Espressif serial device".into()
+                        } else {
+                            product.to_owned()
+                        };
+                        let mut facts =
+                            vec![format!("VID {:04X} · PID {:04X}", details.vid, details.pid)];
+                        if !manufacturer.is_empty() {
+                            facts.push(manufacturer.to_owned());
+                        }
+                        UsbDeviceInfo {
+                            port: port.port_name,
+                            name,
+                            detail: facts.join(" · "),
+                        }
+                    })
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        devices.sort_by(|left, right| left.port.cmp(&right.port));
+        Ok(devices)
+    })
+    .await
+    .map_err(|error| usb_io(error.to_string()))?
+}
+
+async fn probe_ready(
+    stream: &mut SerialStream,
+    duration: Duration,
+) -> Result<bool, TransportError> {
+    let mut received = Vec::new();
+    let outcome = timeout(duration, async {
+        let mut chunk = [0_u8; 256];
+        loop {
+            let count = stream
+                .read(&mut chunk)
+                .await
+                .map_err(|error| usb_io(error.to_string()))?;
+            if count == 0 {
+                tokio::task::yield_now().await;
+                continue;
+            }
+            received.extend_from_slice(&chunk[..count]);
+            match device_reply(&received) {
+                Some(DeviceReply::Ready) => return Ok(true),
+                Some(DeviceReply::Nack(message)) => return Err(TransportError::Nack(message)),
+                Some(DeviceReply::Ack) | None => {}
+            }
+        }
+    })
+    .await;
+    match outcome {
+        Ok(result) => result,
+        Err(_) => Ok(false),
+    }
+}
+
+async fn wait_for_ack(stream: &mut SerialStream, duration: Duration) -> Result<(), TransportError> {
+    let mut received = Vec::new();
+    timeout(duration, async {
+        let mut chunk = [0_u8; 256];
+        loop {
+            let count = stream
+                .read(&mut chunk)
+                .await
+                .map_err(|error| usb_io(error.to_string()))?;
+            if count == 0 {
+                tokio::task::yield_now().await;
+                continue;
+            }
+            received.extend_from_slice(&chunk[..count]);
+            match device_reply(&received) {
+                Some(DeviceReply::Ack) => return Ok(()),
+                Some(DeviceReply::Nack(message)) => return Err(TransportError::Nack(message)),
+                Some(DeviceReply::Ready) | None => {}
+            }
+        }
+    })
+    .await
+    .map_err(|_| TransportError::Timeout {
+        transport: TransportKind::Usb,
+        waiting_for: "ACK INK1",
+    })?
+}
+
+fn usb_io(message: String) -> TransportError {
+    TransportError::Io {
+        transport: TransportKind::Usb,
+        message,
+    }
+}

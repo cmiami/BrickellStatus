@@ -1,0 +1,21 @@
+[package]
+name = "bridgestatus-delivery"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Transactional delivery adapters for Tender's Log"
+
+[dependencies]
+async-trait.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"

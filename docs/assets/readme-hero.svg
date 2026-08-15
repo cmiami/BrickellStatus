@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title description">
+  <title id="title">PuenteGonorrea — Tender's Log personal signal console</title>
+  <desc id="description">Marine-blue project poster with an AISStream-powered Brickell bridge warning, evidence timeline, WhatsApp, and a Heltec E213 e-paper display.</desc>
+
+  <rect width="1600" height="900" fill="#0F2A44"/>
+  <path d="M0 0h1600v13H0z" fill="#F2A900"/>
+  <path d="M70 68h1460v1H70zM70 818h1460v1H70z" fill="#5A6B7C" opacity=".9"/>
+
+  <g fill="none" stroke="#CBD8E2" opacity=".55">
+    <path d="M70 45v48M94 69H46M1530 45v48M1554 69h-48M70 794v48M94 818H46M1530 794v48M1554 818h-48"/>
+  </g>
+
+  <g font-family="Arial Narrow, Helvetica Neue, Arial, sans-serif">
+    <text x="72" y="105" fill="#CBD8E2" font-size="22" font-weight="700" letter-spacing="4">TENDER’S LOG / PERSONAL SIGNAL CONSOLE / MIAMI</text>
+    <rect x="72" y="132" width="270" height="34" fill="#F2A900"/>
+    <text x="88" y="155" fill="#111418" font-size="17" font-weight="800" letter-spacing="2.5">ADVANCE WARNING SYSTEM</text>
+
+    <text x="66" y="305" fill="#FFFFFF" font-size="124" font-weight="800" letter-spacing="-3">PUENTE</text>
+    <text x="66" y="415" fill="#FFFFFF" font-size="124" font-weight="800" letter-spacing="-3">GONORREA</text>
+    <path d="M72 447h710" stroke="#F2A900" stroke-width="3"/>
+    <text x="72" y="493" fill="#DDE3E8" font-size="33" font-weight="700" letter-spacing=".5">THE BRIDGE WARNING THAT ARRIVES</text>
+    <text x="72" y="531" fill="#DDE3E8" font-size="33" font-weight="700" letter-spacing=".5">BEFORE THE TRAFFIC JAM DOES.</text>
+    <text x="72" y="579" fill="#B9CAD7" font-size="20" font-weight="500">Confidence-weighted evidence · weather · official alerts · storms · news</text>
+    <text x="72" y="609" fill="#B9CAD7" font-size="20" font-weight="500">Desktop · WhatsApp Cloud API · USB/BLE Heltec E213 e-paper</text>
+
+    <g transform="translate(914 116)">
+      <rect width="602" height="374" rx="5" fill="#20262B"/>
+      <rect x="14" y="14" width="574" height="346" rx="2" fill="#F9F9F5"/>
+      <path d="M14 73h574M14 311h574" stroke="#050505" stroke-width="3"/>
+      <text x="34" y="53" fill="#050505" font-size="24" font-weight="800" letter-spacing="2">TENDER’S LOG</text>
+      <text x="435" y="53" fill="#050505" font-size="18" font-weight="700" letter-spacing="2">BRICKELL · 09</text>
+
+      <text x="34" y="117" fill="#050505" font-size="17" font-weight="700" letter-spacing="2">ROAD DECISION</text>
+      <text x="34" y="203" fill="#050505" font-size="67" font-weight="800" letter-spacing="-1">LIKELY</text>
+      <text x="36" y="252" fill="#050505" font-size="36" font-weight="800">8–12 MIN</text>
+
+      <path d="M363 94v191" stroke="#050505" stroke-width="3"/>
+      <circle cx="363" cy="125" r="7" fill="#F9F9F5" stroke="#050505" stroke-width="3"/>
+      <circle cx="363" cy="188" r="7" fill="#050505" stroke="#050505" stroke-width="3"/>
+      <circle cx="363" cy="251" r="7" fill="#F9F9F5" stroke="#050505" stroke-width="3"/>
+      <text x="390" y="130" fill="#050505" font-size="17" font-weight="800">AISSTREAM APPROACH</text>
+      <text x="390" y="193" fill="#050505" font-size="17" font-weight="800">UPSTREAM OPEN</text>
+      <text x="390" y="256" fill="#050505" font-size="17" font-weight="800">FL511 CONTROLLER</text>
+      <path d="M390 139h163M390 202h163M390 265h163" stroke="#050505"/>
+
+      <text x="34" y="342" fill="#050505" font-size="18" font-weight="800" letter-spacing="1.5">82% EST. · HIGH</text>
+      <text x="404" y="342" fill="#050505" font-size="17" font-weight="700" letter-spacing="1.5">FRESH · 58 SEC</text>
+    </g>
+
+    <g transform="translate(70 678)">
+      <text x="0" y="0" fill="#CBD8E2" font-size="15" font-weight="700" letter-spacing="3">LIVE SIGNAL ROUTES</text>
+      <g transform="translate(0 23)" font-size="18" font-weight="800" letter-spacing="1.2">
+        <g><rect width="142" height="54" fill="#F4F7F9"/><path d="M0 0v54" stroke="#F2A900"/><text x="18" y="34" fill="#111418">FL511</text></g>
+        <g transform="translate(154)"><rect width="142" height="54" fill="#F4F7F9"/><text x="18" y="34" fill="#111418">AISSTREAM</text></g>
+        <g transform="translate(308)"><rect width="142" height="54" fill="#F4F7F9"/><text x="18" y="34" fill="#111418">WEATHER</text></g>
+        <g transform="translate(462)"><rect width="142" height="54" fill="#F4F7F9"/><text x="18" y="34" fill="#111418">NWS</text></g>
+        <g transform="translate(616)"><rect width="142" height="54" fill="#F4F7F9"/><text x="18" y="34" fill="#111418">NHC</text></g>
+        <g transform="translate(770)"><rect width="142" height="54" fill="#F4F7F9"/><text x="18" y="34" fill="#111418">RSS / ATOM</text></g>
+        <g transform="translate(924)"><rect width="192" height="54" fill="#F2A900"/><text x="18" y="34" fill="#111418">WHATSAPP</text></g>
+        <g transform="translate(1128)"><rect width="332" height="54" fill="#174F78"/><text x="18" y="34" fill="#FFFFFF">HELTEC E213 · USB / BLE</text></g>
+      </g>
+    </g>
+
+    <text x="72" y="856" fill="#B9CAD7" font-size="16" font-weight="600" letter-spacing="1.5">NO MÁS SORPRESAS A MEDIO CAMINO.</text>
+    <text x="1528" y="856" fill="#B9CAD7" font-size="16" font-weight="600" text-anchor="end" letter-spacing="1.5">RUST · TAURI · SVELTE · ESP32</text>
+  </g>
+</svg>

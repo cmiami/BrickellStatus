@@ -1,0 +1,1791 @@
+//! Durable storage for Tender's Log.
+//!
+//! SQLite persists runtime settings and retry-safe outbound work.
+
+use std::{path::Path, str::FromStr, time::Duration};
+
+use serde::{Serialize, de::DeserializeOwned};
+use sqlx::{
+    Row, Sqlite, SqlitePool, Transaction,
+    sqlite::{
+        SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions,
+        SqliteSynchronous,
+    },
+};
+use thiserror::Error;
+use uuid::Uuid;
+
+const MINIMUM_SQLITE: (u64, u64, u64) = (3, 51, 3);
+const SCHEMA_SQL: &str = include_str!("../schema.sql");
+
+#[derive(Debug, Error)]
+pub enum StorageError {
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("SQLite {found} is unsafe for this WAL workload; {required} or newer is required")]
+    UnsafeSqlite { found: String, required: String },
+    #[error("invalid SQLite version string: {0}")]
+    InvalidSqliteVersion(String),
+}
+
+#[derive(Clone)]
+pub struct Store {
+    pool: SqlitePool,
+}
+
+/// An atomic group of storage writes.
+///
+/// Call [`StoreTransaction::commit`] to make the writes durable. Dropping an
+/// uncommitted transaction rolls every write in the group back.
+pub struct StoreTransaction<'a> {
+    inner: Transaction<'a, Sqlite>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IncidentRecord<'a, T> {
+    pub id: Uuid,
+    pub channel_id: &'a str,
+    pub state: &'a str,
+    pub urgency: &'a str,
+    pub material_revision: i64,
+    pub fingerprint: &'a str,
+    pub payload: &'a T,
+    pub opened_at: &'a str,
+    pub updated_at: &'a str,
+    pub resolved_at: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OutboxRecord<'a, T> {
+    pub id: Uuid,
+    pub route_id: &'a str,
+    pub incident_id: Uuid,
+    pub material_revision: i64,
+    pub action: &'a str,
+    pub request: &'a T,
+    pub next_attempt_at: &'a str,
+    pub created_at: &'a str,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct OutboxLease {
+    pub id: String,
+    pub route_id: String,
+    pub incident_id: String,
+    pub material_revision: i64,
+    pub action: String,
+    pub urgency: Option<String>,
+    pub request_json: String,
+    pub attempts: i64,
+}
+
+/// Credential-free durable delivery history for operator-facing ledgers.
+///
+/// The request JSON contains the provider-independent notice and destination,
+/// but never credentials or provider authorization headers. Callers must map
+/// it into a redacted view instead of exposing this row directly.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct OutboxHistoryRow {
+    pub id: String,
+    pub route_id: String,
+    pub incident_id: String,
+    pub material_revision: i64,
+    pub action: String,
+    pub urgency: Option<String>,
+    pub request_json: String,
+    pub status: String,
+    pub attempts: i64,
+    pub provider_message_id: Option<String>,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One uninterrupted FL511 state interval for a configured bridge.
+#[derive(Debug, Clone, Eq, PartialEq, sqlx::FromRow)]
+pub struct BridgeStateInterval {
+    pub source_id: String,
+    pub bridge_key: String,
+    pub bridge_name: String,
+    pub relation: String,
+    pub state: String,
+    pub started_at_ms: i64,
+    pub ended_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PruneReport {
+    pub scrubbed_destinations: u64,
+    pub outbox_rows: u64,
+    pub incidents: u64,
+}
+
+impl StoreTransaction<'_> {
+    /// Upserts one JSON setting as part of this transaction.
+    pub async fn set_json<T: Serialize>(
+        &mut self,
+        key: &str,
+        value: &T,
+        updated_at: &str,
+    ) -> Result<(), StorageError> {
+        set_json_on(&mut self.inner, key, value, updated_at).await
+    }
+
+    /// Extends the current interval or starts a new one when FL511 changes.
+    pub async fn record_bridge_state(
+        &mut self,
+        source_id: &str,
+        bridge_key: &str,
+        bridge_name: &str,
+        relation: &str,
+        state: &str,
+        observed_at_ms: i64,
+    ) -> Result<(), StorageError> {
+        let current = sqlx::query_as::<_, BridgeStateInterval>(
+            r#"
+            SELECT source_id, bridge_key, bridge_name, relation, state,
+                   started_at_ms, ended_at_ms
+            FROM bridge_state_intervals
+            WHERE source_id = ?1 AND bridge_key = ?2 AND ended_at_ms IS NULL
+            "#,
+        )
+        .bind(source_id)
+        .bind(bridge_key)
+        .fetch_optional(&mut *self.inner)
+        .await?;
+
+        if current.as_ref().is_some_and(|interval| {
+            interval.state == state
+                && interval.bridge_name == bridge_name
+                && interval.relation == relation
+        }) {
+            return Ok(());
+        }
+
+        if current.is_some() {
+            sqlx::query(
+                r#"
+                UPDATE bridge_state_intervals
+                SET ended_at_ms = MAX(started_at_ms, ?3)
+                WHERE source_id = ?1 AND bridge_key = ?2 AND ended_at_ms IS NULL
+                "#,
+            )
+            .bind(source_id)
+            .bind(bridge_key)
+            .bind(observed_at_ms)
+            .execute(&mut *self.inner)
+            .await?;
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO bridge_state_intervals(
+                source_id, bridge_key, bridge_name, relation, state, started_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+        )
+        .bind(source_id)
+        .bind(bridge_key)
+        .bind(bridge_name)
+        .bind(relation)
+        .bind(state)
+        .bind(observed_at_ms)
+        .execute(&mut *self.inner)
+        .await?;
+        Ok(())
+    }
+
+    /// Commits every write performed through this transaction.
+    pub async fn commit(self) -> Result<(), StorageError> {
+        self.inner.commit().await?;
+        Ok(())
+    }
+
+    /// Explicitly rolls every write performed through this transaction back.
+    pub async fn rollback(self) -> Result<(), StorageError> {
+        self.inner.rollback().await?;
+        Ok(())
+    }
+}
+
+impl Store {
+    pub async fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        let options = SqliteConnectOptions::from_str(&format!(
+            "sqlite://{}",
+            path.as_ref().to_string_lossy()
+        ))?
+        .create_if_missing(true)
+        .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        // Alert policy, recipient routing, and outbox transitions are small
+        // writes whose power-loss durability matters more than bulk-write
+        // throughput. FULL keeps the "SQLite is the source of truth" promise
+        // honest across host crashes and abrupt power loss.
+        .synchronous(SqliteSynchronous::Full)
+        .busy_timeout(Duration::from_secs(5));
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(4)
+            .min_connections(1)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect_with(options)
+            .await?;
+
+        let store = Self { pool };
+        store.assert_safe_sqlite().await?;
+        store.create_schema().await?;
+        Ok(store)
+    }
+
+    pub async fn in_memory() -> Result<Self, StorageError> {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")?
+            .foreign_keys(true)
+            .journal_mode(SqliteJournalMode::Memory)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?;
+        let store = Self { pool };
+        store.assert_safe_sqlite().await?;
+        store.create_schema().await?;
+        Ok(store)
+    }
+
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
+    /// Begins an atomic group of storage writes.
+    pub async fn begin_transaction(&self) -> Result<StoreTransaction<'_>, StorageError> {
+        Ok(StoreTransaction {
+            inner: self.pool.begin().await?,
+        })
+    }
+
+    pub async fn sqlite_version(&self) -> Result<String, StorageError> {
+        Ok(
+            sqlx::query_scalar::<Sqlite, String>("SELECT sqlite_version()")
+                .fetch_one(&self.pool)
+                .await?,
+        )
+    }
+
+    pub async fn database_size_bytes(&self) -> Result<u64, StorageError> {
+        let page_count = sqlx::query_scalar::<Sqlite, i64>("PRAGMA page_count")
+            .fetch_one(&self.pool)
+            .await?;
+        let page_size = sqlx::query_scalar::<Sqlite, i64>("PRAGMA page_size")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(u64::try_from(page_count.saturating_mul(page_size)).unwrap_or_default())
+    }
+
+    async fn assert_safe_sqlite(&self) -> Result<(), StorageError> {
+        let version = self.sqlite_version().await?;
+        let parsed = parse_version(&version)?;
+        if parsed < MINIMUM_SQLITE {
+            return Err(StorageError::UnsafeSqlite {
+                found: version,
+                required: "3.51.3".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn create_schema(&self) -> Result<(), StorageError> {
+        sqlx::raw_sql(SCHEMA_SQL).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn set_json<T: Serialize>(
+        &self,
+        key: &str,
+        value: &T,
+        updated_at: &str,
+    ) -> Result<(), StorageError> {
+        let mut connection = self.pool.acquire().await?;
+        set_json_on(&mut connection, key, value, updated_at).await
+    }
+
+    pub async fn get_json<T: DeserializeOwned>(
+        &self,
+        key: &str,
+    ) -> Result<Option<T>, StorageError> {
+        let value =
+            sqlx::query_scalar::<Sqlite, String>("SELECT value_json FROM settings WHERE key = ?1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?;
+        value
+            .map(|json| serde_json::from_str(&json).map_err(StorageError::from))
+            .transpose()
+    }
+
+    /// Returns recorded bridge intervals in chronological order for training.
+    pub async fn list_bridge_state_intervals(
+        &self,
+        source_id: &str,
+        bridge_key: &str,
+    ) -> Result<Vec<BridgeStateInterval>, StorageError> {
+        Ok(sqlx::query_as::<_, BridgeStateInterval>(
+            r#"
+            SELECT source_id, bridge_key, bridge_name, relation, state,
+                   started_at_ms, ended_at_ms
+            FROM bridge_state_intervals
+            WHERE source_id = ?1 AND bridge_key = ?2
+            ORDER BY started_at_ms
+            "#,
+        )
+        .bind(source_id)
+        .bind(bridge_key)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Returns the newest recorded FL511 bridge intervals across every
+    /// configured target and upstream bridge.
+    pub async fn list_recent_bridge_state_intervals(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<BridgeStateInterval>, StorageError> {
+        Ok(sqlx::query_as::<_, BridgeStateInterval>(
+            r#"
+            SELECT source_id, bridge_key, bridge_name, relation, state,
+                   started_at_ms, ended_at_ms
+            FROM bridge_state_intervals
+            ORDER BY started_at_ms DESC
+            LIMIT ?1
+            "#,
+        )
+        .bind(i64::from(limit.clamp(1, 500)))
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Persists an incident and its immutable material revision atomically.
+    pub async fn upsert_incident<T: Serialize>(
+        &self,
+        incident: &IncidentRecord<'_, T>,
+    ) -> Result<(), StorageError> {
+        let payload = serde_json::to_string(incident.payload)?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            INSERT INTO incidents(
+                id, channel_id, state, urgency, material_revision, fingerprint,
+                payload_json, opened_at, updated_at, resolved_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(id) DO UPDATE SET
+                state = excluded.state,
+                urgency = excluded.urgency,
+                material_revision = excluded.material_revision,
+                fingerprint = excluded.fingerprint,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at,
+                resolved_at = excluded.resolved_at
+            WHERE excluded.material_revision >= incidents.material_revision
+            "#,
+        )
+        .bind(incident.id.to_string())
+        .bind(incident.channel_id)
+        .bind(incident.state)
+        .bind(incident.urgency)
+        .bind(incident.material_revision)
+        .bind(incident.fingerprint)
+        .bind(&payload)
+        .bind(incident.opened_at)
+        .bind(incident.updated_at)
+        .bind(incident.resolved_at)
+        .execute(&mut *transaction)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO incident_history(
+                incident_id, material_revision, state, urgency, fingerprint,
+                payload_json, recorded_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(incident_id, material_revision) DO NOTHING
+            "#,
+        )
+        .bind(incident.id.to_string())
+        .bind(incident.material_revision)
+        .bind(incident.state)
+        .bind(incident.urgency)
+        .bind(incident.fingerprint)
+        .bind(payload)
+        .bind(incident.updated_at)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Adds a retry-safe delivery. A duplicate material action is suppressed by
+    /// the database uniqueness constraint and returns `false`.
+    pub async fn enqueue<T: Serialize>(
+        &self,
+        entry: &OutboxRecord<'_, T>,
+    ) -> Result<bool, StorageError> {
+        let request = serde_json::to_string(entry.request)?;
+        let result = sqlx::query(
+            r#"
+            INSERT INTO delivery_outbox(
+                id, route_id, incident_id, material_revision, action,
+                request_json, next_attempt_at, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+            ON CONFLICT(route_id, incident_id, material_revision, action) DO NOTHING
+            "#,
+        )
+        .bind(entry.id.to_string())
+        .bind(entry.route_id)
+        .bind(entry.incident_id.to_string())
+        .bind(entry.material_revision)
+        .bind(entry.action)
+        .bind(request)
+        .bind(entry.next_attempt_at)
+        .bind(entry.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Commits a material incident revision, its retry-safe outbound request,
+    /// and the dispatch cursor in one transaction.
+    ///
+    /// Keeping these three writes together prevents a restart between the
+    /// outbox insert and cursor update from inventing a second incident for the
+    /// same transition.
+    pub async fn commit_delivery_transition<I: Serialize, O: Serialize, S: Serialize>(
+        &self,
+        incident: &IncidentRecord<'_, I>,
+        entry: &OutboxRecord<'_, O>,
+        setting_key: &str,
+        setting_value: &S,
+        updated_at: &str,
+    ) -> Result<bool, StorageError> {
+        let incident_payload = serde_json::to_string(incident.payload)?;
+        let request = serde_json::to_string(entry.request)?;
+        let setting_json = serde_json::to_string(setting_value)?;
+        let incident_id = incident.id.to_string();
+        let outbox_id = entry.id.to_string();
+        let mut transaction = self.pool.begin().await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO incidents(
+                id, channel_id, state, urgency, material_revision, fingerprint,
+                payload_json, opened_at, updated_at, resolved_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ON CONFLICT(id) DO UPDATE SET
+                state = excluded.state,
+                urgency = excluded.urgency,
+                material_revision = excluded.material_revision,
+                fingerprint = excluded.fingerprint,
+                payload_json = excluded.payload_json,
+                updated_at = excluded.updated_at,
+                resolved_at = excluded.resolved_at
+            WHERE excluded.material_revision >= incidents.material_revision
+            "#,
+        )
+        .bind(&incident_id)
+        .bind(incident.channel_id)
+        .bind(incident.state)
+        .bind(incident.urgency)
+        .bind(incident.material_revision)
+        .bind(incident.fingerprint)
+        .bind(&incident_payload)
+        .bind(incident.opened_at)
+        .bind(incident.updated_at)
+        .bind(incident.resolved_at)
+        .execute(&mut *transaction)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO incident_history(
+                incident_id, material_revision, state, urgency, fingerprint,
+                payload_json, recorded_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(incident_id, material_revision) DO NOTHING
+            "#,
+        )
+        .bind(&incident_id)
+        .bind(incident.material_revision)
+        .bind(incident.state)
+        .bind(incident.urgency)
+        .bind(incident.fingerprint)
+        .bind(&incident_payload)
+        .bind(incident.updated_at)
+        .execute(&mut *transaction)
+        .await?;
+
+        let outbox = sqlx::query(
+            r#"
+            INSERT INTO delivery_outbox(
+                id, route_id, incident_id, material_revision, action,
+                request_json, next_attempt_at, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+            ON CONFLICT(route_id, incident_id, material_revision, action) DO NOTHING
+            "#,
+        )
+        .bind(outbox_id)
+        .bind(entry.route_id)
+        .bind(&incident_id)
+        .bind(entry.material_revision)
+        .bind(entry.action)
+        .bind(request)
+        .bind(entry.next_attempt_at)
+        .bind(entry.created_at)
+        .execute(&mut *transaction)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO settings(key, value_json, updated_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(key) DO UPDATE SET
+                value_json = excluded.value_json,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(setting_key)
+        .bind(setting_json)
+        .bind(updated_at)
+        .execute(&mut *transaction)
+        .await?;
+
+        transaction.commit().await?;
+        Ok(outbox.rows_affected() == 1)
+    }
+
+    /// Atomically leases the next due outbox record to one worker.
+    pub async fn lease_next(
+        &self,
+        now: &str,
+        lease_until: &str,
+    ) -> Result<Option<OutboxLease>, StorageError> {
+        let leased = sqlx::query(
+            r#"
+            UPDATE delivery_outbox
+            SET status = 'leased', lease_until = ?2, attempts = attempts + 1,
+                updated_at = ?1
+            WHERE id = (
+                SELECT id
+                FROM delivery_outbox
+                WHERE next_attempt_at <= ?1
+                  AND (
+                        status IN ('pending', 'failed')
+                        OR (status = 'leased' AND lease_until IS NOT NULL AND lease_until < ?1)
+                      )
+                ORDER BY next_attempt_at, created_at
+                LIMIT 1
+            )
+            RETURNING id, route_id, incident_id, material_revision, action,
+                   (
+                     SELECT urgency FROM incident_history
+                     WHERE incident_history.incident_id = incident_id
+                       AND incident_history.material_revision = material_revision
+                     LIMIT 1
+                   ) AS urgency,
+                   request_json, attempts - 1 AS attempts
+            "#,
+        )
+        .bind(now)
+        .bind(lease_until)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|row| OutboxLease {
+            id: row.get("id"),
+            route_id: row.get("route_id"),
+            incident_id: row.get("incident_id"),
+            material_revision: row.get("material_revision"),
+            action: row.get("action"),
+            urgency: row.get("urgency"),
+            request_json: row.get("request_json"),
+            attempts: row.get("attempts"),
+        });
+        Ok(leased)
+    }
+
+    pub async fn mark_outbox(
+        &self,
+        id: &str,
+        status: &str,
+        updated_at: &str,
+        provider_message_id: Option<&str>,
+        error: Option<&str>,
+        next_attempt_at: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        mark_outbox_on(
+            &mut transaction,
+            id,
+            status,
+            updated_at,
+            provider_message_id,
+            error,
+            next_attempt_at,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Marks an outbox row and upserts related JSON state in one transaction.
+    ///
+    /// The outbox update has exactly the same terminal address-scrubbing
+    /// behavior as [`Store::mark_outbox`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mark_outbox_and_set_json<T: Serialize>(
+        &self,
+        id: &str,
+        status: &str,
+        updated_at: &str,
+        provider_message_id: Option<&str>,
+        error: Option<&str>,
+        next_attempt_at: Option<&str>,
+        setting_key: &str,
+        setting_value: &T,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        mark_outbox_on(
+            &mut transaction,
+            id,
+            status,
+            updated_at,
+            provider_message_id,
+            error,
+            next_attempt_at,
+        )
+        .await?;
+        set_json_on(&mut transaction, setting_key, setting_value, updated_at).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Cancels every unsent row for a route and scrubs recipient addresses
+    /// from all of that route's persisted envelopes and legacy incident
+    /// payloads. Used when consent, recipient, credentials, or route identity
+    /// changes.
+    pub async fn suppress_route_and_scrub(
+        &self,
+        route_id: &str,
+        updated_at: &str,
+        reason: &str,
+    ) -> Result<u64, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let suppressed =
+            suppress_route_and_scrub_on(&mut transaction, route_id, updated_at, reason).await?;
+        transaction.commit().await?;
+        Ok(suppressed)
+    }
+
+    /// Cancels/scrubs a route and replaces its JSON tracker atomically.
+    ///
+    /// This is used when a credential or route identity changes: either both
+    /// old recipient work and its material-edge tracker disappear, or neither
+    /// change is committed.
+    pub async fn suppress_route_and_set_json<T: Serialize>(
+        &self,
+        route_id: &str,
+        updated_at: &str,
+        reason: &str,
+        setting_key: &str,
+        setting_value: &T,
+    ) -> Result<u64, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let suppressed =
+            suppress_route_and_scrub_on(&mut transaction, route_id, updated_at, reason).await?;
+        set_json_on(&mut transaction, setting_key, setting_value, updated_at).await?;
+        transaction.commit().await?;
+        Ok(suppressed)
+    }
+
+    /// Returns newest-first durable delivery outcomes without exposing secrets.
+    pub async fn list_outbox_history(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<OutboxHistoryRow>, StorageError> {
+        let bounded_limit = i64::try_from(limit.clamp(1, 500)).unwrap_or(500);
+        sqlx::query_as::<_, OutboxHistoryRow>(
+            r#"
+            SELECT delivery_outbox.id, route_id, delivery_outbox.incident_id,
+                   delivery_outbox.material_revision, action,
+                   (
+                     SELECT urgency FROM incident_history
+                     WHERE incident_history.incident_id = delivery_outbox.incident_id
+                       AND incident_history.material_revision = delivery_outbox.material_revision
+                     LIMIT 1
+                   ) AS urgency,
+                   request_json, status, attempts, provider_message_id,
+                   last_error, created_at, delivery_outbox.updated_at
+            FROM delivery_outbox
+            ORDER BY delivery_outbox.updated_at DESC, created_at DESC
+            LIMIT ?1
+            "#,
+        )
+        .bind(bounded_limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StorageError::from)
+    }
+
+    /// Recovers acknowledgement state after a provider accepted a message but
+    /// the subsequent tracker-setting write was interrupted. This query never
+    /// treats pending, failed, leased, or suppressed work as announced.
+    pub async fn outbox_revision_was_accepted(
+        &self,
+        route_id: &str,
+        incident_id: Uuid,
+        material_revision: i64,
+    ) -> Result<bool, StorageError> {
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM delivery_outbox
+                WHERE route_id = ?1
+                  AND incident_id = ?2
+                  AND material_revision = ?3
+                  AND status IN ('accepted', 'delivered')
+            )
+            "#,
+        )
+        .bind(route_id)
+        .bind(incident_id.to_string())
+        .bind(material_revision)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StorageError::from)
+    }
+
+    /// Scrubs terminal delivery addresses and bounds historical storage.
+    /// Active incidents and retryable outbox rows are never removed.
+    pub async fn prune_history(&self, delivery_cutoff: &str) -> Result<PruneReport, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let mut scrubbed_destinations = sqlx::query(
+            r#"
+            UPDATE delivery_outbox
+            SET request_json = json_set(request_json, '$.destination.address', '[redacted]')
+            WHERE (
+                    status IN ('accepted', 'delivered', 'suppressed')
+                    OR (status = 'failed' AND next_attempt_at >= '9999-01-01')
+                  )
+              AND COALESCE(json_extract(request_json, '$.destination.address'), '') != '[redacted]'
+            "#,
+        )
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        scrubbed_destinations = scrubbed_destinations.saturating_add(
+            sqlx::query(
+                r#"
+                UPDATE incidents
+                SET payload_json = json_set(
+                    payload_json,
+                    '$.destination.address',
+                    '[redacted]'
+                )
+                WHERE id IN (
+                    SELECT incident_id FROM delivery_outbox
+                    WHERE status IN ('accepted', 'delivered', 'suppressed')
+                       OR (status = 'failed' AND next_attempt_at >= '9999-01-01')
+                )
+                AND COALESCE(json_extract(payload_json, '$.destination.address'), '') != '[redacted]'
+                "#,
+            )
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected(),
+        );
+        scrubbed_destinations = scrubbed_destinations.saturating_add(
+            sqlx::query(
+                r#"
+                UPDATE incident_history
+                SET payload_json = json_set(
+                    payload_json,
+                    '$.destination.address',
+                    '[redacted]'
+                )
+                WHERE incident_id IN (
+                    SELECT incident_id FROM delivery_outbox
+                    WHERE status IN ('accepted', 'delivered', 'suppressed')
+                       OR (status = 'failed' AND next_attempt_at >= '9999-01-01')
+                )
+                AND COALESCE(json_extract(payload_json, '$.destination.address'), '') != '[redacted]'
+                "#,
+            )
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected(),
+        );
+        let outbox_rows = sqlx::query(
+            r#"
+            DELETE FROM delivery_outbox
+            WHERE updated_at < ?1
+              AND (
+                    status IN ('accepted', 'delivered', 'suppressed')
+                    OR (status = 'failed' AND next_attempt_at >= '9999-01-01')
+                  )
+            "#,
+        )
+        .bind(delivery_cutoff)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        let incidents = sqlx::query(
+            r#"
+            DELETE FROM incidents
+            WHERE state = 'resolved'
+              AND updated_at < ?1
+              AND NOT EXISTS (
+                    SELECT 1 FROM delivery_outbox
+                    WHERE delivery_outbox.incident_id = incidents.id
+                  )
+            "#,
+        )
+        .bind(delivery_cutoff)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        transaction.commit().await?;
+        Ok(PruneReport {
+            scrubbed_destinations,
+            outbox_rows,
+            incidents,
+        })
+    }
+}
+
+async fn mark_outbox_on(
+    connection: &mut SqliteConnection,
+    id: &str,
+    status: &str,
+    updated_at: &str,
+    provider_message_id: Option<&str>,
+    error: Option<&str>,
+    next_attempt_at: Option<&str>,
+) -> Result<(), StorageError> {
+    let terminal = matches!(status, "accepted" | "delivered" | "suppressed")
+        || status == "failed" && next_attempt_at.is_some_and(|next| next >= "9999-01-01");
+    sqlx::query(
+        r#"
+        UPDATE delivery_outbox
+        SET status = ?2,
+            updated_at = ?3,
+            provider_message_id = ?4,
+            last_error = ?5,
+            next_attempt_at = COALESCE(?6, next_attempt_at),
+            lease_until = NULL,
+            request_json = CASE
+                WHEN ?2 IN ('accepted', 'delivered', 'suppressed')
+                  OR (?2 = 'failed' AND COALESCE(?6, '') >= '9999-01-01')
+                THEN json_set(request_json, '$.destination.address', '[redacted]')
+                ELSE request_json
+            END
+        WHERE id = ?1
+        "#,
+    )
+    .bind(id)
+    .bind(status)
+    .bind(updated_at)
+    .bind(provider_message_id)
+    .bind(error)
+    .bind(next_attempt_at)
+    .execute(&mut *connection)
+    .await?;
+    if terminal {
+        sqlx::query(
+            r#"
+            UPDATE incidents
+            SET payload_json = json_set(
+                payload_json,
+                '$.destination.address',
+                '[redacted]'
+            )
+            WHERE id IN (
+                SELECT incident_id FROM delivery_outbox WHERE id = ?1
+            )
+            "#,
+        )
+        .bind(id)
+        .execute(&mut *connection)
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE incident_history
+            SET payload_json = json_set(
+                payload_json,
+                '$.destination.address',
+                '[redacted]'
+            )
+            WHERE incident_id IN (
+                SELECT incident_id FROM delivery_outbox WHERE id = ?1
+            )
+            "#,
+        )
+        .bind(id)
+        .execute(&mut *connection)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn suppress_route_and_scrub_on(
+    connection: &mut SqliteConnection,
+    route_id: &str,
+    updated_at: &str,
+    reason: &str,
+) -> Result<u64, StorageError> {
+    let suppressed = sqlx::query(
+        r#"
+        UPDATE delivery_outbox
+        SET status = 'suppressed', updated_at = ?2, last_error = ?3,
+            lease_until = NULL
+        WHERE route_id = ?1
+          AND status IN ('pending', 'leased', 'failed')
+        "#,
+    )
+    .bind(route_id)
+    .bind(updated_at)
+    .bind(reason)
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    sqlx::query(
+        r#"
+        UPDATE delivery_outbox
+        SET request_json = json_set(request_json, '$.destination.address', '[redacted]')
+        WHERE route_id = ?1
+        "#,
+    )
+    .bind(route_id)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE incidents
+        SET payload_json = json_set(payload_json, '$.destination.address', '[redacted]')
+        WHERE id IN (
+            SELECT incident_id FROM delivery_outbox WHERE route_id = ?1
+        )
+        "#,
+    )
+    .bind(route_id)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE incident_history
+        SET payload_json = json_set(payload_json, '$.destination.address', '[redacted]')
+        WHERE incident_id IN (
+            SELECT incident_id FROM delivery_outbox WHERE route_id = ?1
+        )
+        "#,
+    )
+    .bind(route_id)
+    .execute(&mut *connection)
+    .await?;
+    Ok(suppressed)
+}
+
+async fn set_json_on<T: Serialize>(
+    connection: &mut SqliteConnection,
+    key: &str,
+    value: &T,
+    updated_at: &str,
+) -> Result<(), StorageError> {
+    let value = serde_json::to_string(value)?;
+    sqlx::query(
+        r#"
+        INSERT INTO settings(key, value_json, updated_at)
+        VALUES (?1, ?2, ?3)
+        ON CONFLICT(key) DO UPDATE SET
+            value_json = excluded.value_json,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(key)
+    .bind(value)
+    .bind(updated_at)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+fn parse_version(value: &str) -> Result<(u64, u64, u64), StorageError> {
+    let mut parts = value.split('.');
+    let major = parts
+        .next()
+        .and_then(|part| part.parse().ok())
+        .ok_or_else(|| StorageError::InvalidSqliteVersion(value.to_owned()))?;
+    let minor = parts
+        .next()
+        .and_then(|part| part.parse().ok())
+        .ok_or_else(|| StorageError::InvalidSqliteVersion(value.to_owned()))?;
+    let patch = parts
+        .next()
+        .and_then(|part| part.parse().ok())
+        .ok_or_else(|| StorageError::InvalidSqliteVersion(value.to_owned()))?;
+    Ok((major, minor, patch))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn existing_database_opens_and_settings_round_trip() {
+        let directory = tempdir().unwrap();
+        let store = Store::open(directory.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        store
+            .set_json(
+                "profile",
+                &json!({"name": "Bridge First"}),
+                "2026-08-14T00:00:00Z",
+            )
+            .await
+            .unwrap();
+        let profile: serde_json::Value = store.get_json("profile").await.unwrap().unwrap();
+        assert_eq!(profile["name"], "Bridge First");
+        drop(store);
+
+        let reopened = Store::open(directory.path().join("test.sqlite"))
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .get_json::<serde_json::Value>("profile")
+                .await
+                .unwrap(),
+            Some(json!({"name": "Bridge First"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn transaction_commits_related_json_state() {
+        let store = Store::in_memory().await.unwrap();
+        let preferences = json!({"profile": "bridge-first"});
+        let state = json!({"cycle": 7});
+
+        let mut transaction = store.begin_transaction().await.unwrap();
+        transaction
+            .set_json("app.preferences", &preferences, "2026-08-14T00:00:01Z")
+            .await
+            .unwrap();
+        transaction
+            .set_json("runtime.state", &state, "2026-08-14T00:00:01Z")
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        assert_eq!(
+            store
+                .get_json::<serde_json::Value>("app.preferences")
+                .await
+                .unwrap(),
+            Some(preferences)
+        );
+        assert_eq!(
+            store
+                .get_json::<serde_json::Value>("runtime.state")
+                .await
+                .unwrap(),
+            Some(state)
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_state_changes_close_the_prior_interval() {
+        let store = Store::in_memory().await.unwrap();
+
+        let mut transaction = store.begin_transaction().await.unwrap();
+        transaction
+            .record_bridge_state(
+                "fl511.bridge.brickell",
+                "sw_2_ave",
+                "SW 2 Ave Bridge",
+                "upstream",
+                "down",
+                1_000,
+            )
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let mut unchanged = store.begin_transaction().await.unwrap();
+        unchanged
+            .record_bridge_state(
+                "fl511.bridge.brickell",
+                "sw_2_ave",
+                "SW 2 Ave Bridge",
+                "upstream",
+                "down",
+                2_000,
+            )
+            .await
+            .unwrap();
+        unchanged.commit().await.unwrap();
+
+        let mut changed = store.begin_transaction().await.unwrap();
+        changed
+            .record_bridge_state(
+                "fl511.bridge.brickell",
+                "sw_2_ave",
+                "SW 2 Ave Bridge",
+                "upstream",
+                "up",
+                3_000,
+            )
+            .await
+            .unwrap();
+        changed.commit().await.unwrap();
+
+        let intervals = store
+            .list_bridge_state_intervals("fl511.bridge.brickell", "sw_2_ave")
+            .await
+            .unwrap();
+        assert_eq!(intervals.len(), 2);
+        assert_eq!(intervals[0].state, "down");
+        assert_eq!(intervals[0].started_at_ms, 1_000);
+        assert_eq!(intervals[0].ended_at_ms, Some(3_000));
+        assert_eq!(intervals[1].state, "up");
+        assert_eq!(intervals[1].started_at_ms, 3_000);
+        assert_eq!(intervals[1].ended_at_ms, None);
+
+        let recent = store.list_recent_bridge_state_intervals(1).await.unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].bridge_key, "sw_2_ave");
+        assert_eq!(recent[0].state, "up");
+    }
+
+    #[tokio::test]
+    async fn outbox_material_action_is_retry_safe() {
+        let store = Store::in_memory().await.unwrap();
+        let incident_id = Uuid::now_v7();
+        store
+            .upsert_incident(&IncidentRecord {
+                id: incident_id,
+                channel_id: "bridge.brickell",
+                state: "likely",
+                urgency: "heads_up",
+                material_revision: 1,
+                fingerprint: "likely-8-12",
+                payload: &json!({"eta": [8, 12]}),
+                opened_at: "2026-08-14T00:00:00Z",
+                updated_at: "2026-08-14T00:00:00Z",
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+        let entry = OutboxRecord {
+            id: Uuid::now_v7(),
+            route_id: "whatsapp.primary",
+            incident_id,
+            material_revision: 1,
+            action: "stage_change",
+            request: &json!({"template": "bridge_likely"}),
+            next_attempt_at: "2026-08-14T00:00:00Z",
+            created_at: "2026-08-14T00:00:00Z",
+        };
+        assert!(store.enqueue(&entry).await.unwrap());
+        assert!(!store.enqueue(&entry).await.unwrap());
+        let lease = store
+            .lease_next("2026-08-14T00:00:00Z", "2026-08-14T00:01:00Z")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.route_id, "whatsapp.primary");
+    }
+
+    #[tokio::test]
+    async fn expired_outbox_lease_is_recovered_after_worker_restart() {
+        let store = Store::in_memory().await.unwrap();
+        let incident_id = Uuid::now_v7();
+        store
+            .upsert_incident(&IncidentRecord {
+                id: incident_id,
+                channel_id: "weather.miami",
+                state: "active",
+                urgency: "recommended",
+                material_revision: 1,
+                fingerprint: "rain-70-percent",
+                payload: &json!({"summary": "Rain threshold crossed"}),
+                opened_at: "2026-08-14T00:00:00Z",
+                updated_at: "2026-08-14T00:00:00Z",
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+        let entry = OutboxRecord {
+            id: Uuid::now_v7(),
+            route_id: "whatsapp.primary",
+            incident_id,
+            material_revision: 1,
+            action: "material_update",
+            request: &json!({"summary": "Rain threshold crossed"}),
+            next_attempt_at: "2026-08-14T00:00:00Z",
+            created_at: "2026-08-14T00:00:00Z",
+        };
+        assert!(store.enqueue(&entry).await.unwrap());
+
+        let first = store
+            .lease_next("2026-08-14T00:00:00Z", "2026-08-14T00:01:00Z")
+            .await
+            .unwrap()
+            .expect("pending row should be leased");
+        assert!(
+            store
+                .lease_next("2026-08-14T00:00:30Z", "2026-08-14T00:01:30Z")
+                .await
+                .unwrap()
+                .is_none(),
+            "a live lease must not be stolen"
+        );
+
+        let recovered = store
+            .lease_next("2026-08-14T00:01:01Z", "2026-08-14T00:02:01Z")
+            .await
+            .unwrap()
+            .expect("an expired lease must be recoverable after a crash");
+        assert_eq!(recovered.id, first.id);
+        assert_eq!(recovered.attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn outbox_history_is_newest_first_and_contains_no_auth_material() {
+        let store = Store::in_memory().await.unwrap();
+        let incident_id = Uuid::now_v7();
+        store
+            .upsert_incident(&IncidentRecord {
+                id: incident_id,
+                channel_id: "official.miami",
+                state: "active",
+                urgency: "confirmed_only",
+                material_revision: 1,
+                fingerprint: "warning-1",
+                payload: &json!({"summary": "Tornado warning"}),
+                opened_at: "2026-08-14T00:00:00Z",
+                updated_at: "2026-08-14T00:00:00Z",
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+        let request = json!({
+            "notice": {"subject": "Tornado warning"},
+            "destination": {"address": "+13055550123"}
+        });
+        let outbox_id = Uuid::now_v7();
+        assert!(
+            store
+                .enqueue(&OutboxRecord {
+                    id: outbox_id,
+                    route_id: "meta.whatsapp.cloud",
+                    incident_id,
+                    material_revision: 1,
+                    action: "material_update",
+                    request: &request,
+                    next_attempt_at: "2026-08-14T00:00:00Z",
+                    created_at: "2026-08-14T00:00:00Z",
+                })
+                .await
+                .unwrap()
+        );
+        store
+            .mark_outbox(
+                &outbox_id.to_string(),
+                "accepted",
+                "2026-08-14T00:00:03Z",
+                Some("wamid.safe-id"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let history = store.list_outbox_history(20).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, "accepted");
+        assert_eq!(
+            history[0].provider_message_id.as_deref(),
+            Some("wamid.safe-id")
+        );
+        assert!(history[0].request_json.contains("Tornado warning"));
+        assert!(!history[0].request_json.contains("+13055550123"));
+        assert!(
+            !history[0]
+                .request_json
+                .to_ascii_lowercase()
+                .contains("authorization")
+        );
+    }
+
+    #[tokio::test]
+    async fn outbox_mark_and_json_state_commit_or_roll_back_together() {
+        let store = Store::in_memory().await.unwrap();
+        let incident_id = Uuid::now_v7();
+        let address = "+13055550123";
+        store
+            .upsert_incident(&IncidentRecord {
+                id: incident_id,
+                channel_id: "bridge.brickell",
+                state: "active",
+                urgency: "recommended",
+                material_revision: 1,
+                fingerprint: "bridge-opening",
+                payload: &json!({"destination": {"address": address}}),
+                opened_at: "2026-08-14T00:00:00Z",
+                updated_at: "2026-08-14T00:00:00Z",
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+        let outbox_id = Uuid::now_v7();
+        store
+            .enqueue(&OutboxRecord {
+                id: outbox_id,
+                route_id: "meta.whatsapp.cloud",
+                incident_id,
+                material_revision: 1,
+                action: "material_update",
+                request: &json!({"destination": {"address": address}}),
+                next_attempt_at: "2026-08-14T00:00:00Z",
+                created_at: "2026-08-14T00:00:00Z",
+            })
+            .await
+            .unwrap();
+        let original_cursor = json!({"revision": 1});
+        let accepted_cursor = json!({"revision": 2});
+        store
+            .set_json("delivery.cursor", &original_cursor, "2026-08-14T00:00:00Z")
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+            CREATE TRIGGER reject_delivery_cursor
+            BEFORE UPDATE ON settings
+            WHEN NEW.key = 'delivery.cursor'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected settings failure');
+            END
+            "#,
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let error = store
+            .mark_outbox_and_set_json(
+                &outbox_id.to_string(),
+                "accepted",
+                "2026-08-14T00:00:01Z",
+                Some("wamid.atomic"),
+                None,
+                None,
+                "delivery.cursor",
+                &accepted_cursor,
+            )
+            .await
+            .expect_err("the injected settings failure must abort the outbox mark");
+        assert!(matches!(error, StorageError::Database(_)));
+
+        let history = store.list_outbox_history(1).await.unwrap();
+        assert_eq!(history[0].status, "pending");
+        assert!(history[0].request_json.contains(address));
+        assert_eq!(
+            store
+                .get_json::<serde_json::Value>("delivery.cursor")
+                .await
+                .unwrap(),
+            Some(original_cursor)
+        );
+        let incident_payload = sqlx::query_scalar::<Sqlite, String>(
+            "SELECT payload_json FROM incidents WHERE id = ?1",
+        )
+        .bind(incident_id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert!(incident_payload.contains(address));
+
+        sqlx::query("DROP TRIGGER reject_delivery_cursor")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        store
+            .mark_outbox_and_set_json(
+                &outbox_id.to_string(),
+                "accepted",
+                "2026-08-14T00:00:02Z",
+                Some("wamid.atomic"),
+                None,
+                None,
+                "delivery.cursor",
+                &accepted_cursor,
+            )
+            .await
+            .unwrap();
+
+        let history = store.list_outbox_history(1).await.unwrap();
+        assert_eq!(history[0].status, "accepted");
+        assert!(!history[0].request_json.contains(address));
+        assert_eq!(
+            store
+                .get_json::<serde_json::Value>("delivery.cursor")
+                .await
+                .unwrap(),
+            Some(accepted_cursor)
+        );
+        let incident_payload = sqlx::query_scalar::<Sqlite, String>(
+            "SELECT payload_json FROM incidents WHERE id = ?1",
+        )
+        .bind(incident_id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert!(!incident_payload.contains(address));
+    }
+
+    #[tokio::test]
+    async fn delivery_transition_commits_incident_outbox_and_cursor_together() {
+        let store = Store::in_memory().await.unwrap();
+        let incident_id = Uuid::now_v7();
+        let request = json!({"notice": {"subject": "Bridge likely"}});
+        let cursor = json!({"channels": {"bridge.brickell": {"revision": 1}}});
+        let inserted = store
+            .commit_delivery_transition(
+                &IncidentRecord {
+                    id: incident_id,
+                    channel_id: "bridge.brickell",
+                    state: "active",
+                    urgency: "recommended",
+                    material_revision: 1,
+                    fingerprint: "likely:7-10:high",
+                    payload: &request,
+                    opened_at: "2026-08-14T00:00:00Z",
+                    updated_at: "2026-08-14T00:00:00Z",
+                    resolved_at: None,
+                },
+                &OutboxRecord {
+                    id: Uuid::now_v7(),
+                    route_id: "meta.whatsapp.cloud",
+                    incident_id,
+                    material_revision: 1,
+                    action: "material_update",
+                    request: &request,
+                    next_attempt_at: "2026-08-14T00:00:00Z",
+                    created_at: "2026-08-14T00:00:00Z",
+                },
+                "dispatch.cursor",
+                &cursor,
+                "2026-08-14T00:00:00Z",
+            )
+            .await
+            .unwrap();
+
+        assert!(inserted);
+        assert_eq!(
+            store
+                .get_json::<serde_json::Value>("dispatch.cursor")
+                .await
+                .unwrap(),
+            Some(cursor)
+        );
+        let lease = store
+            .lease_next("2026-08-14T00:00:00Z", "2026-08-14T00:01:00Z")
+            .await
+            .unwrap()
+            .expect("the same transaction should publish an outbox row");
+        assert_eq!(lease.incident_id, incident_id.to_string());
+        let incident_count = sqlx::query_scalar::<Sqlite, i64>(
+            "SELECT COUNT(*) FROM incidents WHERE id = ?1 AND material_revision = 1",
+        )
+        .bind(incident_id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(incident_count, 1);
+    }
+
+    #[tokio::test]
+    async fn route_suppression_and_tracker_reset_are_atomic() {
+        let store = Store::in_memory().await.unwrap();
+        let incident_id = Uuid::now_v7();
+        let outbox_id = Uuid::now_v7();
+        store
+            .upsert_incident(&IncidentRecord {
+                id: incident_id,
+                channel_id: "bridge.brickell",
+                state: "active",
+                urgency: "recommended",
+                material_revision: 1,
+                fingerprint: "likely",
+                payload: &json!({"destination": {"address": "+13055550123"}}),
+                opened_at: "2026-08-14T00:00:00Z",
+                updated_at: "2026-08-14T00:00:00Z",
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+        store
+            .enqueue(&OutboxRecord {
+                id: outbox_id,
+                route_id: "meta.whatsapp.cloud",
+                incident_id,
+                material_revision: 1,
+                action: "material_update",
+                request: &json!({"destination": {"address": "+13055550123"}}),
+                next_attempt_at: "2026-08-14T00:00:00Z",
+                created_at: "2026-08-14T00:00:00Z",
+            })
+            .await
+            .unwrap();
+        let old_tracker = json!({"channels": {"bridge.brickell": {"active": true}}});
+        let reset_tracker = json!({"channels": {}});
+        store
+            .set_json(
+                "desktop.whatsapp.dispatch",
+                &old_tracker,
+                "2026-08-14T00:00:00Z",
+            )
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+            CREATE TRIGGER reject_tracker_reset
+            BEFORE UPDATE ON settings
+            WHEN NEW.key = 'desktop.whatsapp.dispatch'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected tracker failure');
+            END
+            "#,
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        store
+            .suppress_route_and_set_json(
+                "meta.whatsapp.cloud",
+                "2026-08-14T00:00:01Z",
+                "credential replaced",
+                "desktop.whatsapp.dispatch",
+                &reset_tracker,
+            )
+            .await
+            .expect_err("tracker failure must roll route suppression back");
+        assert_eq!(
+            store.list_outbox_history(1).await.unwrap()[0].status,
+            "pending"
+        );
+        assert_eq!(
+            store
+                .get_json::<serde_json::Value>("desktop.whatsapp.dispatch")
+                .await
+                .unwrap(),
+            Some(old_tracker)
+        );
+
+        sqlx::query("DROP TRIGGER reject_tracker_reset")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .suppress_route_and_set_json(
+                    "meta.whatsapp.cloud",
+                    "2026-08-14T00:00:02Z",
+                    "credential replaced",
+                    "desktop.whatsapp.dispatch",
+                    &reset_tracker,
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        let row = &store.list_outbox_history(1).await.unwrap()[0];
+        assert_eq!(row.status, "suppressed");
+        assert!(!row.request_json.contains("+13055550123"));
+        assert_eq!(
+            store
+                .get_json::<serde_json::Value>("desktop.whatsapp.dispatch")
+                .await
+                .unwrap(),
+            Some(reset_tracker)
+        );
+    }
+
+    #[tokio::test]
+    async fn pruning_scrubs_terminal_pii_and_preserves_retryable_work() {
+        let store = Store::in_memory().await.unwrap();
+        let old_incident = Uuid::now_v7();
+        store
+            .upsert_incident(&IncidentRecord {
+                id: old_incident,
+                channel_id: "weather.miami",
+                state: "resolved",
+                urgency: "recommended",
+                material_revision: 1,
+                fingerprint: "rain",
+                payload: &json!({
+                    "summary": "rain",
+                    "destination": {"address": "+13055550123"}
+                }),
+                opened_at: "2026-01-01T00:00:00Z",
+                updated_at: "2026-01-01T00:00:00Z",
+                resolved_at: Some("2026-01-01T00:00:00Z"),
+            })
+            .await
+            .unwrap();
+        let old_outbox = Uuid::now_v7();
+        store
+            .enqueue(&OutboxRecord {
+                id: old_outbox,
+                route_id: "meta.whatsapp.cloud",
+                incident_id: old_incident,
+                material_revision: 1,
+                action: "resolved",
+                request: &json!({"destination": {"address": "+13055550123"}}),
+                next_attempt_at: "2026-01-01T00:00:00Z",
+                created_at: "2026-01-01T00:00:00Z",
+            })
+            .await
+            .unwrap();
+        store
+            .mark_outbox(
+                &old_outbox.to_string(),
+                "accepted",
+                "2026-01-01T00:00:01Z",
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let incident_payload = sqlx::query_scalar::<Sqlite, String>(
+            "SELECT payload_json FROM incidents WHERE id = ?1",
+        )
+        .bind(old_incident.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        let history_payload = sqlx::query_scalar::<Sqlite, String>(
+            "SELECT payload_json FROM incident_history WHERE incident_id = ?1",
+        )
+        .bind(old_incident.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert!(!incident_payload.contains("+13055550123"));
+        assert!(!history_payload.contains("+13055550123"));
+
+        let retryable = Uuid::now_v7();
+        store
+            .enqueue(&OutboxRecord {
+                id: retryable,
+                route_id: "meta.whatsapp.cloud",
+                incident_id: Uuid::now_v7(),
+                material_revision: 1,
+                action: "material_update",
+                request: &json!({"destination": {"address": "+13055550999"}}),
+                next_attempt_at: "2026-01-01T00:05:00Z",
+                created_at: "2026-01-01T00:00:00Z",
+            })
+            .await
+            .unwrap();
+
+        let report = store.prune_history("2026-04-01T00:00:00Z").await.unwrap();
+        assert_eq!(report.outbox_rows, 1);
+        assert_eq!(report.incidents, 1);
+        let remaining = store.list_outbox_history(20).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, retryable.to_string());
+        assert!(remaining[0].request_json.contains("+13055550999"));
+    }
+
+    #[tokio::test]
+    async fn route_revocation_suppresses_pending_work_and_scrubs_every_copy() {
+        let store = Store::in_memory().await.unwrap();
+        let incident_id = Uuid::now_v7();
+        let payload = json!({"destination": {"address": "+13055550123"}});
+        store
+            .upsert_incident(&IncidentRecord {
+                id: incident_id,
+                channel_id: "official.miami",
+                state: "active",
+                urgency: "confirmed_only",
+                material_revision: 1,
+                fingerprint: "warning",
+                payload: &payload,
+                opened_at: "2026-08-14T00:00:00Z",
+                updated_at: "2026-08-14T00:00:00Z",
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+        store
+            .enqueue(&OutboxRecord {
+                id: Uuid::now_v7(),
+                route_id: "meta.whatsapp.cloud",
+                incident_id,
+                material_revision: 1,
+                action: "material_update",
+                request: &payload,
+                next_attempt_at: "2026-08-14T00:00:00Z",
+                created_at: "2026-08-14T00:00:00Z",
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .suppress_route_and_scrub(
+                    "meta.whatsapp.cloud",
+                    "2026-08-14T00:00:01Z",
+                    "recipient changed",
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        let outbox = store.list_outbox_history(10).await.unwrap();
+        assert_eq!(outbox[0].status, "suppressed");
+        assert!(!outbox[0].request_json.contains("+13055550123"));
+        let incident = sqlx::query_scalar::<Sqlite, String>(
+            "SELECT payload_json FROM incidents WHERE id = ?1",
+        )
+        .bind(incident_id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        let history = sqlx::query_scalar::<Sqlite, String>(
+            "SELECT payload_json FROM incident_history WHERE incident_id = ?1",
+        )
+        .bind(incident_id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert!(!incident.contains("+13055550123"));
+        assert!(!history.contains("+13055550123"));
+    }
+
+    #[test]
+    fn compares_versions_numerically() {
+        assert_eq!(parse_version("3.51.3").unwrap(), (3, 51, 3));
+        assert!(parse_version("not-a-version").is_err());
+    }
+
+    #[tokio::test]
+    async fn reports_live_sqlite_allocation() {
+        let store = Store::in_memory().await.unwrap();
+        assert!(store.database_size_bytes().await.unwrap() > 0);
+    }
+}

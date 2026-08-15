@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>Tender's Log uses Bluetooth to send status frames to your configured E213 display.</string>
+  <key>NSLocationWhenInUseUsageDescription</key>
+  <string>Tender's Log uses one location sample only when you choose Use this Mac's location to configure weather and official-alert areas.</string>
+</dict>
+</plist>

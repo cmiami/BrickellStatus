@@ -1,0 +1,2234 @@
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+
+use async_trait::async_trait;
+use bridgestatus_collectors::{CollectorHealth, HealthState, Location, SourceLink};
+use serde_json::json;
+use tokio::sync::Notify;
+use url::Url;
+
+use super::*;
+
+#[derive(Debug)]
+struct FixedClock(AtomicI64);
+
+impl FixedClock {
+    fn advance(&self, milliseconds: i64) {
+        self.0.fetch_add(milliseconds, Ordering::SeqCst);
+    }
+}
+
+impl Clock for FixedClock {
+    fn now_millis(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+struct StaticFactory {
+    collector: Arc<dyn Collector>,
+}
+
+impl CollectorFactory for StaticFactory {
+    fn build(
+        &self,
+        preferences: &AppPreferences,
+    ) -> Result<Vec<CollectorRegistration>, RuntimeError> {
+        Ok(vec![CollectorRegistration::new(
+            "fl511.bridge.brickell",
+            preferences.profile.home_channel_id.clone(),
+            self.collector.clone(),
+        )])
+    }
+}
+
+struct CadencedFactory {
+    collector: Arc<dyn Collector>,
+    minimum_interval: Duration,
+}
+
+impl CollectorFactory for CadencedFactory {
+    fn build(
+        &self,
+        preferences: &AppPreferences,
+    ) -> Result<Vec<CollectorRegistration>, RuntimeError> {
+        Ok(vec![
+            CollectorRegistration::new(
+                "fixture.cadenced",
+                preferences.profile.home_channel_id.clone(),
+                self.collector.clone(),
+            )
+            .with_minimum_interval(self.minimum_interval),
+        ])
+    }
+}
+
+struct SequenceCollector {
+    calls: AtomicUsize,
+    fail_after_first: bool,
+}
+
+struct BlockingCollector {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl Collector for BlockingCollector {
+    fn name(&self) -> &'static str {
+        "fixture-blocking"
+    }
+
+    async fn collect(&self, _context: &CollectContext) -> Result<CollectorBatch, CollectorError> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(CollectorBatch {
+            source: self.name().into(),
+            items: Vec::new(),
+            health: CollectorHealth::healthy(),
+            cursor: CollectorCursor::default(),
+            not_modified: false,
+        })
+    }
+}
+
+#[async_trait]
+impl Collector for SequenceCollector {
+    fn name(&self) -> &'static str {
+        "fixture-fl511"
+    }
+
+    async fn collect(&self, _context: &CollectContext) -> Result<CollectorBatch, CollectorError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_after_first && call > 0 {
+            return Err(CollectorError::Configuration("fixture offline".into()));
+        }
+        Ok(CollectorBatch {
+            source: self.name().into(),
+            items: vec![bridge_item("253", "Brickell Avenue Bridge", "target", "up")],
+            health: CollectorHealth {
+                state: HealthState::Healthy,
+                checked_at: chrono_now_for_fixture(),
+                message: None,
+            },
+            cursor: CollectorCursor {
+                etag: Some("\"fixture-v1\"".into()),
+                ..CollectorCursor::default()
+            },
+            not_modified: false,
+        })
+    }
+}
+
+struct DownFl511Collector;
+
+#[async_trait]
+impl Collector for DownFl511Collector {
+    fn name(&self) -> &'static str {
+        "fixture-fl511-down"
+    }
+
+    async fn collect(&self, _context: &CollectContext) -> Result<CollectorBatch, CollectorError> {
+        Ok(CollectorBatch {
+            source: self.name().into(),
+            items: vec![bridge_item(
+                "253",
+                "Brickell Avenue Bridge",
+                "target",
+                "down",
+            )],
+            health: CollectorHealth {
+                state: HealthState::Healthy,
+                checked_at: chrono_now_for_fixture(),
+                message: None,
+            },
+            cursor: CollectorCursor::default(),
+            not_modified: false,
+        })
+    }
+}
+
+struct OpenThenUnknownFl511Collector {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl Collector for OpenThenUnknownFl511Collector {
+    fn name(&self) -> &'static str {
+        "fixture-fl511-open-then-unknown"
+    }
+
+    async fn collect(&self, _context: &CollectContext) -> Result<CollectorBatch, CollectorError> {
+        let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+        Ok(CollectorBatch {
+            source: self.name().into(),
+            items: vec![bridge_item(
+                "253",
+                "Brickell Avenue Bridge",
+                "target",
+                if first { "up" } else { "unknown" },
+            )],
+            health: CollectorHealth {
+                state: if first {
+                    HealthState::Healthy
+                } else {
+                    HealthState::Degraded
+                },
+                checked_at: chrono_now_for_fixture(),
+                message: (!first).then(|| "target bridge state is unknown".into()),
+            },
+            cursor: CollectorCursor::default(),
+            not_modified: false,
+        })
+    }
+}
+
+struct QuietAisCollector;
+
+#[async_trait]
+impl Collector for QuietAisCollector {
+    fn name(&self) -> &'static str {
+        "fixture-aisstream-quiet"
+    }
+
+    async fn collect(&self, _context: &CollectContext) -> Result<CollectorBatch, CollectorError> {
+        Ok(CollectorBatch {
+            source: self.name().into(),
+            items: Vec::new(),
+            health: CollectorHealth {
+                state: HealthState::Healthy,
+                checked_at: chrono_now_for_fixture(),
+                message: None,
+            },
+            cursor: CollectorCursor::default(),
+            not_modified: false,
+        })
+    }
+}
+
+struct AisConnectionLossCollector {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl Collector for AisConnectionLossCollector {
+    fn name(&self) -> &'static str {
+        "fixture-aisstream"
+    }
+
+    async fn collect(&self, _context: &CollectContext) -> Result<CollectorBatch, CollectorError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+            return Err(CollectorError::Request(
+                "AISStream live connection is unavailable".into(),
+            ));
+        }
+        Ok(CollectorBatch {
+            source: self.name().into(),
+            items: vec![ais_bridge_item()],
+            health: CollectorHealth {
+                state: HealthState::Healthy,
+                checked_at: chrono_now_for_fixture(),
+                message: None,
+            },
+            cursor: CollectorCursor::default(),
+            not_modified: false,
+        })
+    }
+}
+
+struct Fl511AndAisFactory {
+    fl511: Arc<dyn Collector>,
+    ais: Arc<dyn Collector>,
+}
+
+impl CollectorFactory for Fl511AndAisFactory {
+    fn build(
+        &self,
+        preferences: &AppPreferences,
+    ) -> Result<Vec<CollectorRegistration>, RuntimeError> {
+        Ok(vec![
+            CollectorRegistration::new(
+                "fl511.bridge.brickell",
+                &preferences.profile.home_channel_id,
+                Arc::clone(&self.fl511),
+            ),
+            CollectorRegistration::new(
+                "aisstream.bridge.brickell",
+                &preferences.profile.home_channel_id,
+                Arc::clone(&self.ais),
+            )
+            .fail_closed_on_error(),
+        ])
+    }
+}
+
+fn chrono_now_for_fixture() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::from_timestamp_millis(1_786_741_200_000).unwrap()
+}
+
+fn bridge_item(id: &str, title: &str, relation: &str, state: &str) -> CollectorItem {
+    let selector_key = if relation == "target" { "brickell" } else { id };
+    CollectorItem {
+        id: format!("fl511:bridge:{id}"),
+        kind: ItemKind::Bridge,
+        title: title.into(),
+        summary: Some(format!("Bridge {state}")),
+        observed_at: None,
+        starts_at: None,
+        ends_at: None,
+        location: Some(Location::point(25.7699, -80.19005)),
+        source: SourceLink {
+            name: "Florida 511".into(),
+            url: Some(Url::parse("https://fl511.com/").unwrap()),
+        },
+        attributes: BTreeMap::from([
+            ("relation".into(), json!(relation)),
+            ("selector_key".into(), json!(selector_key)),
+            ("state".into(), json!(state)),
+            ("state_conflict".into(), json!(false)),
+        ]),
+    }
+}
+
+fn ais_bridge_item() -> CollectorItem {
+    CollectorItem {
+        id: "aisstream:367719770".into(),
+        kind: ItemKind::Bridge,
+        title: "RIVER RUNNER · 367719770".into(),
+        summary: Some("1.2 km from Brickell Avenue Bridge · approaching · ETA 6–10 min".into()),
+        observed_at: Some(chrono_now_for_fixture()),
+        starts_at: None,
+        ends_at: Some(chrono_now_for_fixture() + chrono::TimeDelta::minutes(3)),
+        location: Some(Location::point(25.76975, -80.1788)),
+        source: SourceLink {
+            name: "AISStream".into(),
+            url: Some(Url::parse("https://aisstream.io/documentation.html").unwrap()),
+        },
+        attributes: BTreeMap::from([
+            ("relation".into(), json!("ais")),
+            ("state".into(), json!("approaching")),
+            ("movement".into(), json!("approaching")),
+            ("route_intersects".into(), json!(true)),
+            ("mmsi".into(), json!("367719770")),
+            ("vessel_name".into(), json!("RIVER RUNNER")),
+            ("distance_meters".into(), json!(1_240)),
+            ("eta_min_minutes".into(), json!(6)),
+            ("eta_max_minutes".into(), json!(10)),
+        ]),
+    }
+}
+
+#[test]
+fn ais_collector_item_normalizes_to_real_predictor_evidence() {
+    let item = ais_bridge_item();
+
+    assert_eq!(
+        bridge_fact(&item),
+        Some(BridgeObservation::AisTrack {
+            mmsi: Some("367719770".into()),
+            vessel_name: Some("RIVER RUNNER".into()),
+            movement: VesselMovement::Approaching,
+            route_intersects: true,
+            eta: Some(EtaRangeMinutes::new(6, 10)),
+            opening_propensity: None,
+        })
+    );
+}
+
+fn transition(
+    bridge_key: &str,
+    relation: &str,
+    from_state: &str,
+    to_state: &str,
+    occurred_at_ms: i64,
+) -> BridgeStateTransition {
+    BridgeStateTransition {
+        bridge_key: bridge_key.into(),
+        bridge_name: bridge_key.replace('_', " "),
+        relation: relation.into(),
+        from_state: from_state.into(),
+        to_state: to_state.into(),
+        occurred_at_ms,
+    }
+}
+
+#[test]
+fn ordered_outbound_openings_raise_high_then_very_high_confidence() {
+    let now_ms = 1_786_741_200_000;
+    let high = vec![
+        transition("w_flagler", "upstream", "down", "up", now_ms - 8 * 60_000),
+        transition("sw_1_st", "upstream", "down", "up", now_ms - 4 * 60_000),
+    ];
+    let progress = detect_outbound_progress(&high, now_ms).expect("outbound sequence");
+    assert_eq!(progress.stage, OutboundProgressStage::High);
+    assert_eq!(progress.bridge_key, "sw_1_st");
+
+    let mut very_high = high;
+    very_high.push(transition(
+        "sw_2_ave",
+        "upstream",
+        "down",
+        "up",
+        now_ms - 60_000,
+    ));
+    let progress = detect_outbound_progress(&very_high, now_ms).expect("nearest upstream reached");
+    assert_eq!(progress.stage, OutboundProgressStage::VeryHigh);
+    assert_eq!(progress.bridge_key, "sw_2_ave");
+}
+
+#[test]
+fn a_single_or_inbound_upstream_opening_is_not_outbound_evidence() {
+    let now_ms = 1_786_741_200_000;
+    assert!(
+        detect_outbound_progress(
+            &[transition(
+                "sw_2_ave",
+                "upstream",
+                "down",
+                "up",
+                now_ms - 60_000,
+            )],
+            now_ms,
+        )
+        .is_none()
+    );
+
+    let inbound = vec![
+        transition("brickell", "target", "down", "up", now_ms - 10 * 60_000),
+        transition("sw_2_ave", "upstream", "down", "up", now_ms - 7 * 60_000),
+        transition("sw_1_st", "upstream", "down", "up", now_ms - 3 * 60_000),
+    ];
+    assert!(detect_outbound_progress(&inbound, now_ms).is_none());
+}
+
+#[test]
+fn expired_ais_positions_are_not_evidence_or_fresh_vessel_counts() {
+    let now_ms = 1_786_741_200_000;
+    let mut preferences = AppPreferences::default();
+    preferences.ais.enabled = true;
+    preferences.ais.api_key_configured = true;
+    let channel_id = preferences.profile.home_channel_id.clone();
+    let source_id = format!("aisstream.{channel_id}");
+    let mut item = ais_bridge_item();
+    item.ends_at = chrono::DateTime::from_timestamp_millis(now_ms - 1);
+    let mut source = healthy_source_state(&channel_id, item, now_ms);
+    source.fail_closed_on_error = true;
+    source.cursor.metadata.insert(
+        "fresh_vessel_expirations_ms".into(),
+        format!("[{}]", now_ms - 1),
+    );
+    source
+        .cursor
+        .metadata
+        .insert("last_position_at_ms".into(), now_ms.to_string());
+    let state = PersistedRuntimeState {
+        active_sources: BTreeMap::from([(source_id.clone(), channel_id)]),
+        sources: BTreeMap::from([(source_id, source)]),
+        ..PersistedRuntimeState::default()
+    };
+
+    let (evidence, views) = bridge_evidence(&state, &preferences, now_ms).unwrap();
+    assert_eq!(views[0].availability, AvailabilityDto::Stale);
+    assert_eq!(evidence[0].availability, AvailabilityStatus::Stale);
+    let status = aisstream_status(&preferences, &state, now_ms).unwrap();
+    assert_eq!(status.connection_state, AisConnectionStateDto::Armed);
+    assert_eq!(status.fresh_vessel_count, 0);
+    assert_eq!(
+        status.last_position_at.as_deref(),
+        Some(iso_timestamp(now_ms).unwrap().as_str())
+    );
+}
+
+fn weather_hourly_item(now_ms: i64, probability: f64, gust_kmh: f64) -> CollectorItem {
+    CollectorItem {
+        id: "open-meteo:hourly:fixture".into(),
+        kind: ItemKind::WeatherHourly,
+        title: "Hourly forecast".into(),
+        summary: Some(format!("Rain probability {probability:.0}%")),
+        observed_at: Some(chrono::DateTime::from_timestamp_millis(now_ms).unwrap()),
+        starts_at: Some(chrono::DateTime::from_timestamp_millis(now_ms + 30 * 60_000).unwrap()),
+        ends_at: None,
+        location: Some(Location::point(25.7617, -80.1918)),
+        source: SourceLink {
+            name: "Open-Meteo".into(),
+            url: Some(Url::parse("https://open-meteo.com/").unwrap()),
+        },
+        attributes: BTreeMap::from([
+            ("precipitation_probability".into(), json!(probability)),
+            ("wind_gusts_10m".into(), json!(gust_kmh)),
+            (
+                "units".into(),
+                json!({"precipitation_probability": "%", "wind_gusts_10m": "km/h"}),
+            ),
+        ]),
+    }
+}
+
+fn market_quote_item(change_percent: f64, delay_minutes: Option<u64>) -> CollectorItem {
+    let mut attributes = BTreeMap::from([
+        ("symbol".into(), json!("AMD")),
+        ("label".into(), json!("AMD")),
+        ("price".into(), json!(172.40)),
+        ("previous_close".into(), json!(161.94)),
+        ("change_percent".into(), json!(change_percent)),
+        ("currency".into(), json!("USD")),
+        ("session_label".into(), json!("OPEN")),
+    ]);
+    if let Some(delay_minutes) = delay_minutes {
+        attributes.insert("provider_delay_minutes".into(), json!(delay_minutes));
+        attributes.insert("delay_semantics".into(), json!("provider_reported"));
+    } else {
+        attributes.insert("delay_semantics".into(), json!("not_reported"));
+    }
+    CollectorItem {
+        id: "yahoo-chart:AMD".into(),
+        kind: ItemKind::MarketQuote,
+        title: "AMD".into(),
+        summary: None,
+        observed_at: Some(chrono_now_for_fixture()),
+        starts_at: None,
+        ends_at: None,
+        location: None,
+        source: SourceLink {
+            name: "Yahoo Finance chart · unofficial".into(),
+            url: Some(Url::parse("https://finance.yahoo.com/quote/AMD").unwrap()),
+        },
+        attributes,
+    }
+}
+
+fn news_item(id: &str, title: &str, now_ms: i64) -> CollectorItem {
+    CollectorItem {
+        id: id.into(),
+        kind: ItemKind::News,
+        title: title.into(),
+        summary: None,
+        observed_at: Some(chrono::DateTime::from_timestamp_millis(now_ms).unwrap()),
+        starts_at: None,
+        ends_at: None,
+        location: None,
+        source: SourceLink {
+            name: "Fixture feed".into(),
+            url: Some(Url::parse("https://example.com/feed.xml").unwrap()),
+        },
+        attributes: BTreeMap::new(),
+    }
+}
+
+fn tropical_item(id: &str) -> CollectorItem {
+    CollectorItem {
+        id: format!("nhc:{id}"),
+        kind: ItemKind::TropicalCyclone,
+        title: "TS Fixture".into(),
+        summary: Some("TS Fixture · 50 kt".into()),
+        observed_at: Some(chrono_now_for_fixture()),
+        starts_at: None,
+        ends_at: None,
+        location: Some(Location::point(21.4, -71.2)),
+        source: SourceLink {
+            name: "National Hurricane Center".into(),
+            url: Some(Url::parse("https://www.nhc.noaa.gov/cyclones/").unwrap()),
+        },
+        attributes: BTreeMap::new(),
+    }
+}
+
+fn earthquake_item(id: &str, now_ms: i64) -> CollectorItem {
+    CollectorItem {
+        id: id.into(),
+        kind: ItemKind::Earthquake,
+        title: "M 6.2 fixture earthquake".into(),
+        summary: Some("Fixture earthquake".into()),
+        observed_at: Some(chrono::DateTime::from_timestamp_millis(now_ms).unwrap()),
+        starts_at: None,
+        ends_at: None,
+        location: Some(Location::point(18.4, -66.1)),
+        source: SourceLink {
+            name: "USGS".into(),
+            url: Some(
+                Url::parse("https://earthquake.usgs.gov/earthquakes/eventpage/fixture").unwrap(),
+            ),
+        },
+        attributes: BTreeMap::from([
+            ("magnitude".into(), json!(6.2)),
+            ("status".into(), json!("reviewed")),
+        ]),
+    }
+}
+
+fn official_alert_item(
+    id: &str,
+    message_type: &str,
+    status: &str,
+    ends_ms: Option<i64>,
+) -> CollectorItem {
+    CollectorItem {
+        id: id.into(),
+        kind: ItemKind::OfficialAlert,
+        title: "Flash Flood Warning".into(),
+        summary: Some("Fixture official warning".into()),
+        observed_at: Some(chrono_now_for_fixture()),
+        starts_at: None,
+        ends_at: ends_ms.map(|value| {
+            chrono::DateTime::from_timestamp_millis(value).expect("valid fixture timestamp")
+        }),
+        location: Some(Location::point(25.7617, -80.1918)),
+        source: SourceLink {
+            name: "National Weather Service".into(),
+            url: Some(Url::parse("https://api.weather.gov/alerts/fixture").unwrap()),
+        },
+        attributes: BTreeMap::from([
+            ("instruction".into(), json!("Move to higher ground now.")),
+            ("message_type".into(), json!(message_type)),
+            ("status".into(), json!(status)),
+            ("severity".into(), json!("Severe")),
+        ]),
+    }
+}
+
+fn healthy_source_state(
+    channel_id: &str,
+    item: CollectorItem,
+    last_success_ms: i64,
+) -> SourceState {
+    let mut source = SourceState::empty(channel_id);
+    source.items = vec![item];
+    source.reported_health = HealthState::Healthy;
+    source.last_attempt_ms = Some(last_success_ms);
+    source.last_success_ms = Some(last_success_ms);
+    source
+}
+
+fn clear_decision() -> DecisionSnapshot {
+    DecisionSnapshot {
+        channel_id: "bridge.brickell".into(),
+        subject: "Brickell Avenue".into(),
+        state: BridgeStateDto::Clear,
+        state_label: "No opening likely".into(),
+        meaning: "No actionable bridge evidence.".into(),
+        action: "No opening activity is currently detected.".into(),
+        eta_min: None,
+        eta_max: None,
+        confidence_bps: Some(0),
+        confidence_label: Some("Low estimate".into()),
+        confidence_basis: None,
+        next_legal_slot: None,
+        opening_allowed_now: false,
+        availability: AvailabilityDto::Offline,
+        source_age_seconds: 0,
+    }
+}
+
+async fn engine_with(collector: Arc<dyn Collector>, clock: Arc<FixedClock>) -> RuntimeEngine {
+    RuntimeEngine::initialize(
+        Store::in_memory().await.unwrap(),
+        RuntimeConfig::default(),
+        Arc::new(StaticFactory { collector }),
+        clock,
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn preference_save_does_not_wait_for_collector_network_io() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
+    let engine = Arc::new(
+        engine_with(
+            Arc::new(BlockingCollector {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            }),
+            clock,
+        )
+        .await,
+    );
+    let refresh = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        async move { engine.refresh_all().await }
+    });
+    started.notified().await;
+
+    let mut preferences = engine.get_preferences().await;
+    preferences.profile.name = "Saved during refresh".into();
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        engine.save_preferences(preferences),
+    )
+    .await
+    .expect("preference save must not queue behind collector I/O")
+    .unwrap();
+
+    release.notify_one();
+    refresh.await.unwrap().unwrap();
+    assert_eq!(
+        engine.get_preferences().await.profile.name,
+        "Saved during refresh"
+    );
+    assert!(engine.state.lock().await.sources.is_empty());
+}
+
+async fn install_live_state_write_failure(store: &Store) {
+    sqlx::query(
+        r#"
+            CREATE TRIGGER fail_runtime_live_state_write
+            BEFORE INSERT ON settings
+            WHEN NEW.key = 'runtime.live_state'
+            BEGIN
+                SELECT RAISE(ABORT, 'fixture live-state write failure');
+            END
+            "#,
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn live_fl511_becomes_authoritative_bridge_evidence() {
+    let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
+    let collector = Arc::new(SequenceCollector {
+        calls: AtomicUsize::new(0),
+        fail_after_first: false,
+    });
+    let engine = engine_with(collector, clock).await;
+    let report = engine.refresh_all().await.unwrap();
+    let snapshot = engine.get_snapshot().await.unwrap();
+    assert_eq!(report.succeeded, 1);
+    assert_eq!(snapshot.decision.state, BridgeStateDto::Open);
+    assert_eq!(snapshot.evidence.len(), 1);
+    assert!(
+        snapshot
+            .evidence
+            .iter()
+            .any(|item| item.source_label == "Florida 511")
+    );
+    let intervals = engine
+        .store
+        .list_bridge_state_intervals("fl511.bridge.brickell", "brickell")
+        .await
+        .unwrap();
+    assert_eq!(intervals.len(), 1);
+    assert_eq!(intervals[0].state, "up");
+    assert_eq!(intervals[0].ended_at_ms, None);
+    assert_eq!(snapshot.bridge_intervals.len(), 1);
+    assert_eq!(
+        snapshot.bridge_intervals[0].state,
+        ObservedBridgeStateDto::Up
+    );
+    assert_eq!(
+        snapshot.bridge_intervals[0].relation,
+        BridgeRelationDto::Target
+    );
+    assert_eq!(snapshot.system.collectors_online, 1);
+}
+
+#[tokio::test]
+async fn prior_open_cannot_resolve_from_unknown_degraded_fl511_with_usable_ais() {
+    let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
+    let engine = RuntimeEngine::initialize(
+        Store::in_memory().await.unwrap(),
+        RuntimeConfig::default(),
+        Arc::new(Fl511AndAisFactory {
+            fl511: Arc::new(OpenThenUnknownFl511Collector {
+                calls: AtomicUsize::new(0),
+            }),
+            ais: Arc::new(QuietAisCollector),
+        }),
+        clock.clone(),
+    )
+    .await
+    .unwrap();
+
+    let first = engine.refresh_all().await.unwrap();
+    assert_eq!(first.succeeded, 2);
+    let open = engine.get_snapshot().await.unwrap();
+    assert_eq!(open.decision.state, BridgeStateDto::Open);
+    assert!(
+        open.channels
+            .iter()
+            .find(|channel| channel.id == "bridge.brickell")
+            .unwrap()
+            .active
+    );
+
+    clock.advance(10_000);
+    let second = engine.refresh_all().await.unwrap();
+    assert_eq!(second.succeeded, 2);
+    let unresolved = engine.get_snapshot().await.unwrap();
+    let bridge = unresolved
+        .channels
+        .iter()
+        .find(|channel| channel.id == "bridge.brickell")
+        .unwrap();
+    assert_eq!(bridge.availability, AvailabilityDto::Delayed);
+    assert!(!bridge.active);
+    assert!(
+        !bridge.coverage_complete,
+        "an unknown/degraded FL511 target cannot establish an all-clear"
+    );
+
+    let preferences = engine.get_preferences().await;
+    let bridge_preference = preferences
+        .profile
+        .channels
+        .iter()
+        .find(|channel| channel.id == "bridge.brickell")
+        .unwrap();
+    let state = engine.state.lock().await;
+    assert_eq!(
+        source_availability(
+            &state.sources["aisstream.bridge.brickell"],
+            bridge_preference,
+            clock.now_millis(),
+        )
+        .0,
+        AvailabilityDto::Fresh,
+        "healthy sibling evidence remains usable for positive prediction"
+    );
+}
+
+#[test]
+fn bridge_resolution_requires_current_healthy_nonconflicting_target_down() {
+    let now_ms = 1_786_741_200_000;
+    let preferences = AppPreferences::default();
+    let channel = preferences
+        .profile
+        .channels
+        .iter()
+        .find(|channel| channel.id == "bridge.brickell")
+        .unwrap();
+    let source_id = "fl511.bridge.brickell";
+    let mut state = PersistedRuntimeState {
+        active_sources: BTreeMap::from([(source_id.into(), channel.id.clone())]),
+        ..PersistedRuntimeState::default()
+    };
+    state.sources.insert(
+        source_id.into(),
+        healthy_source_state(
+            &channel.id,
+            bridge_item("253", "Brickell Avenue Bridge", "target", "down"),
+            now_ms,
+        ),
+    );
+
+    assert!(bridge_resolution_confirmed(channel, &state, now_ms));
+
+    state.sources.get_mut(source_id).unwrap().items[0]
+        .attributes
+        .insert("state".into(), json!("unknown"));
+    assert!(!bridge_resolution_confirmed(channel, &state, now_ms));
+
+    let target = &mut state.sources.get_mut(source_id).unwrap().items[0];
+    target.attributes.insert("state".into(), json!("down"));
+    target
+        .attributes
+        .insert("state_conflict".into(), json!(true));
+    assert!(!bridge_resolution_confirmed(channel, &state, now_ms));
+
+    state.sources.get_mut(source_id).unwrap().items[0]
+        .attributes
+        .insert("state_conflict".into(), json!(false));
+    state.sources.get_mut(source_id).unwrap().reported_health = HealthState::Degraded;
+    assert!(!bridge_resolution_confirmed(channel, &state, now_ms));
+
+    let source = state.sources.get_mut(source_id).unwrap();
+    source.reported_health = HealthState::Healthy;
+    source.items.clear();
+    assert!(!bridge_resolution_confirmed(channel, &state, now_ms));
+}
+
+#[test]
+fn predictive_bridge_signal_remains_active_without_resolution_coverage() {
+    let now_ms = 1_786_741_200_000;
+    let preferences = AppPreferences::default();
+    let mut state = PersistedRuntimeState {
+        active_sources: BTreeMap::from([
+            ("fl511.bridge.brickell".into(), "bridge.brickell".into()),
+            ("aisstream.bridge.brickell".into(), "bridge.brickell".into()),
+        ]),
+        ..PersistedRuntimeState::default()
+    };
+    let mut fl511 = healthy_source_state(
+        "bridge.brickell",
+        bridge_item("253", "Brickell Avenue Bridge", "target", "unknown"),
+        now_ms,
+    );
+    fl511.reported_health = HealthState::Degraded;
+    state.sources.insert("fl511.bridge.brickell".into(), fl511);
+    state.sources.insert(
+        "aisstream.bridge.brickell".into(),
+        healthy_source_state("bridge.brickell", ais_bridge_item(), now_ms),
+    );
+    let mut decision = clear_decision();
+    decision.state = BridgeStateDto::Likely;
+    decision.state_label = "Likely opening".into();
+    decision.availability = AvailabilityDto::Fresh;
+
+    let channels = channel_snapshots(&preferences, &state, &decision, now_ms);
+    let bridge = channels
+        .iter()
+        .find(|channel| channel.id == "bridge.brickell")
+        .unwrap();
+    assert!(bridge.active, "AIS may still raise a positive warning");
+    assert!(
+        !bridge.coverage_complete,
+        "AIS cannot establish restoration"
+    );
+}
+
+#[tokio::test]
+async fn live_ais_connection_loss_fails_closed_beside_healthy_fl511() {
+    let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
+    let store = Store::in_memory().await.unwrap();
+    let mut configured_preferences = AppPreferences::default();
+    configured_preferences.ais.enabled = true;
+    configured_preferences.ais.api_key_configured = true;
+    store
+        .set_json(
+            PREFERENCES_KEY,
+            &configured_preferences,
+            "2026-08-14T16:20:00Z",
+        )
+        .await
+        .unwrap();
+    let engine = RuntimeEngine::initialize(
+        store,
+        RuntimeConfig::default(),
+        Arc::new(Fl511AndAisFactory {
+            fl511: Arc::new(DownFl511Collector),
+            ais: Arc::new(AisConnectionLossCollector {
+                calls: AtomicUsize::new(0),
+            }),
+        }),
+        clock.clone(),
+    )
+    .await
+    .unwrap();
+
+    let first = engine.refresh_all().await.unwrap();
+    assert_eq!(first.succeeded, 2);
+    let first_snapshot = engine.get_snapshot().await.unwrap();
+    let first_ais_status = engine.get_aisstream_status().await.unwrap();
+    assert_eq!(
+        first_ais_status.connection_state,
+        AisConnectionStateDto::Live
+    );
+    assert_eq!(first_ais_status.fresh_vessel_count, 1);
+    let first_bridge = first_snapshot
+        .channels
+        .iter()
+        .find(|channel| channel.id == "bridge.brickell")
+        .unwrap();
+    assert!(first_bridge.coverage_complete);
+    assert!(first_snapshot.evidence.iter().any(|item| {
+        item.source_label == "AISStream" && item.availability == AvailabilityDto::Fresh
+    }));
+    let first_success =
+        engine.state.lock().await.sources["aisstream.bridge.brickell"].last_success_ms;
+
+    clock.advance(10_000);
+    let second = engine.refresh_all().await.unwrap();
+    assert_eq!(second.failed, 1);
+    let second_snapshot = engine.get_snapshot().await.unwrap();
+    let second_bridge = second_snapshot
+        .channels
+        .iter()
+        .find(|channel| channel.id == "bridge.brickell")
+        .unwrap();
+    assert!(!second_bridge.coverage_complete);
+    let ais = second_snapshot
+        .evidence
+        .iter()
+        .find(|item| item.source_label == "AISStream")
+        .expect("cached AIS row remains inspectable");
+    assert_eq!(ais.availability, AvailabilityDto::Offline);
+    assert_eq!(ais.contribution_bps, Some(0));
+    let status = engine.get_aisstream_status().await.unwrap();
+    assert_eq!(status.connection_state, AisConnectionStateDto::Disconnected);
+    assert_eq!(status.fresh_vessel_count, 0);
+    assert!(status.last_position_at.is_some());
+    assert_eq!(
+        engine.state.lock().await.sources["aisstream.bridge.brickell"].last_success_ms,
+        first_success,
+        "a lost socket must not refresh source success"
+    );
+}
+
+#[tokio::test]
+async fn ais_secret_can_be_set_replaced_and_cleared_without_restart() {
+    let store = Store::in_memory().await.unwrap();
+    let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
+    let factory = Arc::new(
+        CredentialFreeCollectorFactory::new("PuenteGonorrea fixture (+https://example.invalid)")
+            .unwrap(),
+    );
+    let engine = RuntimeEngine::initialize(store.clone(), RuntimeConfig::default(), factory, clock)
+        .await
+        .unwrap();
+    let mut preferences = engine.get_preferences().await;
+    preferences.ais.enabled = true;
+    preferences.ais.api_key_configured = true;
+    engine.save_preferences(preferences).await.unwrap();
+    assert!(
+        !engine.get_preferences().await.ais.api_key_configured,
+        "a serialized client flag cannot impersonate a host secret"
+    );
+    assert!(
+        !engine
+            .state
+            .lock()
+            .await
+            .active_sources
+            .contains_key("aisstream.bridge.brickell")
+    );
+
+    engine
+        .set_aisstream_key(Some("first-fixture-aisstream-key".into()))
+        .await
+        .unwrap();
+    assert!(engine.get_preferences().await.ais.api_key_configured);
+    let armed = engine.get_aisstream_status().await.unwrap();
+    assert_eq!(armed.connection_state, AisConnectionStateDto::Armed);
+    assert!(armed.source_registered);
+    assert_eq!(armed.fresh_vessel_count, 0);
+    assert!(
+        engine
+            .state
+            .lock()
+            .await
+            .active_sources
+            .contains_key("aisstream.bridge.brickell")
+    );
+
+    engine
+        .set_aisstream_key(Some("replacement-fixture-aisstream-key".into()))
+        .await
+        .unwrap();
+    assert!(engine.get_preferences().await.ais.api_key_configured);
+    assert!(
+        !engine
+            .state
+            .lock()
+            .await
+            .sources
+            .contains_key("aisstream.bridge.brickell")
+    );
+
+    engine.set_aisstream_key(None).await.unwrap();
+    assert!(!engine.get_preferences().await.ais.api_key_configured);
+    let needs_key = engine.get_aisstream_status().await.unwrap();
+    assert_eq!(needs_key.connection_state, AisConnectionStateDto::NeedsKey);
+    assert!(!needs_key.source_registered);
+    assert!(
+        !engine
+            .state
+            .lock()
+            .await
+            .active_sources
+            .contains_key("aisstream.bridge.brickell")
+    );
+    let persisted = store
+        .get_json::<AppPreferences>(PREFERENCES_KEY)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!persisted.ais.api_key_configured);
+}
+
+#[tokio::test]
+async fn failed_ais_secret_transaction_restores_factory_and_published_state() {
+    let store = Store::in_memory().await.unwrap();
+    let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
+    let factory = Arc::new(
+        CredentialFreeCollectorFactory::new("PuenteGonorrea fixture (+https://example.invalid)")
+            .unwrap(),
+    );
+    let engine = RuntimeEngine::initialize(
+        store.clone(),
+        RuntimeConfig::default(),
+        factory.clone(),
+        clock,
+    )
+    .await
+    .unwrap();
+    let mut enabled = engine.get_preferences().await;
+    enabled.ais.enabled = true;
+    engine.save_preferences(enabled).await.unwrap();
+    let old_preferences = engine.get_preferences().await;
+    let old_snapshot = engine.get_snapshot().await.unwrap();
+    install_live_state_write_failure(&store).await;
+
+    let result = engine
+        .set_aisstream_key(Some("must-not-survive-storage-failure".into()))
+        .await;
+
+    assert!(matches!(result, Err(RuntimeError::Storage(_))));
+    assert!(!factory.aisstream_key_configured().unwrap());
+    assert_eq!(engine.get_preferences().await, old_preferences);
+    assert_eq!(engine.get_snapshot().await.unwrap(), old_snapshot);
+    let status = engine.get_aisstream_status().await.unwrap();
+    assert_eq!(status.connection_state, AisConnectionStateDto::NeedsKey);
+    assert!(!status.source_registered);
+    assert_eq!(
+        store
+            .get_json::<AppPreferences>(PREFERENCES_KEY)
+            .await
+            .unwrap(),
+        Some(old_preferences)
+    );
+}
+
+#[tokio::test]
+async fn ais_enablement_or_radius_change_retires_cached_positions_immediately() {
+    let now_ms = 1_786_741_200_000;
+    let store = Store::in_memory().await.unwrap();
+    let clock = Arc::new(FixedClock(AtomicI64::new(now_ms)));
+    let factory = Arc::new(
+        CredentialFreeCollectorFactory::new("PuenteGonorrea fixture (+https://example.invalid)")
+            .unwrap(),
+    );
+    let engine = RuntimeEngine::initialize(store, RuntimeConfig::default(), factory, clock)
+        .await
+        .unwrap();
+    let mut preferences = engine.get_preferences().await;
+    preferences.ais.enabled = true;
+    engine.save_preferences(preferences).await.unwrap();
+    engine
+        .set_aisstream_key(Some("fixture-aisstream-key".into()))
+        .await
+        .unwrap();
+    let source_id = "aisstream.bridge.brickell".to_owned();
+    let mut cached = healthy_source_state("bridge.brickell", ais_bridge_item(), now_ms);
+    cached.fail_closed_on_error = true;
+    engine
+        .state
+        .lock()
+        .await
+        .sources
+        .insert(source_id.clone(), cached);
+    assert_eq!(
+        engine
+            .get_aisstream_status()
+            .await
+            .unwrap()
+            .connection_state,
+        AisConnectionStateDto::Live
+    );
+
+    let mut resized = engine.get_preferences().await;
+    resized.ais.radius_kilometers = 18.0;
+    engine.save_preferences(resized).await.unwrap();
+    let resized_status = engine.get_aisstream_status().await.unwrap();
+    assert_eq!(
+        resized_status.connection_state,
+        AisConnectionStateDto::Armed
+    );
+    assert_eq!(resized_status.fresh_vessel_count, 0);
+    assert!(!engine.state.lock().await.sources.contains_key(&source_id));
+
+    let mut recached = healthy_source_state("bridge.brickell", ais_bridge_item(), now_ms);
+    recached.fail_closed_on_error = true;
+    engine
+        .state
+        .lock()
+        .await
+        .sources
+        .insert(source_id.clone(), recached);
+    let mut disabled = engine.get_preferences().await;
+    disabled.ais.enabled = false;
+    engine.save_preferences(disabled).await.unwrap();
+    let disabled_status = engine.get_aisstream_status().await.unwrap();
+    assert_eq!(
+        disabled_status.connection_state,
+        AisConnectionStateDto::Disabled
+    );
+    assert!(!disabled_status.source_registered);
+    assert!(!engine.state.lock().await.sources.contains_key(&source_id));
+}
+
+#[tokio::test]
+async fn failed_persistence_keeps_new_backoff_and_source_state_in_memory() {
+    let store = Store::in_memory().await.unwrap();
+    let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
+    let collector = Arc::new(SequenceCollector {
+        calls: AtomicUsize::new(0),
+        fail_after_first: false,
+    });
+    let engine = RuntimeEngine::initialize(
+        store.clone(),
+        RuntimeConfig::default(),
+        Arc::new(StaticFactory { collector }),
+        clock,
+    )
+    .await
+    .unwrap();
+    install_live_state_write_failure(&store).await;
+
+    let result = engine.refresh_all().await;
+    assert!(matches!(result, Err(RuntimeError::Storage(_))));
+    assert!(
+        store
+            .get_json::<PersistedRuntimeState>(LIVE_STATE_KEY)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        engine.get_snapshot().await.unwrap().decision.state,
+        BridgeStateDto::Open
+    );
+    let published = engine.state.lock().await;
+    assert_eq!(published.sources.len(), 1);
+    assert_eq!(published.last_cycle_ms, Some(1_786_741_200_000));
+}
+
+#[tokio::test]
+async fn cached_data_moves_from_delayed_to_stale_after_failure() {
+    let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
+    let collector = Arc::new(SequenceCollector {
+        calls: AtomicUsize::new(0),
+        fail_after_first: true,
+    });
+    let engine = engine_with(collector, clock.clone()).await;
+    engine.refresh_all().await.unwrap();
+    clock.advance(30_000);
+    engine.refresh_all().await.unwrap();
+    let delayed = engine.get_snapshot().await.unwrap();
+    assert_eq!(delayed.channels[0].availability, AvailabilityDto::Delayed);
+    clock.advance(3 * 60_000);
+    let stale = engine.get_snapshot().await.unwrap();
+    assert_eq!(stale.channels[0].availability, AvailabilityDto::Stale);
+    assert_eq!(stale.evidence[0].state, EvidenceStateDto::Stale);
+}
+
+#[test]
+fn a_healthy_source_stays_fresh_until_its_stale_deadline() {
+    let now_ms = 1_786_741_200_000;
+    let preferences = AppPreferences::default();
+    let hurricane = preferences
+        .profile
+        .channels
+        .iter()
+        .find(|channel| channel.kind == ChannelKindDto::Hurricane)
+        .unwrap();
+    let mut source = SourceState::empty(&hurricane.id);
+    source.reported_health = HealthState::Healthy;
+    source.last_success_ms = Some(now_ms - 5 * 60 * 60 * 1_000);
+
+    assert_eq!(
+        source_availability(&source, hurricane, now_ms).0,
+        AvailabilityDto::Fresh
+    );
+    source.last_success_ms = Some(now_ms - 361 * 60 * 1_000);
+    assert_eq!(
+        source_availability(&source, hurricane, now_ms).0,
+        AvailabilityDto::Stale
+    );
+}
+
+#[tokio::test]
+async fn collector_minimum_interval_limits_background_polling_but_not_manual_refresh() {
+    let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
+    let collector = Arc::new(SequenceCollector {
+        calls: AtomicUsize::new(0),
+        fail_after_first: false,
+    });
+    let engine = RuntimeEngine::initialize(
+        Store::in_memory().await.unwrap(),
+        RuntimeConfig::default(),
+        Arc::new(CadencedFactory {
+            collector: collector.clone(),
+            minimum_interval: Duration::from_secs(300),
+        }),
+        clock.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(engine.refresh_due().await.unwrap().attempted, 1);
+    clock.advance(60_000);
+    let scheduled = engine.refresh_due().await.unwrap();
+    assert_eq!(scheduled.attempted, 0);
+    assert_eq!(scheduled.skipped_backoff, 1);
+    assert_eq!(collector.calls.load(Ordering::SeqCst), 1);
+
+    assert_eq!(engine.refresh_all().await.unwrap().attempted, 1);
+    assert_eq!(collector.calls.load(Ordering::SeqCst), 2);
+}
+
+struct PanicCollector;
+
+#[async_trait]
+impl Collector for PanicCollector {
+    fn name(&self) -> &'static str {
+        "must-not-run"
+    }
+
+    async fn collect(&self, _context: &CollectContext) -> Result<CollectorBatch, CollectorError> {
+        panic!("collector was not expected to run")
+    }
+}
+
+#[tokio::test]
+async fn preferences_persist_across_runtime_instances() {
+    let store = Store::in_memory().await.unwrap();
+    let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
+    let factory = Arc::new(StaticFactory {
+        collector: Arc::new(PanicCollector),
+    });
+    let first = RuntimeEngine::initialize(
+        store.clone(),
+        RuntimeConfig::default(),
+        factory.clone(),
+        clock.clone(),
+    )
+    .await
+    .unwrap();
+    let mut preferences = first.get_preferences().await;
+    preferences.profile.name = "My bridge desk".into();
+    preferences.profile.channels[4].enabled = false;
+    preferences.profile.channels[6].enabled = true;
+    first.save_preferences(preferences).await.unwrap();
+    let second = RuntimeEngine::initialize(store, RuntimeConfig::default(), factory, clock)
+        .await
+        .unwrap();
+    assert_eq!(
+        second.get_preferences().await.profile.name,
+        "My bridge desk"
+    );
+    assert!(!second.get_preferences().await.profile.channels[4].enabled);
+    assert!(second.get_preferences().await.profile.channels[6].enabled);
+}
+
+#[tokio::test]
+async fn failed_preference_transaction_keeps_durable_and_published_pair_unchanged() {
+    let store = Store::in_memory().await.unwrap();
+    let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
+    let factory = Arc::new(StaticFactory {
+        collector: Arc::new(PanicCollector),
+    });
+    let engine = RuntimeEngine::initialize(store.clone(), RuntimeConfig::default(), factory, clock)
+        .await
+        .unwrap();
+    let old_preferences = engine.get_preferences().await;
+    let old_snapshot = engine.get_snapshot().await.unwrap();
+    let mut replacement = old_preferences.clone();
+    replacement.profile.name = "Must roll back".into();
+    install_live_state_write_failure(&store).await;
+
+    let result = engine.save_preferences(replacement).await;
+    assert!(matches!(result, Err(RuntimeError::Storage(_))));
+    assert_eq!(engine.get_preferences().await, old_preferences);
+    assert_eq!(engine.get_snapshot().await.unwrap(), old_snapshot);
+    assert_eq!(
+        store
+            .get_json::<AppPreferences>(PREFERENCES_KEY)
+            .await
+            .unwrap(),
+        Some(old_preferences)
+    );
+    assert!(
+        store
+            .get_json::<PersistedRuntimeState>(LIVE_STATE_KEY)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn backoff_is_bounded() {
+    let config = RuntimeConfig::default();
+    assert_eq!(
+        config.user_agent,
+        "PuenteGonorrea/0.1 (+https://github.com/cmiami/PuenteGonorrea)"
+    );
+    assert_eq!(backoff_for(&config, 1), config.backoff_initial);
+    assert_eq!(backoff_for(&config, 100), config.backoff_max);
+}
+
+#[test]
+fn personal_rain_rule_activates_when_threshold_crosses_in_lead_window() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let item = weather_hourly_item(now_ms, 70.0, 10.0);
+    let activation =
+        evaluate_weather_activation(&channel, &[&item], AvailabilityDto::Fresh, now_ms);
+
+    assert_eq!(activation.state, PersonalWeatherState::RainHeadsUp);
+    assert!(activation.summary.starts_with("Personal rain heads-up"));
+    assert!(weather_activation(&channel, &[&item], AvailabilityDto::Fresh, now_ms).1);
+}
+
+#[test]
+fn personal_rain_rule_does_not_activate_below_threshold() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let item = weather_hourly_item(now_ms, 59.0, 10.0);
+    let activation =
+        evaluate_weather_activation(&channel, &[&item], AvailabilityDto::Fresh, now_ms);
+
+    assert_eq!(activation.state, PersonalWeatherState::Normal);
+    assert!(!activation.summary.contains("heads-up"));
+    assert!(!weather_activation(&channel, &[&item], AvailabilityDto::Fresh, now_ms).1);
+}
+
+#[test]
+fn personal_rain_rule_is_suppressed_for_stale_data() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let item = weather_hourly_item(now_ms, 90.0, 10.0);
+    let activation =
+        evaluate_weather_activation(&channel, &[&item], AvailabilityDto::Stale, now_ms);
+
+    assert_eq!(activation.state, PersonalWeatherState::Stale);
+    assert!(activation.summary.contains("personal rules suppressed"));
+    assert!(!weather_activation(&channel, &[&item], AvailabilityDto::Stale, now_ms).1);
+}
+
+#[test]
+fn personal_rain_rule_respects_disabled_setting() {
+    let now_ms = 1_786_741_200_000;
+    let mut channel = AppPreferences::default().profile.channels[1].clone();
+    channel
+        .scope
+        .insert("rainAlertEnabled".into(), json!(false));
+    let item = weather_hourly_item(now_ms, 90.0, 10.0);
+    let activation =
+        evaluate_weather_activation(&channel, &[&item], AvailabilityDto::Fresh, now_ms);
+
+    assert_eq!(activation.state, PersonalWeatherState::Normal);
+    assert!(!weather_activation(&channel, &[&item], AvailabilityDto::Fresh, now_ms).1);
+}
+
+#[test]
+fn rain_probability_requires_percent_units_and_a_bounded_value() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let valid = weather_hourly_item(now_ms, 90.0, 10.0);
+    assert!(weather_activation(&channel, &[&valid], AvailabilityDto::Fresh, now_ms).1);
+
+    let mut unknown_unit = valid.clone();
+    unknown_unit.attributes.insert(
+        "units".into(),
+        json!({"precipitation_probability": "ratio", "wind_gusts_10m": "km/h"}),
+    );
+    assert!(!weather_activation(&channel, &[&unknown_unit], AvailabilityDto::Fresh, now_ms).1);
+
+    let out_of_range = weather_hourly_item(now_ms, 140.0, 10.0);
+    assert!(!weather_activation(&channel, &[&out_of_range], AvailabilityDto::Fresh, now_ms).1);
+}
+
+#[test]
+fn personal_wind_rule_respects_disabled_setting() {
+    let now_ms = 1_786_741_200_000;
+    let mut channel = AppPreferences::default().profile.channels[1].clone();
+    channel
+        .scope
+        .insert("windAlertEnabled".into(), json!(false));
+    let item = weather_hourly_item(now_ms, 10.0, 120.0);
+    let activation =
+        evaluate_weather_activation(&channel, &[&item], AvailabilityDto::Fresh, now_ms);
+
+    assert_eq!(activation.state, PersonalWeatherState::Normal);
+    assert!(!weather_activation(&channel, &[&item], AvailabilityDto::Fresh, now_ms).1);
+}
+
+#[test]
+fn forecast_wind_rule_respects_hour_bucket_horizon_and_unit_allowlist() {
+    let now_ms = 1_786_741_200_000;
+    let mut channel = AppPreferences::default().profile.channels[1].clone();
+    channel
+        .scope
+        .insert("rainAlertEnabled".into(), json!(false));
+    channel.scope.insert("rainLeadMinutes".into(), json!(90));
+
+    let valid = weather_hourly_item(now_ms, 10.0, 120.0);
+    let valid_activation =
+        evaluate_weather_activation(&channel, &[&valid], AvailabilityDto::Fresh, now_ms);
+    assert_eq!(valid_activation.state, PersonalWeatherState::WindHeadsUp);
+    assert!(valid_activation.summary.contains("in 30 min"));
+    let signal = channel_signal(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&valid],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert!(signal.detail.contains("Gusts 75 mph in 30 min"));
+    let metric_signal = channel_signal(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&valid],
+        true,
+        now_ms,
+        UnitSystem::Metric,
+    )
+    .unwrap();
+    assert!(metric_signal.detail.contains("Gusts 120 km/h in 30 min"));
+
+    let mut beyond_horizon = valid.clone();
+    beyond_horizon.starts_at =
+        Some(chrono::DateTime::from_timestamp_millis(now_ms + 91 * 60_000).unwrap());
+    let activation =
+        evaluate_weather_activation(&channel, &[&beyond_horizon], AvailabilityDto::Fresh, now_ms);
+    assert_eq!(activation.state, PersonalWeatherState::Normal);
+
+    let mut old_bucket = valid.clone();
+    old_bucket.starts_at =
+        Some(chrono::DateTime::from_timestamp_millis(now_ms - 6 * 60_000).unwrap());
+    let activation =
+        evaluate_weather_activation(&channel, &[&old_bucket], AvailabilityDto::Fresh, now_ms);
+    assert_eq!(activation.state, PersonalWeatherState::WindHeadsUp);
+
+    let mut unknown_unit = valid;
+    unknown_unit
+        .attributes
+        .insert("units".into(), json!({"wind_gusts_10m": "kn"}));
+    let activation =
+        evaluate_weather_activation(&channel, &[&unknown_unit], AvailabilityDto::Fresh, now_ms);
+    assert_eq!(activation.state, PersonalWeatherState::Normal);
+}
+
+#[test]
+fn current_wind_rule_requires_a_current_bounded_timestamp() {
+    let now_ms = 1_786_741_200_000;
+    let mut channel = AppPreferences::default().profile.channels[1].clone();
+    channel
+        .scope
+        .insert("rainAlertEnabled".into(), json!(false));
+    let mut item = weather_hourly_item(now_ms, 10.0, 120.0);
+    item.kind = ItemKind::WeatherCurrent;
+    item.starts_at = None;
+    item.observed_at = Some(chrono::DateTime::from_timestamp_millis(now_ms).unwrap());
+    assert!(weather_activation(&channel, &[&item], AvailabilityDto::Fresh, now_ms).1);
+
+    item.observed_at = None;
+    assert!(!weather_activation(&channel, &[&item], AvailabilityDto::Fresh, now_ms).1);
+    item.observed_at =
+        Some(chrono::DateTime::from_timestamp_millis(now_ms + 5 * 60_000 + 1).unwrap());
+    assert!(!weather_activation(&channel, &[&item], AvailabilityDto::Fresh, now_ms).1);
+    item.observed_at = Some(
+        chrono::DateTime::from_timestamp_millis(
+            now_ms - i64::from(channel.max_age_minutes) * 60_000 - 1,
+        )
+        .unwrap(),
+    );
+    assert!(!weather_activation(&channel, &[&item], AvailabilityDto::Fresh, now_ms).1);
+}
+
+#[test]
+fn stale_area_weather_cannot_activate_beside_a_fresh_area() {
+    let now_ms = 1_786_741_200_000;
+    let mut preferences = AppPreferences::default();
+    let mut second_area = preferences.areas[0].clone();
+    second_area.id = "area.boston".into();
+    second_area.label = "Boston, Massachusetts".into();
+    second_area.latitude = 42.3601;
+    second_area.longitude = -71.0589;
+    preferences.areas.push(second_area);
+    let channel = &mut preferences.profile.channels[1];
+    channel
+        .scope
+        .insert("areaIds".into(), json!(["area.miami", "area.boston"]));
+
+    let mut fresh_item = weather_hourly_item(now_ms, 10.0, 10.0);
+    fresh_item.id = "weather:fresh-area".into();
+    fresh_item
+        .attributes
+        .insert("area_label".into(), json!("Miami, Florida"));
+    let mut stale_item = weather_hourly_item(now_ms, 95.0, 10.0);
+    stale_item.id = "weather:stale-area".into();
+    stale_item
+        .attributes
+        .insert("area_label".into(), json!("Boston, Massachusetts"));
+
+    let mut state = PersistedRuntimeState {
+        active_sources: BTreeMap::from([
+            ("weather.area.fresh".into(), "weather.miami".into()),
+            ("weather.area.stale".into(), "weather.miami".into()),
+        ]),
+        ..PersistedRuntimeState::default()
+    };
+    state.sources.insert(
+        "weather.area.fresh".into(),
+        healthy_source_state("weather.miami", fresh_item, now_ms),
+    );
+    state.sources.insert(
+        "weather.area.stale".into(),
+        healthy_source_state("weather.miami", stale_item, now_ms - 16 * 60_000),
+    );
+
+    let channels = channel_snapshots(&preferences, &state, &clear_decision(), now_ms);
+    let weather = channels
+        .iter()
+        .find(|channel| channel.id == "weather.miami")
+        .unwrap();
+
+    assert_eq!(weather.availability, AvailabilityDto::Delayed);
+    assert_eq!(weather.age_seconds, 16 * 60);
+    assert!(!weather.coverage_complete);
+    assert!(!weather.active, "stale 95% rain must not activate");
+    assert!(weather.signal.is_none());
+    assert!(!weather.summary.contains("95%"));
+    assert!(
+        weather
+            .summary
+            .contains("partial coverage (1/2 sources usable)")
+    );
+    assert!(weather.summary.contains("stale/offline items suppressed"));
+}
+
+#[test]
+fn stale_feed_item_cannot_activate_beside_a_fresh_feed() {
+    let now_ms = 1_786_741_200_000;
+    let mut preferences = AppPreferences::default();
+    let channel = &mut preferences.profile.channels[4];
+    channel.scope.insert(
+        "feeds".into(),
+        json!([
+            "https://fresh.example/feed",
+            "https://offline.example/feed",
+            "https://stale.example/feed"
+        ]),
+    );
+
+    let mut state = PersistedRuntimeState {
+        active_sources: BTreeMap::from([
+            ("rss.feed.fresh".into(), "news.local".into()),
+            ("rss.feed.offline".into(), "news.local".into()),
+            ("rss.feed.stale".into(), "news.local".into()),
+        ]),
+        ..PersistedRuntimeState::default()
+    };
+    state.sources.insert(
+        "rss.feed.fresh".into(),
+        healthy_source_state(
+            "news.local",
+            news_item("news:fresh", "Neighborhood arts calendar", now_ms),
+            now_ms,
+        ),
+    );
+    state
+        .sources
+        .get_mut("rss.feed.fresh")
+        .unwrap()
+        .items
+        .push(news_item(
+            "news:old-on-fresh-source",
+            "Breaking Miami transportation archive",
+            now_ms - 181 * 60_000,
+        ));
+    // The cached item itself has a recent publication time; its collector
+    // cache is nevertheless stale and must remain non-actionable.
+    state.sources.insert(
+        "rss.feed.stale".into(),
+        healthy_source_state(
+            "news.local",
+            news_item(
+                "news:stale",
+                "Breaking Miami transportation closure",
+                now_ms,
+            ),
+            now_ms - 181 * 60_000,
+        ),
+    );
+    let mut offline = healthy_source_state(
+        "news.local",
+        news_item(
+            "news:offline",
+            "Breaking Miami transportation emergency",
+            now_ms,
+        ),
+        now_ms,
+    );
+    offline.last_success_ms = None;
+    state.sources.insert("rss.feed.offline".into(), offline);
+
+    let channels = channel_snapshots(&preferences, &state, &clear_decision(), now_ms);
+    let news = channels
+        .iter()
+        .find(|channel| channel.id == "news.local")
+        .unwrap();
+
+    assert_eq!(news.availability, AvailabilityDto::Delayed);
+    assert_eq!(news.age_seconds, 181 * 60);
+    assert!(!news.coverage_complete);
+    assert!(
+        !news.active,
+        "stale or offline matching feed items must not activate"
+    );
+    assert!(news.signal.is_none());
+    assert!(
+        news.summary
+            .contains("No current feed items match this channel")
+    );
+    assert!(
+        news.summary
+            .contains("partial coverage (1/3 sources usable)")
+    );
+    assert!(news.summary.contains("stale/offline items suppressed"));
+}
+
+#[test]
+fn partial_source_loss_cannot_look_like_a_trustworthy_resolution() {
+    let now_ms = 1_786_741_200_000;
+    let mut preferences = AppPreferences::default();
+    preferences.profile.channels[4].scope.insert(
+        "feeds".into(),
+        json!(["https://match.example/feed", "https://quiet.example/feed"]),
+    );
+    let mut state = PersistedRuntimeState {
+        active_sources: BTreeMap::from([
+            ("rss.match".into(), "news.local".into()),
+            ("rss.quiet".into(), "news.local".into()),
+        ]),
+        ..PersistedRuntimeState::default()
+    };
+    state.sources.insert(
+        "rss.match".into(),
+        healthy_source_state(
+            "news.local",
+            news_item("news:match", "Miami transportation closure", now_ms),
+            now_ms,
+        ),
+    );
+    state.sources.insert(
+        "rss.quiet".into(),
+        healthy_source_state(
+            "news.local",
+            news_item("news:quiet", "Neighborhood arts calendar", now_ms),
+            now_ms,
+        ),
+    );
+
+    let before = channel_snapshots(&preferences, &state, &clear_decision(), now_ms);
+    let before = before
+        .iter()
+        .find(|channel| channel.id == "news.local")
+        .unwrap();
+    assert_eq!(before.availability, AvailabilityDto::Fresh);
+    assert!(before.coverage_complete);
+    assert!(before.active);
+    assert!(before.signal.is_some());
+
+    // A delayed source remains usable, so complete delayed coverage is
+    // distinguishable from partial source loss.
+    state.sources.get_mut("rss.quiet").unwrap().last_error = Some("fixture delay".into());
+    let delayed = channel_snapshots(&preferences, &state, &clear_decision(), now_ms);
+    let delayed = delayed
+        .iter()
+        .find(|channel| channel.id == "news.local")
+        .unwrap();
+    assert_eq!(delayed.availability, AvailabilityDto::Delayed);
+    assert!(delayed.coverage_complete);
+    assert!(delayed.active);
+
+    // Losing the only matching source must not emit an inactive snapshot
+    // that a consumer could mistake for a trustworthy all-clear.
+    state.sources.get_mut("rss.match").unwrap().last_success_ms = None;
+    let after = channel_snapshots(&preferences, &state, &clear_decision(), now_ms);
+    let after = after
+        .iter()
+        .find(|channel| channel.id == "news.local")
+        .unwrap();
+    assert_eq!(after.availability, AvailabilityDto::Delayed);
+    assert!(!after.coverage_complete);
+    assert!(!after.active);
+    assert!(after.signal.is_none());
+    assert!(
+        after
+            .summary
+            .contains("partial coverage (1/2 sources usable)")
+    );
+}
+
+#[test]
+fn news_item_age_uses_the_entry_timestamp_and_fails_closed() {
+    let now_ms = 1_786_741_200_000;
+    let channel = &AppPreferences::default().profile.channels[4];
+    let at_limit = news_item(
+        "news:at-limit",
+        "Miami transportation update",
+        now_ms - i64::from(channel.max_age_minutes) * 60_000,
+    );
+    let too_old = news_item(
+        "news:too-old",
+        "Miami transportation update",
+        now_ms - i64::from(channel.max_age_minutes) * 60_000 - 1,
+    );
+    let near_future = news_item(
+        "news:clock-skew",
+        "Miami transportation update",
+        now_ms + 5 * 60_000,
+    );
+    let far_future = news_item(
+        "news:future",
+        "Miami transportation update",
+        now_ms + 5 * 60_000 + 1,
+    );
+    let mut missing_time = news_item("news:no-time", "Miami transportation update", now_ms);
+    missing_time.observed_at = None;
+
+    assert!(news_item_matches_scope(&at_limit, channel, now_ms));
+    assert!(news_item_matches_scope(&near_future, channel, now_ms));
+    assert!(!news_item_matches_scope(&too_old, channel, now_ms));
+    assert!(!news_item_matches_scope(&far_future, channel, now_ms));
+    assert!(!news_item_matches_scope(&missing_time, channel, now_ms));
+}
+
+#[test]
+fn tropical_scope_is_fixed_to_atlantic_and_has_one_enforced_activation_gate() {
+    let now_ms = 1_786_741_200_000;
+    let preferences = AppPreferences::default();
+    let mut channel = preferences.profile.channels[3].clone();
+    let atlantic = tropical_item("al092026");
+    let pacific = tropical_item("ep052026");
+    let coverage = ChannelCoverage {
+        availability: AvailabilityDto::Fresh,
+        age_seconds: 0,
+        total_sources: 1,
+        usable_sources: 1,
+        fresh_sources: 1,
+    };
+
+    channel
+        .scope
+        .insert("allAtlanticSystems".into(), json!(true));
+    let (pacific_summary, pacific_active) = channel_summary(
+        ChannelKindDto::Hurricane,
+        &channel,
+        &[&pacific],
+        &clear_decision(),
+        &coverage,
+        now_ms,
+        &preferences.areas,
+        UnitSystem::Imperial,
+    );
+    assert!(!pacific_active);
+    assert!(pacific_summary.contains("No active Atlantic cyclone"));
+
+    channel
+        .scope
+        .insert("allAtlanticSystems".into(), json!(false));
+    let (guarded_summary, guarded_active) = channel_summary(
+        ChannelKindDto::Hurricane,
+        &channel,
+        &[&atlantic],
+        &clear_decision(),
+        &coverage,
+        now_ms,
+        &preferences.areas,
+        UnitSystem::Imperial,
+    );
+    assert!(!guarded_active);
+    assert!(guarded_summary.contains("local impact is not implemented"));
+
+    channel
+        .scope
+        .insert("allAtlanticSystems".into(), json!(true));
+    let (all_summary, all_active) = channel_summary(
+        ChannelKindDto::Hurricane,
+        &channel,
+        &[&atlantic],
+        &clear_decision(),
+        &coverage,
+        now_ms,
+        &preferences.areas,
+        UnitSystem::Imperial,
+    );
+    assert!(all_active);
+    assert!(all_summary.contains("1 active Atlantic cyclone"));
+}
+
+#[test]
+fn material_key_changes_for_same_count_alert_replacements() {
+    let now_ms = 1_786_741_200_000;
+    let preferences = AppPreferences::default();
+    let decision = clear_decision();
+    let key = |kind, channel: &ChannelPreference, item: &CollectorItem| {
+        channel_material_key(kind, channel, &[item], &decision, true, now_ms)
+    };
+
+    let official_channel = &preferences.profile.channels[2];
+    let official_a = official_alert_item("nws:alert-a", "Alert", "Actual", Some(now_ms + 60_000));
+    let official_b = official_alert_item("nws:alert-b", "Alert", "Actual", Some(now_ms + 60_000));
+    assert_ne!(
+        key(ChannelKindDto::Official, official_channel, &official_a),
+        key(ChannelKindDto::Official, official_channel, &official_b)
+    );
+
+    let news_channel = &preferences.profile.channels[4];
+    let news_a = news_item("news:a", "Miami transportation update", now_ms);
+    let news_b = news_item("news:b", "Miami transportation update", now_ms);
+    assert_ne!(
+        key(ChannelKindDto::News, news_channel, &news_a),
+        key(ChannelKindDto::News, news_channel, &news_b)
+    );
+
+    let mut tropical_channel = preferences.profile.channels[3].clone();
+    tropical_channel
+        .scope
+        .insert("allAtlanticSystems".into(), json!(true));
+    let storm_a = tropical_item("al012026");
+    let storm_b = tropical_item("al022026");
+    assert_ne!(
+        key(ChannelKindDto::Hurricane, &tropical_channel, &storm_a),
+        key(ChannelKindDto::Hurricane, &tropical_channel, &storm_b)
+    );
+
+    let mut earthquake_channel = preferences.profile.channels[5].clone();
+    earthquake_channel.enabled = true;
+    let earthquake_a = earthquake_item("usgs:a", now_ms);
+    let earthquake_b = earthquake_item("usgs:b", now_ms);
+    assert_ne!(
+        key(
+            ChannelKindDto::Earthquake,
+            &earthquake_channel,
+            &earthquake_a
+        ),
+        key(
+            ChannelKindDto::Earthquake,
+            &earthquake_channel,
+            &earthquake_b
+        )
+    );
+}
+
+#[test]
+fn material_key_is_order_independent_for_the_same_item_set() {
+    let now_ms = 1_786_741_200_000;
+    let channel = &AppPreferences::default().profile.channels[4];
+    let decision = clear_decision();
+    let first = news_item("news:a", "Miami transportation update", now_ms);
+    let second = news_item("news:b", "Miami transportation update", now_ms);
+
+    let forward = channel_material_key(
+        ChannelKindDto::News,
+        channel,
+        &[&first, &second],
+        &decision,
+        true,
+        now_ms,
+    );
+    let reverse = channel_material_key(
+        ChannelKindDto::News,
+        channel,
+        &[&second, &first],
+        &decision,
+        true,
+        now_ms,
+    );
+
+    assert_eq!(forward, reverse);
+}
+
+#[test]
+fn official_signal_exposes_bounded_provider_content_and_replacement_identity() {
+    let now_ms = 1_786_741_200_000;
+    let expires_ms = now_ms + 30 * 60_000;
+    let preferences = AppPreferences::default();
+    let mut first = official_alert_item("nws:alert-a", "Alert", "Actual", Some(expires_ms));
+    first.title = "Flash Flood Warning".into();
+    first.summary = Some("Flash flooding is occurring near downtown Miami.".into());
+    first.attributes.insert(
+        "instruction".into(),
+        json!("Move to higher ground now. Do not enter flooded roads."),
+    );
+    let mut state = PersistedRuntimeState {
+        active_sources: BTreeMap::from([("nws.area.miami".into(), "official.miami".into())]),
+        ..PersistedRuntimeState::default()
+    };
+    state.sources.insert(
+        "nws.area.miami".into(),
+        healthy_source_state("official.miami", first, now_ms),
+    );
+
+    let first_snapshot = channel_snapshots(&preferences, &state, &clear_decision(), now_ms);
+    let first_snapshot = first_snapshot
+        .iter()
+        .find(|channel| channel.id == "official.miami")
+        .unwrap();
+    let first_key = first_snapshot.material_key.clone();
+    let first_summary = first_snapshot.summary.clone();
+    let signal = first_snapshot.signal.as_ref().unwrap();
+    assert_eq!(signal.headline, "Flash Flood Warning");
+    assert_eq!(
+        signal.detail,
+        "Flash flooding is occurring near downtown Miami."
+    );
+    assert_eq!(
+        signal.action,
+        "The official source reports this alert as active."
+    );
+    assert_eq!(signal.severity.as_deref(), Some("Severe"));
+    assert_eq!(
+        signal.expires_at.as_deref(),
+        Some(iso_timestamp(expires_ms).unwrap().as_str())
+    );
+    let json = serde_json::to_value(first_snapshot).unwrap();
+    assert_eq!(json["coverageComplete"], true);
+    assert_eq!(
+        json["signal"]["expiresAt"],
+        iso_timestamp(expires_ms).unwrap()
+    );
+
+    let mut replacement = official_alert_item("nws:alert-b", "Update", "Actual", Some(expires_ms));
+    replacement.title = "Tornado Warning".into();
+    replacement.summary = Some("A confirmed tornado is moving northeast.".into());
+    replacement.attributes.insert(
+        "instruction".into(),
+        json!("Take shelter in an interior room immediately."),
+    );
+    state.sources.get_mut("nws.area.miami").unwrap().items = vec![replacement];
+
+    let replacement_snapshot = channel_snapshots(&preferences, &state, &clear_decision(), now_ms);
+    let replacement_snapshot = replacement_snapshot
+        .iter()
+        .find(|channel| channel.id == "official.miami")
+        .unwrap();
+    assert_eq!(replacement_snapshot.summary, first_summary);
+    assert_ne!(replacement_snapshot.material_key, first_key);
+    let replacement_signal = replacement_snapshot.signal.as_ref().unwrap();
+    assert_eq!(replacement_signal.headline, "Tornado Warning");
+    assert_eq!(
+        replacement_signal.action,
+        "The official source reports this alert as active."
+    );
+    assert_eq!(replacement_signal.severity.as_deref(), Some("Severe"));
+}
+
+#[test]
+fn news_signal_exposes_publisher_content_and_replacement_identity() {
+    let now_ms = 1_786_741_200_000;
+    let preferences = AppPreferences::default();
+    let mut first = news_item(
+        "news:first",
+        "Breaking Miami transportation closure",
+        now_ms,
+    );
+    first.summary = Some("The downtown ramp closes at 6 PM for emergency repairs.".into());
+    let mut state = PersistedRuntimeState {
+        active_sources: BTreeMap::from([("rss.local".into(), "news.local".into())]),
+        ..PersistedRuntimeState::default()
+    };
+    state.sources.insert(
+        "rss.local".into(),
+        healthy_source_state("news.local", first, now_ms),
+    );
+
+    let first_snapshot = channel_snapshots(&preferences, &state, &clear_decision(), now_ms);
+    let first_snapshot = first_snapshot
+        .iter()
+        .find(|channel| channel.id == "news.local")
+        .unwrap();
+    let first_key = first_snapshot.material_key.clone();
+    let first_summary = first_snapshot.summary.clone();
+    let signal = first_snapshot.signal.as_ref().unwrap();
+    assert_eq!(signal.headline, "Breaking Miami transportation closure");
+    assert_eq!(
+        signal.detail,
+        "The downtown ramp closes at 6 PM for emergency repairs."
+    );
+    assert_eq!(
+        signal.action,
+        "The publisher item matches the configured topics and freshness window."
+    );
+    assert_eq!(signal.severity.as_deref(), Some("Breaking"));
+
+    let mut replacement = news_item(
+        "news:replacement",
+        "Miami transportation service restored",
+        now_ms,
+    );
+    replacement.summary = Some("Metrorail service has resumed after an earlier delay.".into());
+    state.sources.get_mut("rss.local").unwrap().items = vec![replacement];
+
+    let replacement_snapshot = channel_snapshots(&preferences, &state, &clear_decision(), now_ms);
+    let replacement_snapshot = replacement_snapshot
+        .iter()
+        .find(|channel| channel.id == "news.local")
+        .unwrap();
+    assert_eq!(replacement_snapshot.summary, first_summary);
+    assert_ne!(replacement_snapshot.material_key, first_key);
+    let replacement_signal = replacement_snapshot.signal.as_ref().unwrap();
+    assert_eq!(
+        replacement_signal.headline,
+        "Miami transportation service restored"
+    );
+    assert_eq!(replacement_signal.severity.as_deref(), Some("Routine"));
+}
+
+#[test]
+fn signal_text_removes_controls_and_is_character_bounded() {
+    let hostile = format!("\u{202e}\n{}\u{0007}", "x".repeat(300));
+    let bounded = bounded_signal_text(&hostile, 160);
+    assert!(bounded.chars().count() <= 160);
+    assert!(!bounded.chars().any(char::is_control));
+    assert!(!bounded.contains('\u{202e}'));
+    assert!(bounded.ends_with('…'));
+}
+
+#[test]
+fn official_alerts_require_current_actual_alert_or_update_records() {
+    let now_ms = 1_786_741_200_000;
+    let channel = &AppPreferences::default().profile.channels[2];
+    let future = now_ms + 30 * 60_000;
+
+    let alert = official_alert_item("nws:alert", "Alert", "Actual", Some(future));
+    let update = official_alert_item("nws:update", "Update", "actual", Some(future));
+    let cancelled = official_alert_item("nws:cancel", "Cancel", "Actual", Some(future));
+    let expired = official_alert_item("nws:expired", "Alert", "Actual", Some(now_ms));
+    let missing_expiry = official_alert_item("nws:no-expiry", "Alert", "Actual", None);
+    let exercise = official_alert_item("nws:exercise", "Alert", "Exercise", Some(future));
+    let unknown_type = official_alert_item("nws:unknown", "Unknown", "Actual", Some(future));
+
+    assert!(official_alert_matches_scope(&alert, channel, now_ms));
+    assert!(official_alert_matches_scope(&update, channel, now_ms));
+    assert!(!official_alert_matches_scope(&cancelled, channel, now_ms));
+    assert!(!official_alert_matches_scope(&expired, channel, now_ms));
+    assert!(!official_alert_matches_scope(
+        &missing_expiry,
+        channel,
+        now_ms
+    ));
+    assert!(!official_alert_matches_scope(&exercise, channel, now_ms));
+    assert!(!official_alert_matches_scope(
+        &unknown_type,
+        channel,
+        now_ms
+    ));
+}
+
+#[test]
+fn expired_official_alert_does_not_activate_from_a_fresh_source() {
+    let now_ms = 1_786_741_200_000;
+    let preferences = AppPreferences::default();
+    let mut state = PersistedRuntimeState {
+        active_sources: BTreeMap::from([("nws.area.miami".into(), "official.miami".into())]),
+        ..PersistedRuntimeState::default()
+    };
+    state.sources.insert(
+        "nws.area.miami".into(),
+        healthy_source_state(
+            "official.miami",
+            official_alert_item("nws:expired", "Alert", "Actual", Some(now_ms - 1)),
+            now_ms,
+        ),
+    );
+
+    let channels = channel_snapshots(&preferences, &state, &clear_decision(), now_ms);
+    let official = channels
+        .iter()
+        .find(|channel| channel.id == "official.miami")
+        .unwrap();
+
+    assert_eq!(official.availability, AvailabilityDto::Fresh);
+    assert!(official.coverage_complete);
+    assert!(!official.active);
+    assert!(official.signal.is_none());
+    assert!(official.summary.contains("No active alert"));
+}
+
+#[test]
+fn earthquakes_require_current_non_deleted_event_timestamps() {
+    let now_ms = 1_786_741_200_000;
+    let channel = &AppPreferences::default().profile.channels[5];
+    let valid = earthquake_item("usgs:valid", now_ms);
+    assert!(earthquake_matches_scope(&valid, channel, now_ms));
+
+    let mut missing_time = valid.clone();
+    missing_time.observed_at = None;
+    assert!(!earthquake_matches_scope(&missing_time, channel, now_ms));
+
+    let mut future = valid.clone();
+    future.observed_at =
+        Some(chrono::DateTime::from_timestamp_millis(now_ms + 5 * 60_000 + 1).unwrap());
+    assert!(!earthquake_matches_scope(&future, channel, now_ms));
+
+    let mut deleted = valid;
+    deleted.attributes.insert("status".into(), json!("deleted"));
+    assert!(!earthquake_matches_scope(&deleted, channel, now_ms));
+
+    let mut missing_status = earthquake_item("usgs:missing-status", now_ms);
+    missing_status.attributes.remove("status");
+    assert!(!earthquake_matches_scope(&missing_status, channel, now_ms));
+
+    let mut unknown_status = earthquake_item("usgs:unknown-status", now_ms);
+    unknown_status
+        .attributes
+        .insert("status".into(), json!("superseded"));
+    assert!(!earthquake_matches_scope(&unknown_status, channel, now_ms));
+}
+
+#[test]
+fn market_move_rule_activates_with_price_session_and_delay_semantics() {
+    let mut channel = AppPreferences::default().profile.channels[6].clone();
+    channel.enabled = true;
+    let item = market_quote_item(6.46, Some(15));
+
+    let (summary, active) = market_activation(&channel, &[&item], AvailabilityDto::Delayed);
+
+    assert!(active);
+    assert!(summary.contains("AMD 172.40 USD +6.46% OPEN"));
+    assert!(summary.contains("move ≥5.0%"));
+    assert!(summary.contains("provider reports 15 min delay"));
+}
+
+#[test]
+fn market_move_rule_requires_symbols_and_suppresses_stale_quotes() {
+    let mut channel = AppPreferences::default().profile.channels[6].clone();
+    channel.enabled = true;
+    let item = market_quote_item(9.0, None);
+
+    channel.scope.insert("symbols".into(), json!([]));
+    let (missing_symbols, active) = market_activation(&channel, &[&item], AvailabilityDto::Fresh);
+    assert!(!active);
+    assert!(missing_symbols.contains("Add at least one market symbol"));
+
+    channel.scope.insert("symbols".into(), json!(["AMD"]));
+    let (stale, active) = market_activation(&channel, &[&item], AvailabilityDto::Stale);
+    assert!(!active);
+    assert!(stale.contains("move rule suppressed"));
+}
+
+#[test]
+fn area_changes_invalidate_every_selected_area_channel() {
+    let old = AppPreferences::default();
+    let mut new = old.clone();
+    new.areas[0].enabled = false;
+
+    let changed = changed_channel_ids(&old, &new);
+    assert!(changed.contains("weather.miami"));
+    assert!(changed.contains("official.miami"));
+    assert!(changed.contains("hurricane.atlantic"));
+    assert!(!changed.contains("bridge.brickell"));
+}
+
+#[test]
+fn snapshot_area_context_names_enabled_selected_areas() {
+    let mut preferences = AppPreferences::default();
+    let mut boston = preferences.areas[0].clone();
+    boston.id = "area.boston".into();
+    boston.label = "Boston, Massachusetts".into();
+    boston.latitude = 42.3601;
+    boston.longitude = -71.0589;
+    preferences.areas.push(boston);
+    let channel = &mut preferences.profile.channels[1];
+    channel
+        .scope
+        .insert("areaIds".into(), json!(["area.miami", "area.boston"]));
+
+    assert_eq!(
+        area_context_label(channel, &preferences.areas).as_deref(),
+        Some("Miami, Florida / Boston, Massachusetts")
+    );
+    preferences.areas[1].weather_enabled = false;
+    assert_eq!(
+        area_context_label(channel, &preferences.areas).as_deref(),
+        Some("Miami, Florida")
+    );
+}

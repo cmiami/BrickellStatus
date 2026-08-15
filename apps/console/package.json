@@ -1,0 +1,58 @@
+{
+  "name": "@tenders-log/console",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "npm@11.18.0",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "npm",
+      "version": "11.18.0",
+      "onFail": "error"
+    }
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "node ./scripts/tauri.mjs",
+    "tauri:dev": "node ./scripts/tauri.mjs dev",
+    "tauri:build": "node ./scripts/tauri.mjs build",
+    "tauri:build:mac": "node ./scripts/build-macos-dmg.mjs",
+    "assets:mac": "node ./scripts/generate-macos-assets.mjs",
+    "licenses:bundle": "node ./scripts/generate-license-bundle.mjs",
+    "desktop:prepare": "npm run licenses:bundle && npm run build",
+    "size:mac": "node ./scripts/check-macos-artifact-size.mjs",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "allowScripts": {
+    "fsevents": false
+  },
+  "dependencies": {
+    "@fontsource/barlow-condensed": "latest",
+    "@fontsource/public-sans": "latest",
+    "@lucide/svelte": "latest",
+    "@tauri-apps/api": "latest",
+    "maplibre-gl": "latest"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "latest",
+    "@sveltejs/kit": "latest",
+    "@sveltejs/vite-plugin-svelte": "latest",
+    "@tauri-apps/cli": "latest",
+    "@testing-library/jest-dom": "latest",
+    "@testing-library/svelte": "latest",
+    "@types/node": "latest",
+    "jsdom": "latest",
+    "svelte": "latest",
+    "svelte-check": "latest",
+    "typescript": "latest",
+    "vite": "latest",
+    "vitest": "latest"
+  }
+}

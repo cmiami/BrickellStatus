@@ -1,0 +1,38 @@
+[package]
+name = "puente-gonorrea-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Tender's Log desktop and tray application"
+default-run = "puente-gonorrea-desktop"
+
+[lib]
+name = "puente_gonorrea_desktop_lib"
+crate-type = ["cdylib", "rlib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+bridgestatus-delivery = { path = "../../../crates/delivery" }
+bridgestatus-eink = { path = "../../../crates/eink" }
+bridgestatus-runtime = { path = "../../../crates/runtime" }
+dotenvy.workspace = true
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tauri = { version = "2.11.5", features = ["tray-icon", "image-png"] }
+tauri-plugin-notification = "2.3.3"
+tauri-plugin-single-instance = "2.4.3"
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tenders-storage = { path = "../../../crates/storage" }
+url.workspace = true
+uuid.workspace = true
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

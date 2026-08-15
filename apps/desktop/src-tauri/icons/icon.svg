@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Tender's Log bridge mark">
+  <rect width="512" height="512" rx="72" fill="#0f2a44"/>
+  <g fill="none" stroke="#f4f7f9" stroke-width="30" stroke-linecap="square" stroke-linejoin="miter">
+    <path d="M82 354h348"/>
+    <path d="M108 354l58-170 90 170 90-170 58 170"/>
+    <path d="M256 106v248"/>
+    <path d="M205 106h102"/>
+  </g>
+  <path d="M73 399h366" stroke="#f2a900" stroke-width="10"/>
+</svg>

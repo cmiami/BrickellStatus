@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="400" viewBox="0 0 660 400" role="img" aria-label="Tender's Log installer background">
+  <rect width="660" height="400" fill="#0f2a44"/>
+  <path d="M0 112H660M0 320H660" stroke="#31506b" stroke-width="1"/>
+  <g fill="none" stroke="#5d7890" stroke-width="2" opacity="0.28">
+    <path d="M30 346H630"/>
+    <path d="M80 346l44-76 44 76 44-76 44 76 44-76 44 76 44-76 44 76 44-76 44 76 44-76 44 76"/>
+  </g>
+  <text x="330" y="48" fill="#f4f7f9" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="22" font-weight="700" letter-spacing="3" text-anchor="middle">TENDER'S LOG</text>
+  <text x="330" y="77" fill="#b9c7d2" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="14" text-anchor="middle">Drag the instrument into Applications</text>
+  <g fill="none" stroke="#f2a900" stroke-width="4" stroke-linecap="square" stroke-linejoin="miter">
+    <path d="M275 205H385"/>
+    <path d="M366 188l19 17-19 17"/>
+  </g>
+  <g transform="translate(300 334) scale(.12)" fill="none" stroke="#f4f7f9" stroke-width="30" stroke-linecap="square" stroke-linejoin="miter" opacity=".72">
+    <path d="M82 354h348"/>
+    <path d="M108 354l58-170 90 170 90-170 58 170"/>
+    <path d="M256 106v248"/>
+    <path d="M205 106h102"/>
+  </g>
+</svg>

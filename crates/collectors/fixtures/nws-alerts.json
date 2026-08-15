@@ -1,0 +1,34 @@
+{
+  "@context": [],
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.example",
+      "type": "Feature",
+      "geometry": null,
+      "properties": {
+        "@id": "https://api.weather.gov/alerts/urn:oid:2.49.0.1.840.0.example",
+        "id": "urn:oid:2.49.0.1.840.0.example",
+        "areaDesc": "Coastal Miami Dade County",
+        "sent": "2026-08-14T16:00:00-04:00",
+        "effective": "2026-08-14T16:00:00-04:00",
+        "onset": "2026-08-14T16:05:00-04:00",
+        "expires": "2026-08-14T18:00:00-04:00",
+        "ends": "2026-08-14T17:30:00-04:00",
+        "status": "Actual",
+        "messageType": "Alert",
+        "category": "Met",
+        "severity": "Severe",
+        "certainty": "Likely",
+        "urgency": "Immediate",
+        "event": "Flash Flood Warning",
+        "response": "Avoid",
+        "headline": "Flash Flood Warning issued for coastal Miami-Dade County",
+        "description": "Heavy rain is producing flash flooding.",
+        "instruction": "Move to higher ground.",
+        "parameters": {"NWSheadline": ["FLASH FLOOD WARNING"]}
+      }
+    }
+  ],
+  "title": "Current watches, warnings, and advisories"
+}

@@ -1,0 +1,47 @@
+# Rust
+/target/
+**/target/
+
+# JavaScript
+node_modules/
+**/node_modules/
+apps/console/.svelte-kit/
+apps/console/build/
+apps/console/dist/
+/apps/desktop/src-tauri/resources/licenses/
+
+# Tauri bundles and signing
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/target/
+*.dmg
+*.AppImage
+*.msi
+*.sig
+/dist/
+.env
+.env.*
+!.env.example
+
+# Runtime state and credentials
+state/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+config.local.toml
+
+# Firmware
+firmware/e213/.pio/
+firmware/e213/.vscode/
+
+# macOS / editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local Impeccable design-tool state and generated comparison boards.
+# The public design contract lives in DESIGN.md; product imagery lives in docs/assets/.
+/.impeccable/
