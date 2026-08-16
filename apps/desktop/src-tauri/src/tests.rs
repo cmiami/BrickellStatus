@@ -1,3 +1,5 @@
+use bridgestatus_eink::ChannelUrgency;
+
 use super::*;
 
 #[test]

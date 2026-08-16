@@ -16,6 +16,7 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 bridgestatus-collectors = { path = "../../../crates/collectors" }
+bridgestatus-projection = { path = "../../../crates/projection" }
 bridgestatus-delivery = { path = "../../../crates/delivery" }
 bridgestatus-eink = { path = "../../../crates/eink" }
 bridgestatus-runtime = { path = "../../../crates/runtime" }

@@ -487,6 +487,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bridgestatus-projection"
+version = "0.1.12"
+dependencies = [
+ "bridgestatus-contract",
+ "bridgestatus-eink",
+ "jiff",
+ "serde_json",
+]
+
+[[package]]
 name = "bridgestatus-runtime"
 version = "0.1.12"
 dependencies = [
@@ -3852,6 +3862,7 @@ dependencies = [
  "bridgestatus-collectors",
  "bridgestatus-delivery",
  "bridgestatus-eink",
+ "bridgestatus-projection",
  "bridgestatus-runtime",
  "dotenvy",
  "espflash",

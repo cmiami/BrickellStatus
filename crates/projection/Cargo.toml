@@ -1,0 +1,17 @@
+[package]
+name = "bridgestatus-projection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Projects a runtime snapshot into the shapes the E213 renderer draws"
+
+[dependencies]
+bridgestatus-contract = { path = "../contract" }
+bridgestatus-eink = { path = "../eink", default-features = false }
+jiff.workspace = true
+serde_json.workspace = true
+
+[lints.rust]
+missing_docs = "allow"
+unsafe_code = "forbid"

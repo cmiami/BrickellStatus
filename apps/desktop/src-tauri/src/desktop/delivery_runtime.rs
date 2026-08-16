@@ -1119,50 +1119,6 @@ fn desktop_route_configured(channel: &ChannelSnapshot) -> bool {
 
 /// Applies the plain-language interrupt presets to the current event, rather
 /// than treating every non-off value as equivalent.
-fn interrupt_allows(
-    channel: &ChannelSnapshot,
-    preferences: &AppPreferences,
-    snapshot: &AppSnapshot,
-) -> bool {
-    if !channel.enabled || !channel.active {
-        return false;
-    }
-    match channel.interrupt_preset {
-        InterruptPreset::Off | InterruptPreset::Custom => false,
-        InterruptPreset::Meaningful => channel.kind != ChannelKindDto::System,
-        InterruptPreset::Recommended => match channel.kind {
-            ChannelKindDto::Bridge => matches!(
-                snapshot.decision.state,
-                BridgeStateDto::Likely | BridgeStateDto::Open
-            ),
-            ChannelKindDto::News => preferences
-                .profile
-                .channels
-                .iter()
-                .find(|preference| preference.id == channel.id)
-                .and_then(|preference| preference.scope.get("breakingOnly"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-            ChannelKindDto::System => false,
-            ChannelKindDto::Weather
-            | ChannelKindDto::Official
-            | ChannelKindDto::Hurricane
-            | ChannelKindDto::Earthquake
-            | ChannelKindDto::Markets => true,
-        },
-        InterruptPreset::ConfirmedOnly => match channel.kind {
-            ChannelKindDto::Bridge => snapshot.decision.state == BridgeStateDto::Open,
-            ChannelKindDto::Official | ChannelKindDto::Hurricane | ChannelKindDto::Earthquake => {
-                true
-            }
-            ChannelKindDto::Weather
-            | ChannelKindDto::News
-            | ChannelKindDto::Markets
-            | ChannelKindDto::System => false,
-        },
-    }
-}
-
 fn quiet_hours_block(
     preferences: &AppPreferences,
     channel: &ChannelSnapshot,
