@@ -121,6 +121,14 @@ fn draw_action(frame: &mut MonoFrame, card: &ChannelCard) {
     );
 }
 
+/// Bottom tape: what this card is about on the left, how current it is on the
+/// right.
+///
+/// The feed that produced the reading is deliberately absent. It was printed
+/// here on every non-bridge card long after the bridge frame had been stripped
+/// of it, which is how a source name kept reappearing on surfaces it had been
+/// removed from. `ChannelSource::name` is still carried on the card so Settings
+/// can name it; nothing draws it.
 fn draw_source_tape(frame: &mut MonoFrame, card: &ChannelCard) {
     fill(
         frame,
@@ -132,12 +140,12 @@ fn draw_source_tape(frame: &mut MonoFrame, card: &ChannelCard) {
     );
     let right = source_state(card);
     let right_x = 228 - text_width(&right, 6);
-    let source_width = usize::try_from((right_x - 10).max(6) / 6).unwrap_or(1);
+    let subject_width = usize::try_from((right_x - 10).max(6) / 6).unwrap_or(1);
     label(
         frame,
         4,
         109,
-        &fit(&card.source.name, source_width),
+        &fit(&card.title, subject_width),
         BinaryColor::Off,
     );
     label(frame, right_x, 109, &right, BinaryColor::Off);
@@ -315,6 +323,21 @@ mod tests {
         assert_eq!(
             wrap("TRACK SHIFTED TWENTY FOUR MILES WEST OF MIAMI", 22, 2),
             vec!["TRACK SHIFTED TWENTY", "FOUR MILES WEST OF MI."]
+        );
+    }
+
+    /// Mirrors the bridge-frame guarantee for channel cards.
+    #[test]
+    fn a_channel_card_never_prints_the_feed_that_produced_it() {
+        let mut card = card(ChannelKind::Weather, ChannelUrgency::Advisory);
+        card.source.name = "SOME FEED NAME".into();
+        let with_name = render_channel_card(&card).unwrap();
+        card.source.name = "AN ENTIRELY DIFFERENT FEED".into();
+        let with_other = render_channel_card(&card).unwrap();
+        assert_eq!(
+            with_name.packed(),
+            with_other.packed(),
+            "changing only the source name must not change a pixel"
         );
     }
 }

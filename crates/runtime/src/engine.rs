@@ -11,12 +11,13 @@ use std::{
 use crate::{
     AisConnectionStateDto, AisStreamStatusDto, AlertArea, AlertAreaSource, AppPreferences,
     AppSnapshot, AvailabilityDto, BridgeRelationDto, BridgeStateDto, BridgeStateIntervalDto,
-    ChannelKindDto, ChannelPreference, ChannelSignalDto, ChannelSnapshot,
+    ChannelKindDto, ChannelPreference, ChannelPriorityDto, ChannelSignalDto, ChannelSnapshot,
     CredentialFreeCollectorFactory, DecisionSnapshot, DeliveryStateDto, DestinationIdDto,
     DisplayTransport, EvidenceStateDto, EvidenceStrip, LocationSearchError, LocationSearchResult,
     LocationSearchService, MutationResult, ObservedBridgeStateDto, OutputSnapshot, OutputStateDto,
-    PreferencesError, SourceHealth, SystemHealth, SystemStatusDto, UnitSystem, VesselTrackSnapshot,
-    WhatsAppRecipientConsent, validate_preferences, whatsapp_consent_is_current,
+    PreferencesError, SourceHealth, SystemHealth, SystemStatusDto, UnitSystem, UrgencyDto,
+    VesselTrackSnapshot, WhatsAppRecipientConsent, validate_preferences,
+    whatsapp_consent_is_current,
 };
 use bridgestatus_collectors::{
     AIS_VESSEL_TRACKS_CURSOR_KEY, CollectContext, Collector, CollectorBatch, CollectorCursor,

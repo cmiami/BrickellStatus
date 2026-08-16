@@ -21,6 +21,36 @@ pub enum UrgencyDto {
     Emergency,
 }
 
+/// Where a channel sits against every other channel right now.
+///
+/// Computed once, in the engine, from typed facts. Every surface reads this
+/// rather than deriving its own ranking: the panel, the notification path and
+/// the console previously each decided urgency separately, and two of the three
+/// discarded it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelPriorityDto {
+    /// Higher wins. Comparable across channel kinds.
+    pub score: u16,
+    pub urgency: UrgencyDto,
+    /// Minutes until this affects the reader; `None` when the timing is unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imminence_minutes: Option<u16>,
+    /// Observed rather than predicted.
+    pub confirmed: bool,
+}
+
+impl Default for ChannelPriorityDto {
+    fn default() -> Self {
+        Self {
+            score: 0,
+            urgency: UrgencyDto::Routine,
+            imminence_minutes: None,
+            confirmed: false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AvailabilityDto {
@@ -203,6 +233,9 @@ pub struct ChannelSnapshot {
     pub material_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signal: Option<ChannelSignalDto>,
+    /// Cross-channel ranking. See [`ChannelPriorityDto`].
+    #[serde(default)]
+    pub priority: ChannelPriorityDto,
     pub enabled: bool,
     pub active: bool,
     pub presence: SurfacePresence,

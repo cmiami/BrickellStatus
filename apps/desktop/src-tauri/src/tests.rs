@@ -242,6 +242,9 @@ async fn sourced_signal_copy_reaches_message_native_and_epaper_surfaces() {
     assert!(title.contains("Flash Flood Warning"));
     assert!(body.contains("Move to higher ground now."));
 
+    // Urgency is decided once in the engine and carried on the snapshot; the
+    // card renders it rather than re-deriving it from severity text.
+    snapshot.channels[official_index].priority.urgency = UrgencyDto::Emergency;
     let card = channel_card(&snapshot.channels[official_index], &preferences, &snapshot);
     assert_eq!(card.headline, "Flash Flood Warning");
     assert!(card.detail.contains("Life-threatening"));
@@ -286,15 +289,15 @@ async fn critical_quiet_bypass_uses_event_severity_not_interrupt_preset() {
         expires_at: None,
     });
 
+    // Severe is Action, not Emergency, so quiet hours still hold it.
+    snapshot.channels[official_index].priority.urgency = UrgencyDto::Action;
     assert!(
         quiet_hours_block(&preferences, &snapshot.channels[official_index], &snapshot).unwrap(),
-        "a preset name must not promote Severe to the Extreme bypass"
+        "a preset name must not promote Action to the Emergency bypass"
     );
-    snapshot.channels[official_index]
-        .signal
-        .as_mut()
-        .unwrap()
-        .severity = Some("Extreme".into());
+    // Only the engine calling it an Emergency opens the bypass. What earns that
+    // classification is tested in the engine, beside the facts it reads.
+    snapshot.channels[official_index].priority.urgency = UrgencyDto::Emergency;
     assert!(
         !quiet_hours_block(&preferences, &snapshot.channels[official_index], &snapshot).unwrap()
     );
@@ -999,10 +1002,26 @@ async fn recipient_route_fingerprint_never_inherits_announced_state() {
     let current = &tracker.channels["bridge.brickell"];
     assert!(current.active);
     assert!(!current.announced);
+    // This test is about routing, not ordering: a changed recipient must get its
+    // own warning rather than inheriting the previous one's announced state.
+    // Asserting on history[0] made it depend on tie-breaking between two rows
+    // written milliseconds apart, which is incidental to what is being proven.
     let rows = store.list_outbox_history(10).await.unwrap();
     assert_eq!(rows.len(), 2, "the new recipient gets an initial warning");
-    let newest: DeliveryRequest = serde_json::from_str(&rows[0].request_json).unwrap();
-    assert_eq!(newest.destination.address, "+13055550999");
+    let addressed = rows
+        .iter()
+        .map(|row| {
+            serde_json::from_str::<DeliveryRequest>(&row.request_json)
+                .unwrap()
+                .destination
+                .address
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(
+        addressed.contains("+13055550999"),
+        "the new recipient must have been written its own notice: {addressed:?}"
+    );
+    assert!(addressed.contains("+13055550123"));
 }
 
 #[tokio::test]
@@ -1167,26 +1186,18 @@ async fn rotation_honors_home_cadence_and_surface_presence() {
             SurfacePresence::Rotation
         };
     }
-    assert_eq!(
-        select_rotation_channel(&snapshot, &preferences, 0).map(|channel| channel.id.as_str()),
-        Some("bridge.brickell")
-    );
-    assert_eq!(
-        select_rotation_channel(&snapshot, &preferences, 1).map(|channel| channel.id.as_str()),
-        Some("weather.miami")
-    );
-    assert_eq!(
-        select_rotation_channel(&snapshot, &preferences, 2).map(|channel| channel.id.as_str()),
-        Some("weather.miami")
-    );
-    assert_eq!(
-        select_rotation_channel(&snapshot, &preferences, 3).map(|channel| channel.id.as_str()),
-        Some("bridge.brickell")
-    );
-    assert_eq!(
-        select_rotation_channel(&snapshot, &preferences, 4).map(|channel| channel.id.as_str()),
-        Some("weather.miami")
-    );
+    // The anchor every third slot, the rest sharing the gaps. News appears here
+    // where it previously could not: rotation used to drop News, Official,
+    // Hurricane and Earthquake unless they were already active, which made
+    // `presence: Rotation` meaningless for exactly the channels worth rotating.
+    let slot = |index: u64| {
+        rotation_channel(&snapshot, &preferences, index).map(|channel| channel.id.as_str())
+    };
+    assert_eq!(slot(0), Some("bridge.brickell"));
+    assert_eq!(slot(1), Some("weather.miami"));
+    assert_eq!(slot(2), Some("news.local"));
+    assert_eq!(slot(3), Some("bridge.brickell"));
+    assert_eq!(slot(4), Some("weather.miami"));
 }
 
 #[tokio::test]
@@ -1207,7 +1218,7 @@ async fn off_messages_only_and_inactive_active_only_never_reach_epaper() {
             _ => SurfacePresence::ActiveOnly,
         };
     }
-    assert!(select_rotation_channel(&snapshot, &preferences, 0).is_none());
+    assert!(rotation_channel(&snapshot, &preferences, 0).is_none());
     let active_only = snapshot
         .channels
         .iter_mut()
@@ -1216,7 +1227,7 @@ async fn off_messages_only_and_inactive_active_only_never_reach_epaper() {
     active_only.active = true;
     let expected = active_only.id.clone();
     assert_eq!(
-        select_rotation_channel(&snapshot, &preferences, 0).map(|channel| &channel.id),
+        rotation_channel(&snapshot, &preferences, 0).map(|channel| &channel.id),
         Some(&expected)
     );
 }
@@ -1358,5 +1369,198 @@ mod river_spans {
         );
         assert!(spans[0].open);
         assert!(spans[0].opened_at.is_none());
+    }
+}
+
+mod panel {
+    use super::super::{
+        PanelBroker, PanelSelection, prove_backoff, should_prove_now,
+    };
+    use super::*;
+
+    async fn epaper_snapshot() -> (AppSnapshot, AppPreferences) {
+        let store = Store::in_memory().await.unwrap();
+        let engine = RuntimeEngine::new(store, RuntimeConfig::default())
+            .await
+            .unwrap();
+        let preferences = engine.get_preferences().await;
+        let mut snapshot = engine.get_snapshot().await.unwrap();
+        for channel in &mut snapshot.channels {
+            channel.enabled = matches!(channel.id.as_str(), "bridge.brickell" | "weather.miami");
+            channel.active = false;
+            channel.destinations = vec![DestinationIdDto::Epaper];
+            channel.presence = if channel.id == "bridge.brickell" {
+                SurfacePresence::Home
+            } else {
+                SurfacePresence::Rotation
+            };
+        }
+        (snapshot, preferences)
+    }
+
+    fn raise(snapshot: &mut AppSnapshot, id: &str, score: u16, key: &str) {
+        let channel = snapshot
+            .channels
+            .iter_mut()
+            .find(|channel| channel.id == id)
+            .expect("channel");
+        channel.active = true;
+        channel.interrupt_preset = InterruptPreset::Meaningful;
+        channel.priority.score = score;
+        channel.material_key = key.into();
+    }
+
+    #[tokio::test]
+    async fn an_alert_preempts_the_rotation() {
+        let (mut snapshot, preferences) = epaper_snapshot().await;
+        let broker = PanelBroker::default();
+        broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Rotation { .. })
+        ));
+
+        raise(&mut snapshot, "weather.miami", 470, "rain:6-15");
+        broker.ingest(&snapshot, &preferences);
+        assert_eq!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert {
+                channel_id: "weather.miami".into(),
+                score: 470
+            })
+        );
+    }
+
+    /// The invariant that protects the anchor. An alert must not eat a rotation
+    /// slot, or a burst of them silently skips the bridge's home cadence.
+    #[tokio::test]
+    async fn an_alert_does_not_consume_a_rotation_slot() {
+        let (mut snapshot, preferences) = epaper_snapshot().await;
+        let broker = PanelBroker::default();
+        raise(&mut snapshot, "weather.miami", 470, "rain:6-15");
+        broker.ingest(&snapshot, &preferences);
+
+        // The alert is served without advancing the index...
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert { .. })
+        ));
+        // ...so slot 0 is still the anchor's when rotation resumes.
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Rotation { channel_id }) if channel_id == "bridge.brickell"
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_same_alert_does_not_re_enter_but_an_escalation_does() {
+        let (mut snapshot, preferences) = epaper_snapshot().await;
+        let broker = PanelBroker::default();
+        raise(&mut snapshot, "weather.miami", 400, "rain:31-60");
+        broker.ingest(&snapshot, &preferences);
+        assert!(broker.next(&snapshot, &preferences, 0).is_some());
+
+        // Same condition, same key: still true, not news.
+        broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Rotation { .. })
+        ));
+
+        // Closer now: a different key, so it interrupts again. This is the
+        // behaviour the old digit-collapsing dedup made impossible.
+        raise(&mut snapshot, "weather.miami", 470, "rain:6-15");
+        broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_superseded_alert_is_discarded_rather_than_shown() {
+        let (mut snapshot, preferences) = epaper_snapshot().await;
+        let broker = PanelBroker::default();
+        raise(&mut snapshot, "weather.miami", 470, "rain:6-15");
+        broker.ingest(&snapshot, &preferences);
+
+        // The channel goes quiet before the queued alert is served.
+        snapshot
+            .channels
+            .iter_mut()
+            .find(|channel| channel.id == "weather.miami")
+            .unwrap()
+            .active = false;
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Rotation { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_higher_score_is_served_first() {
+        let (mut snapshot, preferences) = epaper_snapshot().await;
+        let broker = PanelBroker::default();
+        raise(&mut snapshot, "weather.miami", 470, "rain:6-15");
+        raise(&mut snapshot, "bridge.brickell", 1005, "bridge:open");
+        broker.ingest(&snapshot, &preferences);
+        assert_eq!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert {
+                channel_id: "bridge.brickell".into(),
+                score: 1005
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dwell_ends_early_only_for_something_that_outranks_it() {
+        let (mut snapshot, preferences) = epaper_snapshot().await;
+        // Paused after the store is built: an auto-advancing clock fires sqlx's
+        // pool-acquire timeout the instant the runtime looks idle.
+        tokio::time::pause();
+        let broker = PanelBroker::default();
+        raise(&mut snapshot, "weather.miami", 470, "rain:6-15");
+        broker.ingest(&snapshot, &preferences);
+
+        // Equal score waits out the full hold rather than trading the panel.
+        let started = tokio::time::Instant::now();
+        broker
+            .wait_or_preempt(470, std::time::Duration::from_secs(45))
+            .await;
+        assert!(
+            tokio::time::Instant::now().duration_since(started)
+                >= std::time::Duration::from_secs(45)
+        );
+
+        // A higher score cuts it short, but never before the on-screen floor.
+        raise(&mut snapshot, "bridge.brickell", 1005, "bridge:open");
+        broker.ingest(&snapshot, &preferences);
+        let started = tokio::time::Instant::now();
+        broker
+            .wait_or_preempt(470, std::time::Duration::from_secs(45))
+            .await;
+        let held = tokio::time::Instant::now().duration_since(started);
+        assert!(held >= std::time::Duration::from_secs(8), "held {held:?}");
+        assert!(held < std::time::Duration::from_secs(45), "held {held:?}");
+    }
+
+    #[tokio::test]
+    async fn a_parked_display_keeps_retrying_its_proof_frame() {
+        let now = tokio::time::Instant::now();
+        // Connected but never acknowledged: prove it rather than waiting for a
+        // human to press a button.
+        assert!(should_prove_now(true, false, now, now));
+        // Already armed, or nothing attached: nothing to do.
+        assert!(!should_prove_now(true, true, now, now));
+        assert!(!should_prove_now(false, false, now, now));
+        // Backing off after failures, then due again.
+        assert!(!should_prove_now(
+            true,
+            false,
+            now,
+            now + std::time::Duration::from_secs(5)
+        ));
+        assert!(prove_backoff(4) > prove_backoff(1));
     }
 }

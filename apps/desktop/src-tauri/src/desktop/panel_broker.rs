@@ -1,0 +1,379 @@
+// Two lanes for one panel: a rotation, and interrupts that preempt it.
+//
+// The display can show one thing. Previously the choice was "first eligible
+// channel in preference order", which meant the bridge — index zero — pinned
+// the panel for as long as it was interesting, and nothing else was ever seen.
+//
+// Here the rotation carries the ordinary cadence and a priority queue carries
+// anything worth stepping in front of it. The two share one waiting primitive:
+// a frame's dwell *is* the interrupt wait, so an alert lands within
+// milliseconds instead of at the end of the current dwell, and the hold after
+// an alert is itself preemptible so a larger event displaces the remainder
+// rather than queueing behind it.
+//
+// Two invariants protect the anchor, and both are asserted in tests:
+//
+// * `rotation_index` advances only when the rotation lane is served. An alert
+//   must never consume a rotation slot, or a burst of alerts would silently
+//   skip the bridge's home cadence.
+// * An alert holds for a bounded time and then returns the panel to rotation.
+
+// BTreeMap, StdMutex and AtomicU64 already come from lib.rs; this file is
+// spliced into it and shares its imports. Note `Ordering` there is the atomic
+// one, so comparison orderings are spelled out in full below.
+use std::collections::BinaryHeap;
+
+/// Longest an alert keeps the panel before rotation resumes.
+const ALERT_HOLD: Duration = Duration::from_secs(45);
+
+/// A still-current top-priority state re-enters the queue on this cadence, so a
+/// bridge that stays open keeps reclaiming the panel instead of appearing once
+/// and then only on its rotation turn.
+const ALERT_REASSERT: Duration = Duration::from_secs(180);
+
+/// Score at or above which a state re-asserts itself. Only a confirmed,
+/// road-blocking event should keep taking the panel back.
+const REASSERT_MIN_SCORE: u16 = 900;
+
+/// A queued alert is dropped rather than shown if it waited longer than this;
+/// by then it describes a moment that has passed.
+const ALERT_MAX_AGE: Duration = Duration::from_secs(120);
+
+/// Minimum time any frame stays on screen, even when something better arrives.
+///
+/// A full panel write is thousands of bytes over a paced serial link and an
+/// e-paper repaint is visibly slow. Without a floor, two close-scoring events
+/// would trade the panel faster than it can draw.
+const MIN_ON_SCREEN: Duration = Duration::from_secs(8);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QueuedAlert {
+    score: u16,
+    /// Monotonic, for a stable first-in-first-out order among equal scores.
+    sequence: u64,
+    channel_id: String,
+    alert_key: String,
+    queued_at: tokio::time::Instant,
+}
+
+impl Ord for QueuedAlert {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // BinaryHeap is a max-heap: highest score first, and among equal scores
+        // the *lowest* sequence first, so ties are served in arrival order.
+        self.score
+            .cmp(&other.score)
+            .then_with(|| other.sequence.cmp(&self.sequence))
+    }
+}
+
+impl PartialOrd for QueuedAlert {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// What the panel should show next.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PanelSelection {
+    /// Preempts whatever is showing and holds for a bounded time.
+    Alert { channel_id: String, score: u16 },
+    /// The ordinary cadence. Only this advances `rotation_index`.
+    Rotation { channel_id: String },
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PanelBroker {
+    interrupts: StdMutex<BinaryHeap<QueuedAlert>>,
+    /// Channel id -> the alert key last enqueued for it. This is what makes an
+    /// escalating event re-alert: a changed key is a new alert, an unchanged one
+    /// is the same alert still being true.
+    seen: StdMutex<BTreeMap<String, String>>,
+    /// Last time a channel re-asserted, so a sustained state does not spin.
+    reasserted: StdMutex<BTreeMap<String, tokio::time::Instant>>,
+    wake: tokio::sync::Notify,
+    sequence: AtomicU64,
+}
+
+impl PanelBroker {
+    fn lock_interrupts(&self) -> std::sync::MutexGuard<'_, BinaryHeap<QueuedAlert>> {
+        self.interrupts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_seen(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, String>> {
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_reasserted(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, tokio::time::Instant>> {
+        self.reasserted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Notices new or changed alerts in a snapshot and queues them.
+    ///
+    /// Enqueues only what the operator already consented to interrupt for, via
+    /// the existing `interrupt_allows` gate. There is deliberately no numeric
+    /// floor on top of that: silently ignoring something a user switched on is
+    /// worse than showing it.
+    pub(crate) fn ingest(&self, snapshot: &AppSnapshot, preferences: &AppPreferences) {
+        let now = tokio::time::Instant::now();
+        let mut queued_any = false;
+        for channel in &snapshot.channels {
+            if !panel_eligible(channel) {
+                continue;
+            }
+            if !channel.active || !interrupt_allows(channel, preferences, snapshot) {
+                // A channel that has gone quiet forgets its last alert, so the
+                // same condition recurring later is a fresh interrupt.
+                self.lock_seen().remove(&channel.id);
+                self.lock_reasserted().remove(&channel.id);
+                continue;
+            }
+
+            let key = alert_key(channel);
+            let changed = self.lock_seen().get(&channel.id) != Some(&key);
+            let due_to_reassert = !changed
+                && channel.priority.score >= REASSERT_MIN_SCORE
+                && channel.priority.confirmed
+                && self
+                    .lock_reasserted()
+                    .get(&channel.id)
+                    .is_none_or(|last| now.duration_since(*last) >= ALERT_REASSERT);
+
+            if !changed && !due_to_reassert {
+                continue;
+            }
+            if due_to_reassert {
+                self.lock_reasserted().insert(channel.id.clone(), now);
+            } else {
+                self.lock_seen().insert(channel.id.clone(), key.clone());
+                self.lock_reasserted().insert(channel.id.clone(), now);
+            }
+            self.lock_interrupts().push(QueuedAlert {
+                score: channel.priority.score,
+                sequence: self
+                    .sequence
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                channel_id: channel.id.clone(),
+                alert_key: key,
+                queued_at: now,
+            });
+            queued_any = true;
+        }
+        if queued_any {
+            self.wake.notify_waiters();
+        }
+    }
+
+    fn peek_score(&self) -> Option<u16> {
+        self.lock_interrupts().peek().map(|alert| alert.score)
+    }
+
+    /// Pops the highest-priority alert that still describes the present.
+    fn take_alert(
+        &self,
+        snapshot: &AppSnapshot,
+        preferences: &AppPreferences,
+    ) -> Option<(String, u16)> {
+        let now = tokio::time::Instant::now();
+        loop {
+            let alert = self.lock_interrupts().pop()?;
+            if now.duration_since(alert.queued_at) > ALERT_MAX_AGE {
+                continue;
+            }
+            let Some(channel) = snapshot
+                .channels
+                .iter()
+                .find(|channel| channel.id == alert.channel_id)
+            else {
+                continue;
+            };
+            // Superseded: the channel moved on while this sat in the queue, so
+            // showing it would report a state that is no longer true.
+            if !channel.active
+                || !panel_eligible(channel)
+                || alert_key(channel) != alert.alert_key
+                || !interrupt_allows(channel, preferences, snapshot)
+            {
+                continue;
+            }
+            return Some((alert.channel_id, alert.score));
+        }
+    }
+
+    /// Chooses the next frame. Alerts win; otherwise the rotation cadence runs.
+    pub(crate) fn next(
+        &self,
+        snapshot: &AppSnapshot,
+        preferences: &AppPreferences,
+        rotation_index: u64,
+    ) -> Option<PanelSelection> {
+        if let Some((channel_id, score)) = self.take_alert(snapshot, preferences) {
+            return Some(PanelSelection::Alert { channel_id, score });
+        }
+        rotation_channel(snapshot, preferences, rotation_index).map(|channel| {
+            PanelSelection::Rotation {
+                channel_id: channel.id.clone(),
+            }
+        })
+    }
+
+    /// Waits out a frame's time on screen, returning early only for something
+    /// that outranks it.
+    ///
+    /// This is the single primitive behind both the rotation dwell and the
+    /// post-alert hold. A rotation frame passes `current_score = 0`, so anything
+    /// queued preempts it; an alert passes its own score, so only a strictly
+    /// higher one displaces the remainder. Equal scores wait their turn, which
+    /// is what keeps two comparable events from trading the panel.
+    pub(crate) async fn wait_or_preempt(&self, current_score: u16, dwell: Duration) {
+        let started = tokio::time::Instant::now();
+        let deadline = started + dwell;
+        loop {
+            // Registered before peeking: a notification that lands between the
+            // peek and the await would otherwise be lost and the alert would
+            // sit in the queue until the dwell expired.
+            let notified = self.wake.notified();
+            let now = tokio::time::Instant::now();
+            let on_screen_for = now.duration_since(started);
+            if on_screen_for >= MIN_ON_SCREEN
+                && self
+                    .peek_score()
+                    .is_some_and(|queued| queued > current_score)
+            {
+                return;
+            }
+            if now >= deadline {
+                return;
+            }
+            // Never sleep past the point where preemption becomes allowed.
+            let until_preemptible = MIN_ON_SCREEN.saturating_sub(on_screen_for);
+            let remaining = deadline.saturating_duration_since(now);
+            let sleep_for = if until_preemptible.is_zero() {
+                remaining
+            } else {
+                remaining.min(until_preemptible)
+            };
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep(sleep_for) => {
+                    if sleep_for == remaining {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn alert_hold() -> Duration {
+        ALERT_HOLD
+    }
+}
+
+/// Whether a channel may appear on the panel at all.
+///
+/// Note there is no channel-kind exception here. The previous filter demoted
+/// Official, Hurricane, News and Earthquake to active-only regardless of the
+/// operator's `presence` choice, which made `Rotation` mean nothing for exactly
+/// the channels most worth rotating.
+fn panel_eligible(channel: &ChannelSnapshot) -> bool {
+    channel.enabled
+        && channel.destinations.contains(&DestinationIdDto::Epaper)
+        && !matches!(
+            channel.presence,
+            SurfacePresence::Off | SurfacePresence::MessagesOnly
+        )
+        && (channel.presence != SurfacePresence::ActiveOnly || channel.active)
+}
+
+/// Identity of the thing being alerted about.
+///
+/// `material_key` already changes when the underlying items change and stays
+/// stable across polls with identical content, which is exactly the property an
+/// alert key needs.
+fn alert_key(channel: &ChannelSnapshot) -> String {
+    channel.material_key.clone()
+}
+
+/// The ordinary cadence: the home channel every `return_home_after + 1` slots,
+/// with the rest round-robining between.
+fn rotation_channel<'a>(
+    snapshot: &'a AppSnapshot,
+    preferences: &AppPreferences,
+    rotation_index: u64,
+) -> Option<&'a ChannelSnapshot> {
+    let eligible = snapshot
+        .channels
+        .iter()
+        .filter(|channel| panel_eligible(channel))
+        .collect::<Vec<_>>();
+    let home = eligible
+        .iter()
+        .copied()
+        .find(|channel| channel.id == preferences.profile.home_channel_id)
+        .or_else(|| {
+            eligible
+                .iter()
+                .copied()
+                .find(|channel| channel.presence == SurfacePresence::Home)
+        });
+    let others = eligible
+        .iter()
+        .copied()
+        .filter(|channel| home.is_none_or(|home| home.id != channel.id))
+        .collect::<Vec<_>>();
+    if others.is_empty() {
+        return home.or_else(|| eligible.first().copied());
+    }
+    let home_frequency = u64::from(preferences.display.return_home_after.max(1)) + 1;
+    if rotation_index.is_multiple_of(home_frequency)
+        && let Some(home) = home
+    {
+        return Some(home);
+    }
+    let non_home_index = if home.is_some() {
+        let cycle = rotation_index / home_frequency;
+        let position = rotation_index % home_frequency;
+        cycle
+            .saturating_mul(home_frequency.saturating_sub(1))
+            .saturating_add(position.saturating_sub(1))
+    } else {
+        rotation_index
+    };
+    let offset = usize::try_from(non_home_index % others.len() as u64).unwrap_or(0);
+    others.get(offset).copied()
+}
+
+/// Whether to attempt a proof frame on this pass.
+///
+/// The panel refuses unforced frames until one has been acknowledged, which is
+/// the right invariant -- never blast a display whose wire has not been proven.
+/// The bug it caused was that arming was *manual*: it resets on every connect
+/// and disconnect, and only an explicit test frame set it, so after any
+/// reconnect the panel silently showed nothing until someone pressed a button.
+///
+/// Pulled out as a pure function because `ActiveDisplay` wraps concrete
+/// transports with no seam to fake, and this decision is the part worth testing.
+pub(crate) fn should_prove_now(
+    has_active: bool,
+    armed: bool,
+    now: tokio::time::Instant,
+    next_attempt_at: tokio::time::Instant,
+) -> bool {
+    has_active && !armed && now >= next_attempt_at
+}
+
+/// Backoff for repeated proof failures, matching the reconnect ladder.
+pub(crate) fn prove_backoff(failures: u32) -> Duration {
+    Duration::from_secs(match failures {
+        0 | 1 => 5,
+        2 => 15,
+        3 => 30,
+        _ => 60,
+    })
+}
+

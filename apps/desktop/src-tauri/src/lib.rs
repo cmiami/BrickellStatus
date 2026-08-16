@@ -303,6 +303,12 @@ impl DisplayController {
         self.active.read().await.is_some()
     }
 
+    /// Current slot without consuming it. An alert reads the rotation position
+    /// but must not advance it, or it would eat the anchor's turn.
+    fn rotation_index(&self) -> u64 {
+        self.rotation_index.load(Ordering::Relaxed)
+    }
+
     fn next_rotation_index(&self) -> u64 {
         self.rotation_index.fetch_add(1, Ordering::Relaxed)
     }
@@ -1582,6 +1588,7 @@ async fn clear_aisstream_api_key(state: State<'_, DesktopState>) -> Result<Mutat
 // Material-change tracking, native notices, quiet-hours gating, and the
 // WhatsApp outbox form one delivery runtime independent of window plumbing.
 include!("desktop/delivery_runtime.rs");
+include!("desktop/panel_broker.rs");
 async fn send_snapshot_to_display(
     app: &AppHandle,
     display: &DisplayController,
@@ -1602,12 +1609,20 @@ async fn send_rotating_snapshot_to_display(
     display: &DisplayController,
     snapshot: &AppSnapshot,
     preferences: &AppPreferences,
-    rotation_index: u64,
+    selection: &PanelSelection,
 ) -> (MutationResult, Option<String>) {
-    let selected = select_rotation_channel(snapshot, preferences, rotation_index);
-    let Some(channel) = selected else {
+    let channel_id = match selection {
+        PanelSelection::Alert { channel_id, .. } | PanelSelection::Rotation { channel_id } => {
+            channel_id
+        }
+    };
+    let Some(channel) = snapshot
+        .channels
+        .iter()
+        .find(|channel| &channel.id == channel_id)
+    else {
         return (
-            mutation_error("No enabled e-paper channel is eligible for rotation."),
+            mutation_error("The selected e-paper channel is no longer present."),
             None,
         );
     };
@@ -1710,76 +1725,6 @@ async fn send_rendered_frame_to_display(
     }
 }
 
-fn select_rotation_channel<'a>(
-    snapshot: &'a AppSnapshot,
-    preferences: &AppPreferences,
-    rotation_index: u64,
-) -> Option<&'a ChannelSnapshot> {
-    let eligible = snapshot
-        .channels
-        .iter()
-        .filter(|channel| {
-            channel.enabled
-                && channel.destinations.contains(&DestinationIdDto::Epaper)
-                && !matches!(
-                    channel.presence,
-                    SurfacePresence::Off | SurfacePresence::MessagesOnly
-                )
-                && (channel.presence != SurfacePresence::ActiveOnly || channel.active)
-                && (channel.active
-                    || !matches!(
-                        channel.kind,
-                        ChannelKindDto::Official
-                            | ChannelKindDto::Hurricane
-                            | ChannelKindDto::News
-                            | ChannelKindDto::Earthquake
-                    ))
-        })
-        .collect::<Vec<_>>();
-    let interrupting = eligible
-        .iter()
-        .copied()
-        .find(|channel| interrupt_allows(channel, preferences, snapshot));
-    if interrupting.is_some() {
-        return interrupting;
-    }
-    let home = eligible
-        .iter()
-        .copied()
-        .find(|channel| channel.id == preferences.profile.home_channel_id)
-        .or_else(|| {
-            eligible
-                .iter()
-                .copied()
-                .find(|channel| channel.presence == SurfacePresence::Home)
-        });
-    let others = eligible
-        .iter()
-        .copied()
-        .filter(|channel| home.is_none_or(|home| home.id != channel.id))
-        .collect::<Vec<_>>();
-    if others.is_empty() {
-        return home.or_else(|| eligible.first().copied());
-    }
-    let home_frequency = u64::from(preferences.display.return_home_after.max(1)) + 1;
-    if rotation_index.is_multiple_of(home_frequency)
-        && let Some(home) = home
-    {
-        return Some(home);
-    }
-    let non_home_index = if home.is_some() {
-        let cycle = rotation_index / home_frequency;
-        let position = rotation_index % home_frequency;
-        cycle
-            .saturating_mul(home_frequency.saturating_sub(1))
-            .saturating_add(position.saturating_sub(1))
-    } else {
-        rotation_index
-    };
-    let offset = usize::try_from(non_home_index % others.len() as u64).unwrap_or(0);
-    others.get(offset).copied()
-}
-
 fn channel_card(
     channel: &ChannelSnapshot,
     preferences: &AppPreferences,
@@ -1802,7 +1747,7 @@ fn channel_card(
         },
     };
     let urgency = if interrupt_allows(channel, preferences, snapshot) {
-        match event_urgency(channel, snapshot) {
+        match channel.priority.urgency {
             UrgencyDto::Routine => ChannelUrgency::Routine,
             UrgencyDto::HeadsUp => ChannelUrgency::Advisory,
             UrgencyDto::Action => ChannelUrgency::Urgent,
@@ -2321,6 +2266,9 @@ async fn run_display_worker(
     engine: Arc<RuntimeEngine>,
     display: Arc<DisplayController>,
 ) {
+    let broker = PanelBroker::default();
+    let mut next_prove_at = tokio::time::Instant::now();
+    let mut prove_failures = 0_u32;
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval.tick().await;
@@ -2386,8 +2334,43 @@ async fn run_display_worker(
                 }
             }
         }
+        // Queue anything new before choosing, so an alert raised on this pass is
+        // eligible immediately rather than one tick late.
+        broker.ingest(&snapshot, &preferences);
+
+        // Connected but unproven: send one forced frame to earn the acknowledgement
+        // the panel requires. Without this the display stays parked after every
+        // reconnect until somebody presses the test-frame button by hand.
+        if should_prove_now(
+            display.has_active().await,
+            display.delivery_armed(),
+            tokio::time::Instant::now(),
+            next_prove_at,
+        ) {
+            let proof =
+                send_snapshot_to_display(&app, &display, &snapshot, &preferences, true).await;
+            if proof.ok {
+                prove_failures = 0;
+                debug!("display route proved; rotation is live");
+            } else {
+                prove_failures = prove_failures.saturating_add(1);
+                warn!(message = %proof.message, "display proof frame failed");
+            }
+            next_prove_at = tokio::time::Instant::now() + prove_backoff(prove_failures);
+        }
+
         if display.has_active().await && tokio::time::Instant::now() >= next_display_at {
-            let rotation_index = display.next_rotation_index();
+            // The rotation index is read without advancing it. Only serving the
+            // rotation lane consumes a slot; an alert must not, or a burst of
+            // them would silently skip the anchor's home cadence.
+            let selection = broker.next(&snapshot, &preferences, display.rotation_index());
+            let Some(selection) = selection else {
+                next_display_at = tokio::time::Instant::now() + Duration::from_secs(5);
+                continue;
+            };
+            if matches!(selection, PanelSelection::Rotation { .. }) {
+                display.next_rotation_index();
+            }
             let (result, channel_id) = match tokio::time::timeout(
                 Duration::from_secs(30),
                 send_rotating_snapshot_to_display(
@@ -2395,7 +2378,7 @@ async fn run_display_worker(
                     &display,
                     &snapshot,
                     &preferences,
-                    rotation_index,
+                    &selection,
                 ),
             )
             .await
@@ -2406,19 +2389,31 @@ async fn run_display_worker(
                     None,
                 ),
             };
-            let dwell = channel_id
-                .as_deref()
-                .and_then(|id| {
-                    preferences
-                        .profile
-                        .channels
-                        .iter()
-                        .find(|channel| channel.id == id)
-                })
-                .map(|channel| channel.rotation_seconds)
-                .unwrap_or(preferences.display.dwell_seconds)
-                .max(5);
-            next_display_at = tokio::time::Instant::now() + Duration::from_secs(u64::from(dwell));
+            // An alert holds for a fixed, bounded time; a rotation frame keeps
+            // its channel's configured dwell.
+            let (dwell, holding_score) = match &selection {
+                PanelSelection::Alert { score, .. } => (PanelBroker::alert_hold(), *score),
+                PanelSelection::Rotation { .. } => {
+                    let seconds = channel_id
+                        .as_deref()
+                        .and_then(|id| {
+                            preferences
+                                .profile
+                                .channels
+                                .iter()
+                                .find(|channel| channel.id == id)
+                        })
+                        .map(|channel| channel.rotation_seconds)
+                        .unwrap_or(preferences.display.dwell_seconds)
+                        .max(5);
+                    // Score zero: anything queued may preempt an ordinary frame.
+                    (Duration::from_secs(u64::from(seconds)), 0)
+                }
+            };
+            // The dwell and the interrupt wait are one primitive, so a new alert
+            // lands within milliseconds instead of at the end of this frame.
+            broker.wait_or_preempt(holding_score, dwell).await;
+            next_display_at = tokio::time::Instant::now();
             if !result.ok {
                 warn!(message = %result.message, "background display update failed");
             } else {

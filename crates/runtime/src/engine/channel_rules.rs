@@ -1,3 +1,119 @@
+/// How hard this channel argues for interrupting, right now.
+///
+/// This lived in the desktop delivery path and its result was never read by
+/// anything that could act on it. It belongs here, beside the facts it is
+/// derived from, and it is written onto the snapshot so no surface can quietly
+/// decide its own ranking again.
+fn channel_urgency(
+    kind: ChannelKindDto,
+    signal: Option<&ChannelSignalDto>,
+    decision: &DecisionSnapshot,
+) -> UrgencyDto {
+    let severity = signal
+        .and_then(|signal| signal.severity.as_deref())
+        .map(str::to_ascii_lowercase);
+    match kind {
+        ChannelKindDto::Bridge => match decision.state {
+            BridgeStateDto::Open => UrgencyDto::Emergency,
+            BridgeStateDto::Likely => UrgencyDto::HeadsUp,
+            BridgeStateDto::Clear | BridgeStateDto::Possible => UrgencyDto::Routine,
+        },
+        ChannelKindDto::Official => match severity.as_deref() {
+            Some("extreme") => UrgencyDto::Emergency,
+            Some("severe") => UrgencyDto::Action,
+            _ => UrgencyDto::HeadsUp,
+        },
+        ChannelKindDto::Earthquake => {
+            let magnitude = severity
+                .as_deref()
+                .and_then(|value| value.strip_prefix("magnitude "))
+                .and_then(|value| value.trim().parse::<f64>().ok());
+            match magnitude {
+                Some(value) if value >= 7.0 => UrgencyDto::Emergency,
+                Some(value) if value >= 6.0 => UrgencyDto::Action,
+                _ => UrgencyDto::HeadsUp,
+            }
+        }
+        // Breaking news was Action, which put it above imminent rain. It is
+        // worth showing, not worth stepping in front of weather you are about
+        // to walk into.
+        ChannelKindDto::News => UrgencyDto::HeadsUp,
+        ChannelKindDto::Weather | ChannelKindDto::Hurricane => UrgencyDto::HeadsUp,
+        // A market move never changes whether you should leave the building.
+        ChannelKindDto::Markets => UrgencyDto::Routine,
+        ChannelKindDto::System => UrgencyDto::Routine,
+    }
+}
+
+/// Within-kind ordering only. Never large enough to reorder two kinds.
+fn channel_severity_rank(kind: ChannelKindDto, signal: Option<&ChannelSignalDto>) -> u8 {
+    let severity = signal
+        .and_then(|signal| signal.severity.as_deref())
+        .map(str::to_ascii_lowercase);
+    match kind {
+        ChannelKindDto::Official => match severity.as_deref() {
+            Some("extreme") => 9,
+            Some("severe") => 7,
+            Some("moderate") => 4,
+            Some("minor") => 2,
+            _ => 0,
+        },
+        ChannelKindDto::Earthquake => severity
+            .as_deref()
+            .and_then(|value| value.strip_prefix("magnitude "))
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .map_or(0, |magnitude| (magnitude.round().max(0.0) as u8).min(9)),
+        _ => 0,
+    }
+}
+
+/// Minutes until this channel's signal affects the reader.
+///
+/// The bridge answers from its own prediction. Other channels have no dated
+/// forecast yet, so they report `None` and score no imminence: an event that
+/// cannot say when it matters has not earned a position over one that can.
+fn channel_imminence_minutes(kind: ChannelKindDto, decision: &DecisionSnapshot) -> Option<u16> {
+    match kind {
+        ChannelKindDto::Bridge => match decision.state {
+            // Already blocking the road; nothing is sooner than now.
+            BridgeStateDto::Open => Some(0),
+            _ => decision.eta_min,
+        },
+        // No other channel carries a dated forecast yet. Reporting `None` costs
+        // them the imminence term rather than inventing a time for them.
+        _ => None,
+    }
+}
+
+fn channel_priority(
+    kind: ChannelKindDto,
+    signal: Option<&ChannelSignalDto>,
+    decision: &DecisionSnapshot,
+    is_anchor: bool,
+) -> ChannelPriorityDto {
+    let urgency = channel_urgency(kind, signal, decision);
+    let imminence_minutes = channel_imminence_minutes(kind, decision);
+    let confirmed = matches!(kind, ChannelKindDto::Bridge) && decision.state == BridgeStateDto::Open;
+    let score = bridgestatus_policy::priority_score(bridgestatus_policy::PriorityInput {
+        urgency: match urgency {
+            UrgencyDto::Routine => bridgestatus_policy::Urgency::Routine,
+            UrgencyDto::HeadsUp => bridgestatus_policy::Urgency::HeadsUp,
+            UrgencyDto::Action => bridgestatus_policy::Urgency::Action,
+            UrgencyDto::Emergency => bridgestatus_policy::Urgency::Emergency,
+        },
+        imminence_minutes,
+        confirmed,
+        severity_rank: channel_severity_rank(kind, signal),
+        is_anchor,
+    });
+    ChannelPriorityDto {
+        score,
+        urgency,
+        imminence_minutes,
+        confirmed,
+    }
+}
+
 fn channel_snapshots(
     preferences: &AppPreferences,
     state: &PersistedRuntimeState,
@@ -45,7 +161,14 @@ fn channel_snapshots(
                 && coverage.usable_sources == coverage.total_sources
                 && (kind != ChannelKindDto::Bridge
                     || bridge_resolution_confirmed(channel, state, now_ms));
+            let priority = channel_priority(
+                kind,
+                signal.as_ref(),
+                decision,
+                channel.id == preferences.profile.home_channel_id,
+            );
             ChannelSnapshot {
+                priority,
                 id: channel.id.clone(),
                 kind,
                 title: channel.title.clone(),

@@ -339,7 +339,7 @@ async fn enqueue_material_whatsapp_updates(
                     id: incident_id,
                     channel_id: &channel.id,
                     state: if active { "active" } else { "resolved" },
-                    urgency: urgency_key(event_urgency(channel, snapshot)),
+                    urgency: urgency_key(channel.priority.urgency),
                     material_revision: i64::from(revision),
                     fingerprint: tracker
                         .channels
@@ -1089,53 +1089,6 @@ fn urgency_key(urgency: UrgencyDto) -> &'static str {
     }
 }
 
-fn event_urgency(channel: &ChannelSnapshot, snapshot: &AppSnapshot) -> UrgencyDto {
-    match channel.kind {
-        ChannelKindDto::Bridge => match snapshot.decision.state {
-            BridgeStateDto::Open => UrgencyDto::Emergency,
-            BridgeStateDto::Likely => UrgencyDto::HeadsUp,
-            BridgeStateDto::Clear | BridgeStateDto::Possible => UrgencyDto::Routine,
-        },
-        ChannelKindDto::Official => match channel
-            .signal
-            .as_ref()
-            .and_then(|signal| signal.severity.as_deref())
-            .map(str::to_ascii_lowercase)
-            .as_deref()
-        {
-            Some("extreme") => UrgencyDto::Emergency,
-            Some("severe") => UrgencyDto::Action,
-            Some("moderate" | "minor") | None | Some(_) => UrgencyDto::HeadsUp,
-        },
-        ChannelKindDto::Earthquake => {
-            let magnitude = channel
-                .signal
-                .as_ref()
-                .and_then(|signal| signal.severity.as_deref())
-                .and_then(|value| value.strip_prefix("Magnitude "))
-                .and_then(|value| value.parse::<f64>().ok());
-            match magnitude {
-                Some(value) if value >= 7.0 => UrgencyDto::Emergency,
-                Some(value) if value >= 6.0 => UrgencyDto::Action,
-                Some(_) | None => UrgencyDto::HeadsUp,
-            }
-        }
-        ChannelKindDto::News
-            if channel
-                .signal
-                .as_ref()
-                .and_then(|signal| signal.severity.as_deref())
-                .is_some_and(|severity| severity.eq_ignore_ascii_case("breaking")) =>
-        {
-            UrgencyDto::Action
-        }
-        ChannelKindDto::Weather
-        | ChannelKindDto::Hurricane
-        | ChannelKindDto::News
-        | ChannelKindDto::Markets => UrgencyDto::HeadsUp,
-        ChannelKindDto::System => UrgencyDto::Routine,
-    }
-}
 
 fn desktop_notification_copy(channel: &ChannelSnapshot, active: bool) -> (String, String) {
     if !active {
@@ -1253,16 +1206,13 @@ fn quiet_hours_block(
     if !in_quiet_hours {
         return Ok(false);
     }
-    let extreme_official = channel.kind == ChannelKindDto::Official
-        && channel
-            .signal
-            .as_ref()
-            .and_then(|signal| signal.severity.as_deref())
-            .is_some_and(|severity| severity.eq_ignore_ascii_case("extreme"));
-    let emergency = extreme_official
-        || channel.kind == ChannelKindDto::Bridge
-            && snapshot.decision.state == BridgeStateDto::Open;
-    Ok(!(quiet.bypass_emergency && emergency))
+    // What counts as an emergency is decided once, in the engine, and carried on
+    // the snapshot. This used to re-derive it from two hardcoded cases -- an
+    // extreme official alert, or an open bridge -- which meant the urgency the
+    // engine computed was ignored here and, for instance, a magnitude 7
+    // earthquake was held until morning despite already being classified
+    // Emergency.
+    Ok(!(quiet.bypass_emergency && channel.priority.urgency == UrgencyDto::Emergency))
 }
 
 fn parse_clock_minutes(value: &str) -> Result<u16, String> {
