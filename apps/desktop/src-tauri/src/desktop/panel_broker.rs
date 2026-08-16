@@ -31,9 +31,32 @@ const ALERT_HOLD: Duration = Duration::from_secs(45);
 /// and then only on its rotation turn.
 const ALERT_REASSERT: Duration = Duration::from_secs(180);
 
-/// Score at or above which a state re-asserts itself. Only a confirmed,
-/// road-blocking event should keep taking the panel back.
+/// Score at or above which a state re-asserts itself on that slow cadence. Only
+/// a confirmed, road-blocking event needs to keep taking the panel back merely
+/// for continuing to be true.
 const REASSERT_MIN_SCORE: u16 = 900;
+
+/// How near an event has to be before it is treated as a live warning window.
+///
+/// Inside this horizon the reader is deciding *now* — whether to turn, whether
+/// to leave — and the panel belongs to whatever they are deciding about.
+const IMMINENT_HORIZON_MINUTES: u16 = 15;
+
+/// Re-assertion cadence inside that window. Shorter than [`ALERT_HOLD`], so an
+/// imminent event reclaims the panel as its own hold expires rather than
+/// surrendering the rest of the window to the rotation.
+///
+/// This is the bug it exists to prevent, and it is the flagship one. A bridge
+/// opening in three to eight minutes at better than eighty percent confidence
+/// scores 493: `HeadsUp` plus imminence plus the anchor bonus, with no
+/// `confirmed` bonus because nothing has been observed yet — that is what
+/// *predicted* means. Re-assertion required 900 and `confirmed`, both of which
+/// only an already-open bridge satisfies. So the one warning the product exists
+/// to give appeared once, held forty-five seconds, and handed the panel back to
+/// the rotation for the remaining minutes, which is how a reader with a bridge
+/// about to go up in front of them was shown stock prices. "Warn ahead, confirm
+/// later" is the first product principle; the panel was doing the opposite.
+const ALERT_REASSERT_IMMINENT: Duration = Duration::from_secs(20);
 
 /// A queued alert is dropped rather than shown if it waited longer than this;
 /// by then it describes a moment that has passed.
@@ -136,13 +159,28 @@ impl PanelBroker {
 
             let key = alert_key(channel);
             let changed = self.lock_seen().get(&channel.id) != Some(&key);
+            // Two reasons to take the panel back while saying the same thing:
+            // the event is confirmed and still blocking, or it is close enough
+            // that the reader is acting on it right now. The second is the one
+            // that matters most and was missing, because imminence is exactly
+            // the state in which nothing has been confirmed yet.
+            let imminent = channel
+                .priority
+                .imminence_minutes
+                .is_some_and(|minutes| minutes <= IMMINENT_HORIZON_MINUTES);
+            let sustained =
+                channel.priority.score >= REASSERT_MIN_SCORE && channel.priority.confirmed;
+            let cadence = if imminent {
+                ALERT_REASSERT_IMMINENT
+            } else {
+                ALERT_REASSERT
+            };
             let due_to_reassert = !changed
-                && channel.priority.score >= REASSERT_MIN_SCORE
-                && channel.priority.confirmed
+                && (imminent || sustained)
                 && self
                     .lock_reasserted()
                     .get(&channel.id)
-                    .is_none_or(|last| now.duration_since(*last) >= ALERT_REASSERT);
+                    .is_none_or(|last| now.duration_since(*last) >= cadence);
 
             if !changed && !due_to_reassert {
                 continue;

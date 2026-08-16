@@ -1712,6 +1712,101 @@ mod panel {
         channel.material_key = key.into();
     }
 
+    /// Raises a channel that says something is about to happen.
+    fn raise_imminent(snapshot: &mut AppSnapshot, id: &str, score: u16, key: &str, minutes: u16) {
+        raise(snapshot, id, score, key);
+        let channel = snapshot
+            .channels
+            .iter_mut()
+            .find(|channel| channel.id == id)
+            .expect("channel");
+        channel.priority.imminence_minutes = Some(minutes);
+    }
+
+    /// The reported failure, and the flagship one: a bridge predicted to open
+    /// in three to eight minutes appeared once, held its forty-five seconds, and
+    /// then handed the panel to the rotation for the rest of the window — so a
+    /// reader with a bridge about to go up in front of them was shown stock
+    /// prices.
+    ///
+    /// It scores 493, not the 900 re-assertion required, and it is not
+    /// `confirmed`, because nothing has been observed yet. That is what
+    /// *predicted* means, and predicting is the product.
+    #[tokio::test]
+    async fn a_bridge_about_to_open_keeps_taking_the_panel_back() {
+        let (mut snapshot, preferences) = epaper_snapshot().await;
+        // Paused only now: the fixture's store needs a real clock to open.
+        tokio::time::pause();
+        let broker = PanelBroker::default();
+        raise_imminent(&mut snapshot, "bridge.brickell", 493, "likely:3-8", 5);
+
+        broker.ingest(&snapshot, &preferences);
+        assert!(
+            matches!(
+                broker.next(&snapshot, &preferences, 0),
+                Some(PanelSelection::Alert { ref channel_id, .. }) if channel_id == "bridge.brickell"
+            ),
+            "the warning has to reach the panel at all"
+        );
+
+        // The hold expires and nothing about the bridge has changed: it is
+        // still going to open, and still says so.
+        tokio::time::advance(PanelBroker::alert_hold() + Duration::from_secs(1)).await;
+        broker.ingest(&snapshot, &preferences);
+        assert!(
+            matches!(
+                broker.next(&snapshot, &preferences, 0),
+                Some(PanelSelection::Alert { ref channel_id, .. }) if channel_id == "bridge.brickell"
+            ),
+            "an opening still minutes away must reclaim the panel, not yield it"
+        );
+    }
+
+    /// ...and the window ends. Once the opening is no longer near, the bridge
+    /// stops taking the panel back and the rotation resumes, so this cannot
+    /// become the old bug where one channel pinned the display forever.
+    #[tokio::test]
+    async fn an_event_that_is_no_longer_near_releases_the_panel() {
+        let (mut snapshot, preferences) = epaper_snapshot().await;
+        tokio::time::pause();
+        let broker = PanelBroker::default();
+        raise_imminent(&mut snapshot, "bridge.brickell", 493, "likely:3-8", 5);
+        broker.ingest(&snapshot, &preferences);
+        let _ = broker.next(&snapshot, &preferences, 0);
+
+        // The estimate moves out past the warning horizon without otherwise
+        // changing, which is what a vessel slowing down looks like.
+        raise_imminent(&mut snapshot, "bridge.brickell", 493, "likely:3-8", 45);
+        tokio::time::advance(PanelBroker::alert_hold() + Duration::from_secs(1)).await;
+        broker.ingest(&snapshot, &preferences);
+        assert!(
+            matches!(
+                broker.next(&snapshot, &preferences, 0),
+                Some(PanelSelection::Rotation { .. })
+            ),
+            "a distant estimate must not keep the panel"
+        );
+    }
+
+    /// A routine card has no imminence at all and must never reclaim the panel
+    /// on this path — it is what the reader was seeing instead of the bridge.
+    #[tokio::test]
+    async fn a_routine_card_never_reclaims_the_panel() {
+        let (mut snapshot, preferences) = epaper_snapshot().await;
+        tokio::time::pause();
+        let broker = PanelBroker::default();
+        raise(&mut snapshot, "weather.miami", 120, "markets:flat");
+        broker.ingest(&snapshot, &preferences);
+        let _ = broker.next(&snapshot, &preferences, 0);
+
+        tokio::time::advance(PanelBroker::alert_hold() + Duration::from_secs(1)).await;
+        broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Rotation { .. })
+        ));
+    }
+
     #[tokio::test]
     async fn an_alert_preempts_the_rotation() {
         let (mut snapshot, preferences) = epaper_snapshot().await;
