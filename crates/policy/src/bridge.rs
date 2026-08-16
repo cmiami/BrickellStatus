@@ -112,24 +112,57 @@ pub struct EvidenceWeights {
     pub corroboration_bonus: f32,
     /// A clock slot is imminent on a day the schedule does not restrict.
     ///
-    /// Measured, not assumed: across 24 observed openings, 79% of daytime ones
-    /// began within five minutes of an `:00` or `:30` against an 18% chance
-    /// level — and every one of those days was a weekend, which the regulation
-    /// leaves on signal and this predictor therefore scored at zero. Held well
-    /// below the weekday scheduled weight because it rests on fourteen daytime
-    /// events from a single weekend.
+    /// Measured, not assumed — and re-measured, which moved the number down.
+    ///
+    /// The first calibration read 79% of 14 daytime openings within five
+    /// minutes of an `:00` or `:30` against an "18% chance level". That chance
+    /// figure was wrong: it is the share of an hour lying within five minutes of
+    /// *one* anchor, and there are two per hour, so the correct level is 22/60,
+    /// or 37%. The demonstrated lift was therefore about 2.1x rather than the
+    /// 4.4x it appeared to be.
+    ///
+    /// A second, independent 28-hour window then recorded 34 openings, 19 of
+    /// them daytime, and put the same statistic at 58% — real, but a good deal
+    /// weaker than 79%. Backtested on a held-out tail of that window, a
+    /// clock-only rule scored *below* firing constantly, which is what a base
+    /// rate near 30% does to a weak predictor.
+    ///
+    /// What survived re-measurement is the asymmetry rather than the strength:
+    /// openings cluster from about ten minutes before a slot to five after it,
+    /// not symmetrically around it — the tender starts lifting ahead of the
+    /// scheduled minute. Sixteen of nineteen daytime openings fall in that
+    /// window against a 50% chance level (p ≈ 0.002), where the symmetric
+    /// five-minute window catches only eleven. `schedule_slot_window_minutes`
+    /// already looks *forward* to an approaching slot, which is the right shape.
+    ///
+    /// Both windows are weekends, which the regulation leaves on signal. There
+    /// is still no weekday observation in this table at all.
+    ///
+    /// Re-derive rather than trusting these figures, which describe the data as
+    /// it stood and the record grows every hour the app runs:
+    /// `python3 scripts/calibrate_bridge.py`. It carries the decision rules for
+    /// changing anything here, pre-registered so a future window is not read by
+    /// eye — which is how the first calibration talked itself into 79%.
     pub schedule_clock_slot: f32,
 }
 
 impl Default for EvidenceWeights {
     fn default() -> Self {
         Self {
-            // Rebalanced against 20 hours of recorded openings. The clock was
-            // the strongest predictor available and the weakest weight in this
-            // table; ordered upstream movement was the strongest weight and
-            // measured only 1.4x better than chance at its best window. Both
-            // move toward what was observed without going all the way there,
-            // because 24 openings from one weekend is not a calibration set.
+            // Rebalanced against 20 hours of recorded openings, then left alone
+            // when a second 28-hour window disagreed with the first. The clock
+            // was the strongest predictor available and the weakest weight here;
+            // ordered upstream movement was the strongest weight and measured
+            // only 1.4x better than chance at its best window, then measured
+            // *below* chance on the second window — 0.86x at twenty minutes,
+            // 0.72x at thirty. Unordered upstream activity beat it both times.
+            //
+            // Nothing is retuned on that, because two disagreeing weekends are
+            // not a calibration set either, and the sign of the disagreement is
+            // the point: the two largest weights in this table rest on the
+            // feature with the least evidence behind it. See the note on
+            // `schedule_clock_slot`. Weekday observation is the missing input,
+            // and the regulation makes weekdays a different problem entirely.
             schedule_scheduled: 0.14,
             schedule_on_signal: 0.0,
             schedule_blackout: 0.0,
