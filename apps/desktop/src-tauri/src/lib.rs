@@ -2392,7 +2392,15 @@ async fn run_display_worker(
             let radar = match &selection {
                 PanelSelection::Alert { channel_id, .. }
                 | PanelSelection::Rotation { channel_id } => {
-                    panel_radar_figure(&app, &snapshot, &preferences, channel_id).await
+                    // Bounded hard. Radar is decoration and the panel is the
+                    // product: a tile host that hangs must cost the frame its
+                    // figure, never its repaint.
+                    tokio::time::timeout(
+                        RADAR_FETCH_BUDGET,
+                        panel_radar_figure(&app, &snapshot, &preferences, channel_id),
+                    )
+                    .await
+                    .unwrap_or_default()
                 }
             };
             let (result, channel_id) = match tokio::time::timeout(

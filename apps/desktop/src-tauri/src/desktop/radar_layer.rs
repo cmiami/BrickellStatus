@@ -14,6 +14,10 @@
 /// roughly every ten minutes, so re-asking more often than this returns the
 /// same answer and spends someone else's bandwidth to do it.
 const RADAR_FRAME_CACHE: Duration = Duration::from_secs(4 * 60);
+/// Ceiling on how long a panel frame will wait for radar before going out
+/// without it. Shorter than the fetcher's own timeout on purpose: the display
+/// loop's deadline is what a person actually experiences.
+const RADAR_FETCH_BUDGET: Duration = Duration::from_secs(6);
 
 /// Colour scheme 4 is RainViewer's "Rainbow SELEX-SI" — the one that reads as
 /// weather rather than as a heat map when laid over a street map.
