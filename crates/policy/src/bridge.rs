@@ -450,6 +450,10 @@ impl BridgePredictor {
             clock_slot_imminent,
             &self.config,
         )];
+        // How many upstream bridges are reporting the same run downriver. Each
+        // one is a further sighting of a vessel that is actually moving, which
+        // is what rules out the slow end of the speed range.
+        let mut upstream_sightings = 0_usize;
         let mut positive_sources = BTreeSet::new();
         let mut positive_kinds = BTreeSet::new();
         let mut valid_non_schedule = 0usize;
@@ -483,10 +487,13 @@ impl BridgePredictor {
                     if scored.applied_score > 0.0 {
                         positive_sources.insert(item.source_id.clone());
                         positive_kinds.insert(scored.kind);
-                        if let Some(eta) = evidence_eta(&item.fact, item.observed_at, now)
-                            && best_eta.is_none_or(|current| eta.earliest < current.earliest)
-                        {
-                            best_eta = Some(eta);
+                        if let Some(eta) = evidence_eta(&item.fact, item.observed_at, now) {
+                            if scored.kind == EvidenceKind::Outbound {
+                                upstream_sightings += 1;
+                            }
+                            if best_eta.is_none_or(|current| eta.earliest < current.earliest) {
+                                best_eta = Some(eta);
+                            }
                         }
                     }
                 }
@@ -552,7 +559,11 @@ impl BridgePredictor {
             confidence,
             urgency: urgency_for(state),
             availability,
-            eta: self.scheduled_eta(best_eta, now, exempt_transit)?,
+            eta: self.scheduled_eta(
+                best_eta.map(|eta| tighten_eta(eta, upstream_sightings)),
+                now,
+                exempt_transit,
+            )?,
             schedule,
             contributions,
             transition: PredictionTransition {
@@ -964,6 +975,45 @@ fn predicted_window_seconds(fact: &BridgeObservation) -> u64 {
         // itself moves -- which is why only that class needs the window.
         _ => 0,
     }
+}
+
+/// Widest window worth reporting.
+///
+/// "Opening likely in 9 to 42 minutes" is not a prediction anybody can use --
+/// the bridge is likely to open in the next few hours too. The window came
+/// straight from dividing distance by a speed range spanning 3 to 6 knots, so
+/// its width grew with distance and the farthest bridge produced the vaguest
+/// answer at exactly the moment there was most time to act on a sharp one.
+const MAX_ETA_SPAN_MINUTES: u16 = 20;
+
+/// Narrowest window worth claiming.
+///
+/// Observed openings began within about five minutes either side of the time
+/// they were expected. Reporting anything tighter than this would be inventing
+/// precision the evidence has never shown.
+const MIN_ETA_SPAN_MINUTES: u16 = 6;
+
+/// Brings a raw arrival window down to something actionable.
+///
+/// Each additional upstream bridge that has seen the same run is another
+/// sighting of a vessel confirmed to be moving, which is what rules out the
+/// slow end of the speed range the window was built from. So corroboration
+/// tightens the answer instead of merely raising confidence in a vague one.
+///
+/// The near edge never moves. Only the far edge is pulled in, because pushing
+/// the near edge later would risk saying "not yet" about a bridge that is
+/// already going up, and warning late is the one failure this app cannot have.
+fn tighten_eta(eta: EtaRangeMinutes, upstream_sightings: usize) -> EtaRangeMinutes {
+    let span = eta.latest.saturating_sub(eta.earliest);
+    // One sighting earns the full width, two earns half, and so on.
+    let allowed = MAX_ETA_SPAN_MINUTES
+        .checked_div(u16::try_from(upstream_sightings.max(1)).unwrap_or(1))
+        .unwrap_or(MAX_ETA_SPAN_MINUTES)
+        .max(MIN_ETA_SPAN_MINUTES);
+    if span <= allowed {
+        return eta;
+    }
+    EtaRangeMinutes::new(eta.earliest, eta.earliest.saturating_add(allowed))
 }
 
 fn availability_factor(status: AvailabilityStatus) -> f32 {
@@ -1733,5 +1783,47 @@ mod tests {
                 "the clock raised a state with no evidence behind it"
             );
         }
+    }
+
+    /// "Opening likely in 9 to 42 minutes" says nothing a driver can act on --
+    /// the bridge is likely to open in the next few hours too.
+    #[test]
+    fn a_window_nobody_can_act_on_is_brought_down_to_one_that_can_be() {
+        let vague = EtaRangeMinutes::new(9, 42);
+        let tightened = tighten_eta(vague, 1);
+        assert_eq!(tightened.earliest, 9, "the near edge never moves");
+        assert_eq!(tightened.latest, 29);
+        assert!(tightened.latest - tightened.earliest <= MAX_ETA_SPAN_MINUTES);
+    }
+
+    /// Each further upstream bridge is another sighting of a vessel confirmed
+    /// to be moving, which rules out the slow end of the speed range the window
+    /// was built from.
+    #[test]
+    fn corroboration_tightens_the_window_rather_than_only_the_confidence() {
+        let vague = EtaRangeMinutes::new(9, 42);
+        let one = tighten_eta(vague, 1);
+        let two = tighten_eta(vague, 2);
+        let three = tighten_eta(vague, 3);
+        assert!(two.latest < one.latest, "{two:?} vs {one:?}");
+        assert!(three.latest < two.latest, "{three:?} vs {two:?}");
+        for tightened in [one, two, three] {
+            assert_eq!(tightened.earliest, vague.earliest);
+        }
+    }
+
+    /// Never so tight that it claims precision the evidence has not shown.
+    #[test]
+    fn tightening_stops_at_the_observed_spread() {
+        let tightened = tighten_eta(EtaRangeMinutes::new(9, 42), 99);
+        assert_eq!(tightened.latest - tightened.earliest, MIN_ETA_SPAN_MINUTES);
+    }
+
+    /// A window that is already sharp is left exactly as it is.
+    #[test]
+    fn an_already_useful_window_is_untouched() {
+        let sharp = EtaRangeMinutes::new(4, 9);
+        assert_eq!(tighten_eta(sharp, 1), sharp);
+        assert_eq!(tighten_eta(sharp, 4), sharp);
     }
 }

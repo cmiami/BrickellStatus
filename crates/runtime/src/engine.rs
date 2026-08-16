@@ -1863,16 +1863,14 @@ fn decision_copy(state: BridgeStateDto) -> (&'static str, &'static str, &'static
             "An opening is possible but not predicted.",
             "Nothing to do yet.",
         ),
+        // Status, not advice. Whether another route exists, and whether it is
+        // worth taking, is something the driver knows and this app does not.
         BridgeStateDto::Likely => (
             "Opening likely",
             "An opening is expected shortly.",
-            "Consider another route.",
+            "Traffic will stop when it opens.",
         ),
-        BridgeStateDto::Open => (
-            "Bridge open",
-            "The span is up.",
-            "Road blocked. Take another route.",
-        ),
+        BridgeStateDto::Open => ("Bridge open", "The span is up.", "Traffic is stopped."),
     }
 }
 

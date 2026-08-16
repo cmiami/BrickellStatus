@@ -342,7 +342,7 @@ fn channel_signal(
             imminence_minutes = weather.imminence_minutes;
             (
                 weather.detail,
-                "Forecast conditions cross the configured weather thresholds.".into(),
+                "Expect wet roads and slower traffic.".into(),
                 Some(if imminence_minutes == Some(0) {
                     "Falling now".into()
                 } else {
@@ -356,7 +356,7 @@ fn channel_signal(
                 "An active official alert matches this channel.",
                 360,
             ),
-            "The official source reports this alert as active.".into(),
+            "This alert is in force now.".into(),
             bounded_optional_signal_text(
                 item.attributes.get("severity").and_then(Value::as_str),
                 40,
@@ -368,7 +368,7 @@ fn channel_signal(
                 "An active Atlantic cyclone is listed by the National Hurricane Center.",
                 360,
             ),
-            "The current NHC cyclone product matches this channel; local impact is not inferred."
+            "Track and intensity only. Local impact is not forecast here."
                 .into(),
             bounded_optional_signal_text(
                 item.attributes
@@ -383,7 +383,7 @@ fn channel_signal(
                 "A current publisher item matches this channel's topic rules.",
                 360,
             ),
-            "The publisher item matches the configured topics and freshness window.".into(),
+            "Headline only. Open the story for detail.".into(),
             Some(if news_item_is_breaking(item) {
                 "Breaking".into()
             } else {
@@ -396,7 +396,7 @@ fn channel_signal(
                 "A recent earthquake meets the configured magnitude and age rules.",
                 360,
             ),
-            "The USGS event crosses the configured magnitude and age thresholds.".into(),
+            "Reported magnitude and location, not local shaking.".into(),
             item.attributes
                 .get("magnitude")
                 .and_then(Value::as_f64)
@@ -433,7 +433,7 @@ fn channel_signal(
                     ),
                     360,
                 ),
-                "The market move crosses the configured change threshold.".into(),
+                "Change is against the previous close.".into(),
                 Some("Material move".into()),
             )
         }

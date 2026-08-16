@@ -1984,10 +1984,7 @@ fn official_signal_exposes_bounded_provider_content_and_replacement_identity() {
         signal.detail,
         "Flash flooding is occurring near downtown Miami."
     );
-    assert_eq!(
-        signal.action,
-        "The official source reports this alert as active."
-    );
+    assert_eq!(signal.action, "This alert is in force now.");
     assert_eq!(signal.severity.as_deref(), Some("Severe"));
     assert_eq!(
         signal.expires_at.as_deref(),
@@ -2018,10 +2015,7 @@ fn official_signal_exposes_bounded_provider_content_and_replacement_identity() {
     assert_ne!(replacement_snapshot.material_key, first_key);
     let replacement_signal = replacement_snapshot.signal.as_ref().unwrap();
     assert_eq!(replacement_signal.headline, "Tornado Warning");
-    assert_eq!(
-        replacement_signal.action,
-        "The official source reports this alert as active."
-    );
+    assert_eq!(replacement_signal.action, "This alert is in force now.");
     assert_eq!(replacement_signal.severity.as_deref(), Some("Severe"));
 }
 
@@ -2057,10 +2051,7 @@ fn news_signal_exposes_publisher_content_and_replacement_identity() {
         signal.detail,
         "The downtown ramp closes at 6 PM for emergency repairs."
     );
-    assert_eq!(
-        signal.action,
-        "The publisher item matches the configured topics and freshness window."
-    );
+    assert_eq!(signal.action, "Headline only. Open the story for detail.");
     assert_eq!(signal.severity.as_deref(), Some("Breaking"));
 
     let mut replacement = news_item(
@@ -2831,4 +2822,67 @@ fn a_market_signal_carries_the_session_shape() {
     )
     .unwrap();
     assert!(plain.series.is_empty());
+}
+
+/// Card copy describes the situation, never the rule that surfaced it.
+///
+/// Every one of these lines used to read like "the publisher item matches the
+/// configured topics and freshness window" -- a sentence about this app's own
+/// plumbing, printed on a display where somebody is trying to find out what is
+/// happening outside.
+#[test]
+fn no_channel_ever_prints_the_rule_that_produced_it() {
+    const PLUMBING: [&str; 8] = [
+        "configured",
+        "threshold",
+        "matches",
+        "freshness window",
+        "this channel",
+        "source reports",
+        "product",
+        "crosses",
+    ];
+    let now_ms: i64 = 1_786_741_200_000;
+    let preferences = AppPreferences::default();
+    let cases: Vec<(ChannelKindDto, usize, CollectorItem)> = vec![
+        (
+            ChannelKindDto::Weather,
+            1,
+            weather_minutely_item(now_ms, 0.6, 8),
+        ),
+        (
+            ChannelKindDto::Official,
+            2,
+            official_alert_item("nws:a", "Alert", "Actual", Some(now_ms + 60_000)),
+        ),
+        (ChannelKindDto::Hurricane, 3, tropical_item("al012026")),
+        (
+            ChannelKindDto::News,
+            4,
+            news_item("news:a", "Miami transportation update", now_ms),
+        ),
+        (
+            ChannelKindDto::Earthquake,
+            5,
+            earthquake_item("usgs:a", now_ms),
+        ),
+        (ChannelKindDto::Markets, 6, market_quote_item(6.5, None)),
+    ];
+    for (kind, index, item) in cases {
+        let mut channel = preferences.profile.channels[index].clone();
+        channel.enabled = true;
+        let Some(signal) =
+            channel_signal(kind, &channel, &[&item], true, now_ms, UnitSystem::Imperial)
+        else {
+            continue;
+        };
+        let action = signal.action.to_ascii_lowercase();
+        for word in PLUMBING {
+            assert!(
+                !action.contains(word),
+                "{kind:?} prints its own rule at the reader: {:?}",
+                signal.action
+            );
+        }
+    }
 }
