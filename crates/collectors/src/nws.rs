@@ -6,9 +6,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use url::Url;
 
+#[cfg(feature = "native")]
+use crate::SafeHttpFetcher;
 use crate::{
     CollectContext, Collector, CollectorBatch, CollectorError, CollectorItem, HttpFetcher,
-    ItemKind, Location, SafeHttpFetcher, SourceLink, collection::collect_http,
+    ItemKind, Location, SourceLink, collection::collect_http,
 };
 
 const NWS_ALERTS_URL: &str = "https://api.weather.gov/alerts/active";
@@ -22,8 +24,11 @@ pub struct NwsAlertsCollector {
 }
 
 impl NwsAlertsCollector {
-    /// NWS requires a descriptive User-Agent; include an application name and a
-    /// URL or email address where the operator can be reached.
+    /// Constructs the collector with the built-in network client.
+    ///
+    /// Native only: a Worker has no socket to give this, and supplies its own
+    /// fetcher through [`Self::with_fetcher`] instead.
+    #[cfg(feature = "native")]
     pub fn new(
         latitude: f64,
         longitude: f64,

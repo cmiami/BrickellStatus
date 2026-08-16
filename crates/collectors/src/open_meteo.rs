@@ -5,9 +5,11 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::{Map, Value, json};
 use url::Url;
 
+#[cfg(feature = "native")]
+use crate::SafeHttpFetcher;
 use crate::{
     CollectContext, Collector, CollectorBatch, CollectorError, CollectorItem, HttpFetcher,
-    ItemKind, Location, SafeHttpFetcher, SourceLink, collection::collect_http,
+    ItemKind, Location, SourceLink, collection::collect_http,
 };
 
 const OPEN_METEO_URL: &str = "https://api.open-meteo.com/v1/forecast";
@@ -35,6 +37,11 @@ pub struct OpenMeteoCollector {
 }
 
 impl OpenMeteoCollector {
+    /// Constructs the collector with the built-in network client.
+    ///
+    /// Native only: a Worker has no socket to give this, and supplies its own
+    /// fetcher through [`Self::with_fetcher`] instead.
+    #[cfg(feature = "native")]
     pub fn new(latitude: f64, longitude: f64, forecast_hours: u16) -> Result<Self, CollectorError> {
         Self::with_fetcher(
             latitude,

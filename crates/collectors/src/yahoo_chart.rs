@@ -1,4 +1,6 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+#[cfg(feature = "native")]
+use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -7,9 +9,11 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::{
-    CollectContext, Collector, CollectorBatch, CollectorError, CollectorHealth, FetchLimits,
-    HttpFetcher, ItemKind, SafeHttpFetcher, SourceLink,
+    CollectContext, Collector, CollectorBatch, CollectorError, CollectorHealth, HttpFetcher,
+    ItemKind, SourceLink,
 };
+#[cfg(feature = "native")]
+use crate::{FetchLimits, SafeHttpFetcher};
 
 const YAHOO_CHART_ROOT: &str = "https://query2.finance.yahoo.com/v8/finance/chart/";
 const YAHOO_QUOTE_ROOT: &str = "https://finance.yahoo.com/quote/";
@@ -80,6 +84,11 @@ pub struct YahooChartCollector {
 }
 
 impl YahooChartCollector {
+    /// Constructs the collector with the built-in network client.
+    ///
+    /// Native only: a Worker has no socket to give this, and supplies its own
+    /// fetcher through [`Self::with_fetcher`] instead.
+    #[cfg(feature = "native")]
     pub fn new(config: YahooChartConfig) -> Result<Self, CollectorError> {
         validate_config(&config)?;
         let limits = FetchLimits {

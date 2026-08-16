@@ -7,12 +7,15 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::{
-    CollectContext, Collector, CollectorBatch, CollectorError, CollectorItem, FetchLimits,
-    HttpFetcher, ItemKind, Location, SafeHttpFetcher, SourceLink, SyndicationCollector,
-    SyndicationConfig, collection::collect_http,
+    CollectContext, Collector, CollectorBatch, CollectorError, CollectorItem, HttpFetcher,
+    ItemKind, Location, SourceLink, SyndicationCollector, SyndicationConfig,
+    collection::collect_http,
 };
+#[cfg(feature = "native")]
+use crate::{FetchLimits, SafeHttpFetcher};
 
 const CURRENT_STORMS_URL: &str = "https://www.nhc.noaa.gov/CurrentStorms.json";
+#[cfg(feature = "native")]
 const ATLANTIC_RSS_URL: &str = "https://www.nhc.noaa.gov/index-at.xml";
 
 pub struct NhcCurrentStormsCollector {
@@ -21,6 +24,11 @@ pub struct NhcCurrentStormsCollector {
 }
 
 impl NhcCurrentStormsCollector {
+    /// Constructs the collector with the built-in network client.
+    ///
+    /// Native only: a Worker has no socket to give this, and supplies its own
+    /// fetcher through [`Self::with_fetcher`] instead.
+    #[cfg(feature = "native")]
     pub fn new() -> Self {
         Self {
             endpoint: Url::parse(CURRENT_STORMS_URL).expect("constant URL is valid"),
@@ -36,6 +44,7 @@ impl NhcCurrentStormsCollector {
     }
 }
 
+#[cfg(feature = "native")]
 impl Default for NhcCurrentStormsCollector {
     fn default() -> Self {
         Self::new()
@@ -278,10 +287,13 @@ pub struct NhcRssCollector {
 }
 
 impl NhcRssCollector {
+    /// Native only: delegates to [`Self::new`], which builds the default client.
+    #[cfg(feature = "native")]
     pub fn atlantic() -> Result<Self, CollectorError> {
         Self::new(Url::parse(ATLANTIC_RSS_URL).expect("constant URL is valid"))
     }
 
+    #[cfg(feature = "native")]
     pub fn new(url: Url) -> Result<Self, CollectorError> {
         let mut config = SyndicationConfig::new(url);
         config.source_name = Some("National Hurricane Center".into());

@@ -5,6 +5,7 @@
 //! application can map [`CollectorBatch`] into its domain model without making a
 //! source adapter aware of policy, persistence, or presentation concerns.
 
+#[cfg(feature = "native")]
 mod ais_stream;
 mod bbpilots;
 mod collection;
@@ -20,6 +21,7 @@ mod syndication;
 mod usgs;
 mod yahoo_chart;
 
+#[cfg(feature = "native")]
 pub use ais_stream::{
     AIS_VESSEL_TRACKS_CURSOR_KEY, AisStreamApiKey, AisStreamCollector, AisStreamConfig,
     AisStreamSubscription,
@@ -32,7 +34,9 @@ pub use fl511::{
     BridgeRelation, BridgeSelector, BridgeState, BridgeTooltip, Fl511BridgeCollector, Fl511Config,
     Fl511Discovery, Fl511LayerEntry, Fl511ParseError, parse_bridge_layer, parse_bridge_tooltip,
 };
-pub use http::{FetchLimits, FetchResponse, HttpFetcher, SafeHttpFetcher, validate_public_url};
+#[cfg(feature = "native")]
+pub use http::SafeHttpFetcher;
+pub use http::{FetchLimits, FetchResponse, HttpFetcher, validate_public_url};
 pub use model::{
     CollectContext, Collector, CollectorBatch, CollectorCursor, CollectorError, CollectorHealth,
     CollectorItem, HealthState, ItemKind, Location, SourceLink,

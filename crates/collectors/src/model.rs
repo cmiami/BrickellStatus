@@ -172,6 +172,7 @@ pub enum CollectorError {
     Dns { host: String, detail: String },
 }
 
+#[cfg(feature = "native")]
 impl From<reqwest::Error> for CollectorError {
     fn from(error: reqwest::Error) -> Self {
         let detail = if error.is_timeout() {

@@ -6,9 +6,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use url::Url;
 
+#[cfg(feature = "native")]
+use crate::SafeHttpFetcher;
 use crate::{
     CollectContext, Collector, CollectorBatch, CollectorError, CollectorItem, HttpFetcher,
-    ItemKind, Location, SafeHttpFetcher, SourceLink, collection::collect_http,
+    ItemKind, Location, SourceLink, collection::collect_http,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,6 +44,11 @@ pub struct UsgsEarthquakesCollector {
 }
 
 impl UsgsEarthquakesCollector {
+    /// Constructs the collector with the built-in network client.
+    ///
+    /// Native only: a Worker has no socket to give this, and supplies its own
+    /// fetcher through [`Self::with_fetcher`] instead.
+    #[cfg(feature = "native")]
     pub fn new(window: UsgsWindow) -> Self {
         Self {
             endpoint: window.url(),

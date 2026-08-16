@@ -1,9 +1,14 @@
+#[cfg(feature = "native")]
+use std::net::IpAddr;
+#[cfg(feature = "native")]
+use std::net::SocketAddr;
 use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{Ipv4Addr, Ipv6Addr},
     time::Duration,
 };
 
 use async_trait::async_trait;
+#[cfg(feature = "native")]
 use reqwest::{
     StatusCode,
     header::{
@@ -12,6 +17,7 @@ use reqwest::{
     },
 };
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "native")]
 use tokio::net::lookup_host;
 use url::{Host, Url};
 
@@ -62,12 +68,14 @@ pub trait HttpFetcher: Send + Sync {
 /// Redirects are followed manually so every hop receives the same scheme, host,
 /// DNS, timeout, and body-limit checks.
 #[derive(Clone, Debug)]
+#[cfg(feature = "native")]
 pub struct SafeHttpFetcher {
     limits: FetchLimits,
     user_agent: String,
     inherit_system_proxy: bool,
 }
 
+#[cfg(feature = "native")]
 impl Default for SafeHttpFetcher {
     fn default() -> Self {
         Self::new(
@@ -78,6 +86,7 @@ impl Default for SafeHttpFetcher {
     }
 }
 
+#[cfg(feature = "native")]
 impl SafeHttpFetcher {
     pub fn new(user_agent: impl Into<String>, limits: FetchLimits) -> Result<Self, CollectorError> {
         let user_agent = user_agent.into();
@@ -165,6 +174,8 @@ impl SafeHttpFetcher {
     }
 }
 
+#[async_trait]
+#[cfg(feature = "native")]
 #[async_trait]
 impl HttpFetcher for SafeHttpFetcher {
     async fn get(
@@ -284,10 +295,12 @@ impl HttpFetcher for SafeHttpFetcher {
     }
 }
 
+#[cfg(feature = "native")]
 fn is_followable_redirect(status: StatusCode) -> bool {
     status.is_redirection() && status != StatusCode::NOT_MODIFIED
 }
 
+#[cfg(feature = "native")]
 fn cursor_from_headers(
     headers: &HeaderMap,
     previous: Option<&CollectorCursor>,
@@ -393,6 +406,7 @@ pub fn validate_public_url(url: &Url, allow_http: bool) -> Result<(), CollectorE
     Ok(())
 }
 
+#[cfg(feature = "native")]
 fn redacted_url(url: &Url) -> String {
     let mut redacted = url.clone();
     if redacted.query().is_some() {
@@ -404,6 +418,7 @@ fn redacted_url(url: &Url) -> String {
     redacted.to_string()
 }
 
+#[cfg(feature = "native")]
 fn is_public_ip(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => is_public_ipv4(address),

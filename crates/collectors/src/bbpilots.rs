@@ -28,9 +28,11 @@ use serde_json::json;
 use thiserror::Error;
 use url::Url;
 
+#[cfg(feature = "native")]
+use crate::SafeHttpFetcher;
 use crate::{
     CollectContext, Collector, CollectorBatch, CollectorError, CollectorHealth, CollectorItem,
-    HealthState, HttpFetcher, ItemKind, SafeHttpFetcher, SourceLink,
+    HealthState, HttpFetcher, ItemKind, SourceLink,
 };
 
 const DEFAULT_SCHEDULE_URL: &str = "https://bbpilots.com/";
@@ -221,6 +223,11 @@ pub struct BbPilotsCollector {
 }
 
 impl BbPilotsCollector {
+    /// Constructs the collector with the built-in network client.
+    ///
+    /// Native only: a Worker has no socket to give this, and supplies its own
+    /// fetcher through [`Self::with_fetcher`] instead.
+    #[cfg(feature = "native")]
     pub fn new(config: BbPilotsConfig) -> Result<Self, CollectorError> {
         Self::with_fetcher(config, Arc::new(SafeHttpFetcher::default()))
     }

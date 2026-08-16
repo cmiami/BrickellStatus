@@ -6,10 +6,11 @@ use scraper::Html;
 use serde_json::json;
 use url::Url;
 
+#[cfg(feature = "native")]
+use crate::SafeHttpFetcher;
 use crate::{
     CollectContext, Collector, CollectorBatch, CollectorError, CollectorItem, FetchLimits,
-    HttpFetcher, ItemKind, SafeHttpFetcher, SourceLink, collection::collect_http,
-    validate_public_url,
+    HttpFetcher, ItemKind, SourceLink, collection::collect_http, validate_public_url,
 };
 
 #[derive(Clone, Debug)]
@@ -39,6 +40,11 @@ pub struct SyndicationCollector {
 }
 
 impl SyndicationCollector {
+    /// Constructs the collector with the built-in network client.
+    ///
+    /// Native only: a Worker has no socket to give this, and supplies its own
+    /// fetcher through [`Self::with_fetcher`] instead.
+    #[cfg(feature = "native")]
     pub fn new(config: SyndicationConfig) -> Result<Self, CollectorError> {
         validate_config(&config)?;
         let fetcher = Arc::new(SafeHttpFetcher::new(

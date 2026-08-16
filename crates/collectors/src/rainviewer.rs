@@ -22,9 +22,11 @@ use serde::Deserialize;
 use serde_json::json;
 use url::Url;
 
+#[cfg(feature = "native")]
+use crate::SafeHttpFetcher;
 use crate::{
     CollectContext, Collector, CollectorBatch, CollectorError, CollectorItem, HttpFetcher,
-    ItemKind, SafeHttpFetcher, SourceLink, collection::collect_http,
+    ItemKind, SourceLink, collection::collect_http,
 };
 
 const RAINVIEWER_INDEX_URL: &str = "https://api.rainviewer.com/public/weather-maps.json";
@@ -38,6 +40,7 @@ pub struct RainViewerCollector {
     fetcher: Arc<dyn HttpFetcher>,
 }
 
+#[cfg(feature = "native")]
 impl Default for RainViewerCollector {
     fn default() -> Self {
         Self::new()
@@ -45,6 +48,11 @@ impl Default for RainViewerCollector {
 }
 
 impl RainViewerCollector {
+    /// Constructs the collector with the built-in network client.
+    ///
+    /// Native only: a Worker has no socket to give this, and supplies its own
+    /// fetcher through [`Self::with_fetcher`] instead.
+    #[cfg(feature = "native")]
     pub fn new() -> Self {
         Self::with_fetcher(Arc::new(SafeHttpFetcher::default()))
     }

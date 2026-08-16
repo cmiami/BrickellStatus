@@ -6,22 +6,35 @@ rust-version.workspace = true
 license.workspace = true
 description = "Normalized public-feed and optional secret-backed signal collectors for Tender's Log"
 
+[features]
+# Fetching over a real network stack. On by default so nothing existing
+# changes; switched off, this crate is the parsers and the `HttpFetcher` trait
+# alone, which is what a Cloudflare Worker needs — it supplies its own fetch.
+default = ["native"]
+native = ["dep:reqwest", "dep:tokio", "dep:tokio-tungstenite", "dep:tokio-util"]
+
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
 feed-rs.workspace = true
 futures.workspace = true
 jiff.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, optional = true }
 scraper.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
-tokio-tungstenite.workspace = true
-tokio-util.workspace = true
+tokio = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
 url.workspace = true
 zeroize.workspace = true
+
+# feed-rs generates ids for entries that arrive without one, which needs a
+# source of randomness that wasm has no ambient access to. In a Worker the JS
+# host supplies it. This is only reached on wasm targets.
+[target.'cfg(target_family = "wasm")'.dependencies]
+uuid = { workspace = true, features = ["js"] }
 
 [dev-dependencies]
 tokio.workspace = true

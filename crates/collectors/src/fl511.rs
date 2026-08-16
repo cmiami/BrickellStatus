@@ -7,10 +7,11 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use url::Url;
 
+#[cfg(feature = "native")]
+use crate::SafeHttpFetcher;
 use crate::{
     CollectContext, Collector, CollectorBatch, CollectorCursor, CollectorError, CollectorHealth,
-    CollectorItem, HealthState, HttpFetcher, ItemKind, Location, SafeHttpFetcher, SourceLink,
-    geo::haversine_meters,
+    CollectorItem, HealthState, HttpFetcher, ItemKind, Location, SourceLink, geo::haversine_meters,
 };
 
 const DEFAULT_LAYER_URL: &str = "https://fl511.com/map/mapIcons/Bridge";
@@ -380,6 +381,11 @@ pub struct Fl511BridgeCollector {
 }
 
 impl Fl511BridgeCollector {
+    /// Constructs the collector with the built-in network client.
+    ///
+    /// Native only: a Worker has no socket to give this, and supplies its own
+    /// fetcher through [`Self::with_fetcher`] instead.
+    #[cfg(feature = "native")]
     pub fn new(config: Fl511Config) -> Result<Self, CollectorError> {
         Self::with_fetcher(config, Arc::new(SafeHttpFetcher::default()))
     }
