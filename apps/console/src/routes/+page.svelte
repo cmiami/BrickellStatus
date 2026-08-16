@@ -9,6 +9,7 @@ FORM: Grounded direction 3, approved Live Time Rail composition, concept seed 14
   import BridgeSpans from '$lib/components/BridgeSpans.svelte';
   import ChannelLedger from '$lib/components/ChannelLedger.svelte';
   import DispatchLedger from '$lib/components/DispatchLedger.svelte';
+  import SignalBoard from '$lib/components/SignalBoard.svelte';
   import StatusDecision from '$lib/components/StatusDecision.svelte';
   import TimeRail from '$lib/components/TimeRail.svelte';
   import { loadApp, loadError, loading, snapshot } from '$lib/state';
@@ -45,6 +46,9 @@ FORM: Grounded direction 3, approved Live Time Rail composition, concept seed 14
       intervals={$snapshot.bridgeIntervals}
       localTimeZone={$snapshot.localTimeZone}
     />
+    <!-- Below the bridge, always. Everything here is secondary by definition,
+         and the anchor keeps the top of the page. -->
+    <SignalBoard channels={$snapshot.channels} />
     {#if $snapshot.dispatches.length}
       <DispatchLedger dispatches={$snapshot.dispatches} channels={$snapshot.channels} />
     {/if}

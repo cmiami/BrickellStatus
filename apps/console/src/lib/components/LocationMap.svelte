@@ -174,7 +174,10 @@
       type: 'raster',
       tiles: [radar.tileUrlTemplate],
       tileSize: 512,
-      maxzoom: 12,
+      // The deepest zoom RainViewer documents. Declaring it makes MapLibre
+      // overzoom that tile rather than request deeper ones, so the overlay
+      // survives the ceiling being enforced instead of disappearing.
+      maxzoom: radar.maxZoom,
       attribution: radar.attribution
     });
     map.addLayer(

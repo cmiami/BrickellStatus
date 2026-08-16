@@ -52,6 +52,18 @@ export interface ChannelSignal {
   action: string;
   severity?: string;
   expiresAt?: string;
+  band?: string;
+  imminenceMinutes?: number;
+}
+
+// How this channel ranks against every other, computed once in the engine.
+// Ordering across kinds is a property of the score, not of the surface reading
+// it, so the console sorts by it rather than inventing its own hierarchy.
+export interface ChannelPriority {
+  score: number;
+  urgency: Urgency;
+  imminenceMinutes?: number;
+  confirmed: boolean;
 }
 
 export interface ChannelSnapshot {
@@ -65,6 +77,7 @@ export interface ChannelSnapshot {
   summary: string;
   materialKey: string;
   signal?: ChannelSignal;
+  priority: ChannelPriority;
   enabled: boolean;
   active: boolean;
   presence: SurfacePresence;
@@ -333,5 +346,6 @@ export interface RadarLayer {
   tileUrlTemplate: string;
   observedAt: string;
   ageSeconds: number;
+  maxZoom: number;
   attribution: string;
 }

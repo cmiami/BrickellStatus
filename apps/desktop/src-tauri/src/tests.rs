@@ -1633,7 +1633,13 @@ mod radar {
         // Age is reported so the overlay can say how old it is rather than
         // implying it is live.
         assert_eq!(layer.age_seconds, 90);
-        assert!(layer.attribution.contains("RainViewer"));
+        // Credit is mandatory under RainViewer's free terms, in their own
+        // wording and pointing at their own link.
+        assert!(layer.attribution.contains("Weather data by"));
+        assert!(layer.attribution.contains("https://www.rainviewer.com/"));
+        // Declared so the map overzooms rather than requesting tiles past the
+        // service's documented ceiling.
+        assert_eq!(layer.max_zoom, 7);
     }
 
     /// The panel asks for the same frame at a coordinate instead of at a tile

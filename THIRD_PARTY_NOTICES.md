@@ -42,9 +42,20 @@ DMG. The map must keep this attribution visible and legible:
 
 Radar composites come from [RainViewer](https://www.rainviewer.com/) via its
 public weather-maps API. The app fetches an index of frame locations and hands
-MapLibre a tile URL; imagery is never copied into the app or DMG. The radar
-source carries `RainViewer` as its MapLibre attribution, which the map renders
-alongside the base-map credit whenever the overlay is switched on.
+MapLibre a tile URL; imagery is never copied into the app or DMG. The map must
+keep this attribution visible:
+
+> Weather data by RainViewer
+
+RainViewer requires that credit with a link back to `https://www.rainviewer.com/`,
+and the radar source carries it as its MapLibre attribution so the map renders it
+alongside the base-map credit whenever the overlay is on.
+
+The free tier is offered for **personal, educational, and small-scale community
+use**, with no key, no SLA, and a documented limit of 100 requests per IP per
+minute. This app polls the index at most once every four minutes and fetches one
+panel composite per radar frame, which is far inside that. Anyone redistributing
+this app for commercial use needs to arrange terms with RainViewer directly.
 
 MapLibre renders source attribution from the active style. Do not hide,
 obscure, crop, or replace the attribution control in the desktop or browser

@@ -23,9 +23,20 @@ const RADAR_COLOR_SCHEME: u8 = 4;
 const RADAR_SMOOTHING: u8 = 1;
 const RADAR_SNOW: u8 = 0;
 const RADAR_TILE_SIZE: u16 = 512;
-/// RainViewer's free API requires visible credit for the imagery.
-const RADAR_ATTRIBUTION: &str =
-    "<a href=\"https://www.rainviewer.com/\" target=\"_blank\" rel=\"noreferrer\">RainViewer</a>";
+/// Visible credit is mandatory under RainViewer's free terms. Their own docs
+/// give "Weather data by RainViewer" as the example wording and
+/// `https://www.rainviewer.com/` as the link, so that is what is used verbatim
+/// rather than a paraphrase.
+const RADAR_ATTRIBUTION: &str = "Weather data by <a href=\"https://www.rainviewer.com/\" target=\"_blank\" rel=\"noreferrer\">RainViewer</a>";
+
+/// The deepest zoom RainViewer documents radar tiles at, as of January 2026.
+///
+/// Deeper tiles still resolve in practice, so this is declared rather than
+/// discovered. It is the raster source's `maxzoom`, not a camera limit: above
+/// it MapLibre overzooms the deepest real tile instead of requesting one, so
+/// the overlay survives the ceiling starting to be enforced instead of
+/// silently vanishing when the reader zooms in.
+pub const RADAR_MAX_ZOOM: u8 = 7;
 
 /// What the map needs to draw one radar frame.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -37,6 +48,9 @@ pub struct RadarLayer {
     /// implying the overlay is live.
     pub observed_at: String,
     pub age_seconds: u64,
+    /// Highest zoom the tiles exist at. Above this the map overzooms rather
+    /// than requesting tiles the service does not serve.
+    pub max_zoom: u8,
     /// Required credit for the imagery, rendered on the map.
     pub attribution: String,
 }
@@ -50,7 +64,7 @@ struct CachedRadar {
 /// Zoom for the panel composite. Wide enough that an approaching band is
 /// visible before it arrives, tight enough that the reader's own coordinate is
 /// not a single pixel.
-const PANEL_RADAR_ZOOM: u8 = 7;
+const PANEL_RADAR_ZOOM: u8 = RADAR_MAX_ZOOM;
 /// RainViewer's black-and-white scheme. The colour schemes are not luminance
 /// ramps — in the rainbow scheme light rain is dark blue and heavy rain is pale
 /// yellow — so only this one makes "darker means heavier" true after the
@@ -191,6 +205,7 @@ fn radar_layer_from_items(items: &[CollectorItem], now_ms: i64) -> Option<RadarL
             .max(0)
             .unsigned_abs()
             / 1_000,
+        max_zoom: RADAR_MAX_ZOOM,
         attribution: RADAR_ATTRIBUTION.into(),
     })
 }
