@@ -1673,10 +1673,7 @@ fn stale_feed_item_cannot_activate_beside_a_fresh_feed() {
         "stale or offline matching feed items must not activate"
     );
     assert!(news.signal.is_none());
-    assert!(
-        news.summary
-            .contains("No current feed items match this channel")
-    );
+    assert!(news.summary.contains("Nothing new"));
     assert!(
         news.summary
             .contains("partial coverage (1/3 sources usable)")
@@ -2145,7 +2142,7 @@ fn expired_official_alert_does_not_activate_from_a_fresh_source() {
     assert!(official.coverage_complete);
     assert!(!official.active);
     assert!(official.signal.is_none());
-    assert!(official.summary.contains("No active alert"));
+    assert!(official.summary.contains("No alerts in force"));
 }
 
 #[test]

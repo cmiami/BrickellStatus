@@ -1220,7 +1220,10 @@ async fn rotation_honors_home_cadence_and_surface_presence() {
             channel.id.as_str(),
             "bridge.brickell" | "weather.miami" | "news.local"
         );
-        channel.active = false;
+        // Something to say. Rotation is no longer a standing reservation: a
+        // channel earns its slot by having material, and only the anchor is
+        // exempt.
+        channel.active = channel.id != "bridge.brickell";
         channel.destinations = vec![DestinationIdDto::Epaper];
         channel.presence = if channel.id == "bridge.brickell" {
             SurfacePresence::Home
@@ -1230,16 +1233,42 @@ async fn rotation_honors_home_cadence_and_surface_presence() {
     }
     // The anchor every third slot, the rest sharing the gaps. News appears here
     // where it previously could not: rotation used to drop News, Official,
-    // Hurricane and Earthquake unless they were already active, which made
-    // `presence: Rotation` meaningless for exactly the channels worth rotating.
-    let slot = |index: u64| {
-        rotation_channel(&snapshot, &preferences, index).map(|channel| channel.id.as_str())
+    // Hurricane and Earthquake by kind, which made `presence: Rotation`
+    // meaningless for exactly the channels worth rotating.
+    let slot = |snapshot: &AppSnapshot, index: u64| {
+        rotation_channel(snapshot, &preferences, index).map(|channel| channel.id.to_owned())
     };
-    assert_eq!(slot(0), Some("bridge.brickell"));
-    assert_eq!(slot(1), Some("weather.miami"));
-    assert_eq!(slot(2), Some("news.local"));
-    assert_eq!(slot(3), Some("bridge.brickell"));
-    assert_eq!(slot(4), Some("weather.miami"));
+    assert_eq!(slot(&snapshot, 0).as_deref(), Some("bridge.brickell"));
+    assert_eq!(slot(&snapshot, 1).as_deref(), Some("weather.miami"));
+    assert_eq!(slot(&snapshot, 2).as_deref(), Some("news.local"));
+    assert_eq!(slot(&snapshot, 3).as_deref(), Some("bridge.brickell"));
+    assert_eq!(slot(&snapshot, 4).as_deref(), Some("weather.miami"));
+
+    // A channel with nothing to report gives its slot back rather than
+    // spending it on its own empty state.
+    let mut quiet = snapshot.clone();
+    for channel in &mut quiet.channels {
+        if channel.id == "news.local" {
+            channel.active = false;
+        }
+    }
+    for index in 0..6 {
+        assert_ne!(
+            slot(&quiet, index).as_deref(),
+            Some("news.local"),
+            "a quiet channel took slot {index}"
+        );
+    }
+
+    // With nothing else to say, the anchor holds the panel — which is the one
+    // thing always worth reading.
+    let mut silent = quiet.clone();
+    for channel in &mut silent.channels {
+        channel.active = false;
+    }
+    for index in 0..4 {
+        assert_eq!(slot(&silent, index).as_deref(), Some("bridge.brickell"));
+    }
 }
 
 #[tokio::test]

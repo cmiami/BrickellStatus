@@ -123,7 +123,7 @@ impl PanelBroker {
         let now = tokio::time::Instant::now();
         let mut queued_any = false;
         for channel in &snapshot.channels {
-            if !panel_eligible(channel) {
+            if !panel_eligible(channel, preferences) {
                 continue;
             }
             if !channel.active || !interrupt_allows(channel, preferences, snapshot) {
@@ -195,7 +195,7 @@ impl PanelBroker {
             // Superseded: the channel moved on while this sat in the queue, so
             // showing it would report a state that is no longer true.
             if !channel.active
-                || !panel_eligible(channel)
+                || !panel_eligible(channel, preferences)
                 || alert_key(channel) != alert.alert_key
                 || !interrupt_allows(channel, preferences, snapshot)
             {
@@ -280,14 +280,26 @@ impl PanelBroker {
 /// Official, Hurricane, News and Earthquake to active-only regardless of the
 /// operator's `presence` choice, which made `Rotation` mean nothing for exactly
 /// the channels most worth rotating.
-fn panel_eligible(channel: &ChannelSnapshot) -> bool {
+/// Whether a channel has earned a place on the panel right now.
+///
+/// The anchor is exempt from having to be active, because "Road open" is the
+/// answer this app exists to give and is worth the whole screen. Nothing else
+/// is: a channel with nothing to report has only its own empty state to show,
+/// and a panel that spends a slot saying no feed items matched has taken the
+/// bridge off the screen to display nothing.
+///
+/// This restores a filter Phase 1 removed. The old one was keyed on channel
+/// *kind*, which was arbitrary and made `presence: Rotation` a lie for half the
+/// roster; the rule was never "news cannot rotate", it was "nothing with
+/// nothing to say gets the screen".
+fn panel_eligible(channel: &ChannelSnapshot, preferences: &AppPreferences) -> bool {
     channel.enabled
         && channel.destinations.contains(&DestinationIdDto::Epaper)
         && !matches!(
             channel.presence,
             SurfacePresence::Off | SurfacePresence::MessagesOnly
         )
-        && (channel.presence != SurfacePresence::ActiveOnly || channel.active)
+        && (channel.active || channel.id == preferences.profile.home_channel_id)
 }
 
 /// Identity of the thing being alerted about.
@@ -318,7 +330,7 @@ fn rotation_channel<'a>(
     let eligible = snapshot
         .channels
         .iter()
-        .filter(|channel| panel_eligible(channel))
+        .filter(|channel| panel_eligible(channel, preferences))
         .collect::<Vec<_>>();
     let home = eligible
         .iter()

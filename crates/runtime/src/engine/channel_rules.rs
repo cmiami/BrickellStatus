@@ -1598,7 +1598,7 @@ fn channel_summary(
                 .filter(|item| official_alert_matches_scope(item, channel, now_ms))
                 .count();
             if count == 0 {
-                ("No active alert".into(), false)
+                ("No alerts in force".into(), false)
             } else {
                 (format!("{count} active official alert(s)"), true)
             }
@@ -1614,7 +1614,7 @@ fn channel_summary(
                 .count();
             match (storms.len(), near) {
                 (0, _) => (
-                    "No active Atlantic cyclone in NHC CurrentStorms".into(),
+                    "No active Atlantic cyclone".into(),
                     false,
                 ),
                 (total, 0) => (
@@ -1630,7 +1630,7 @@ fn channel_summary(
                 .filter(|item| news_item_matches_scope(item, channel, now_ms))
                 .count();
             if count == 0 {
-                ("No current feed items match this channel".into(), false)
+                ("Nothing new".into(), false)
             } else {
                 (format!("{count} recent item(s) in rotation"), true)
             }
