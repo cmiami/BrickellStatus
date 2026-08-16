@@ -16,10 +16,17 @@
 
   import LocationMap from '$lib/components/LocationMap.svelte';
   import SwitchField from '$lib/components/SwitchField.svelte';
-  import { getDeviceLocation, searchLocations } from '$lib/api';
+  import { getDeviceLocation, getRadarLayer, searchLocations } from '$lib/api';
   import { notice, persistPreferences, preferences, saving, snapshot } from '$lib/state';
   import { formatSpeedKnots } from '$lib/units';
-  import type { AlertArea, AppPreferences, LocationMapPoint, LocationSearchResult, VesselTrack } from '$lib/types';
+  import type {
+    AlertArea,
+    AppPreferences,
+    LocationMapPoint,
+    LocationSearchResult,
+    RadarLayer,
+    VesselTrack
+  } from '$lib/types';
 
   let draft = $state<AppPreferences | null>(null);
   let initialized = $state(false);
@@ -32,6 +39,28 @@
   let candidateEditingId = $state<string | null>(null);
   let selectedAreaId = $state<string | null>(null);
   let selectedVesselId = $state<string | null>(null);
+  let radar = $state<RadarLayer | null>(null);
+
+  // RainViewer publishes a new composite about every ten minutes; the backend
+  // caches within that, so this interval costs nothing when nothing has changed.
+  $effect(() => {
+    let disposed = false;
+    const refresh = () => {
+      void getRadarLayer()
+        .then((layer) => {
+          if (!disposed) radar = layer;
+        })
+        .catch(() => {
+          if (!disposed) radar = null;
+        });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5 * 60 * 1000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  });
 
   $effect(() => {
     if ($preferences && !initialized) {
@@ -426,6 +455,7 @@
       <LocationMap
         points={mapPoints}
         {vesselTracks}
+        {radar}
         candidate={candidatePoint}
         selectedId={candidate?.id ?? selectedVesselId ?? selectedAreaId}
         unitSystem={draft.unitSystem}

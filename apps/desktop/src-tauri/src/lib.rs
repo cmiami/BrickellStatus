@@ -12,9 +12,13 @@ use std::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
+use bridgestatus_collectors::{
+    CollectContext, Collector, CollectorItem, HttpFetcher, ItemKind, RainViewerCollector,
+    SafeHttpFetcher,
+};
 use bridgestatus_delivery::{
     DeliveryAdapter, DeliveryFailureKind, DeliveryReason, DeliveryRequest, Destination,
     EnvironmentSecretResolver, EtaRange as DeliveryEtaRange, MessagingConsent, Notice, NoticeState,
@@ -22,8 +26,9 @@ use bridgestatus_delivery::{
 };
 use bridgestatus_eink::{
     ChannelAvailability, ChannelCard, ChannelKind, ChannelSource, ChannelUrgency, EtaRange,
-    Evidence, Freshness, LiveSnapshot, MonoFrame, RefreshMode, RenderConfig, SnapshotState,
-    preview_png_bytes, render_channel_card, render_snapshot,
+    Evidence, Freshness, LiveSnapshot, MonoFrame, RadarFigure, RefreshMode, RenderConfig,
+    SnapshotState, preview_png_bytes, radar_figure_from_png, render_channel_card,
+    render_channel_card_with_radar, render_snapshot,
     transport::{
         BleConfig, BleTransport, TransportKind, TransportReceipt, UsbConfig, UsbTransport,
         discover_ble_devices, discover_espressif_devices,
@@ -46,7 +51,7 @@ use tauri::{
 };
 use tauri_plugin_notification::NotificationExt;
 use tenders_storage::{IncidentRecord, OutboxLease, OutboxRecord, Store};
-use tokio::sync::{Mutex as AsyncMutex, RwLock};
+use tokio::sync::{Mutex as AsyncMutex, Mutex as TokioMutex, RwLock};
 use tracing::{debug, warn};
 use url::Url;
 use uuid::Uuid;
@@ -644,6 +649,9 @@ struct DesktopState {
     display: Arc<DisplayController>,
     display_task: StdMutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     dispatch_task: StdMutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    radar: RadarCache,
+    radar_collector: Arc<dyn Collector>,
+    radar_fetcher: Arc<dyn HttpFetcher>,
 }
 
 impl DesktopState {
@@ -1589,6 +1597,7 @@ async fn clear_aisstream_api_key(state: State<'_, DesktopState>) -> Result<Mutat
 // WhatsApp outbox form one delivery runtime independent of window plumbing.
 include!("desktop/delivery_runtime.rs");
 include!("desktop/panel_broker.rs");
+include!("desktop/radar_layer.rs");
 async fn send_snapshot_to_display(
     app: &AppHandle,
     display: &DisplayController,
@@ -1610,6 +1619,7 @@ async fn send_rotating_snapshot_to_display(
     snapshot: &AppSnapshot,
     preferences: &AppPreferences,
     selection: &PanelSelection,
+    radar: Option<&RadarFigure>,
 ) -> (MutationResult, Option<String>) {
     let channel_id = match selection {
         PanelSelection::Alert { channel_id, .. } | PanelSelection::Rotation { channel_id } => {
@@ -1637,7 +1647,9 @@ async fn send_rotating_snapshot_to_display(
             }
         }
     } else {
-        match render_channel_card(&channel_card(channel, preferences, snapshot)) {
+        // Radar corroborates a weather card and would be noise on any other.
+        let radar = radar.filter(|_| channel.kind == ChannelKindDto::Weather);
+        match render_channel_card_with_radar(&channel_card(channel, preferences, snapshot), radar) {
             Ok(frame) => frame,
             Err(error) => {
                 return (
@@ -2240,6 +2252,9 @@ fn install_runtime(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error
         display,
         display_task: StdMutex::new(Some(display_task)),
         dispatch_task: StdMutex::new(Some(dispatch_task)),
+        radar: RadarCache::default(),
+        radar_collector: Arc::new(RainViewerCollector::new()),
+        radar_fetcher: Arc::new(SafeHttpFetcher::default()),
     });
     Ok(())
 }
@@ -2371,6 +2386,15 @@ async fn run_display_worker(
             if matches!(selection, PanelSelection::Rotation { .. }) {
                 display.next_rotation_index();
             }
+            // Fetched only for the frame that will use it, and cached on the
+            // frame identity, so a rotation that revisits weather every minute
+            // does not re-fetch a composite that changes every ten.
+            let radar = match &selection {
+                PanelSelection::Alert { channel_id, .. }
+                | PanelSelection::Rotation { channel_id } => {
+                    panel_radar_figure(&app, &snapshot, &preferences, channel_id).await
+                }
+            };
             let (result, channel_id) = match tokio::time::timeout(
                 Duration::from_secs(30),
                 send_rotating_snapshot_to_display(
@@ -2379,6 +2403,7 @@ async fn run_display_worker(
                     &snapshot,
                     &preferences,
                     &selection,
+                    radar.as_ref(),
                 ),
             )
             .await
@@ -2580,6 +2605,7 @@ pub fn run() {
             set_aisstream_api_key,
             clear_aisstream_api_key,
             test_whatsapp,
+            get_radar_layer,
             open_external_url,
         ])
         .on_window_event(|window, event| {

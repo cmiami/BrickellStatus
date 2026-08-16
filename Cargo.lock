@@ -3837,6 +3837,7 @@ dependencies = [
 name = "puente-gonorrea-desktop"
 version = "0.1.8"
 dependencies = [
+ "bridgestatus-collectors",
  "bridgestatus-delivery",
  "bridgestatus-eink",
  "bridgestatus-runtime",

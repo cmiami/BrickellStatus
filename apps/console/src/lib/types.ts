@@ -326,3 +326,12 @@ export interface FirmwareStatus {
   requirement: FlashRequirement;
   unavailable?: string;
 }
+
+// One observed radar composite, as a MapLibre raster template rather than as
+// imagery: the pixels are fetched by the map, straight from the tile host.
+export interface RadarLayer {
+  tileUrlTemplate: string;
+  observedAt: string;
+  ageSeconds: number;
+  attribution: string;
+}

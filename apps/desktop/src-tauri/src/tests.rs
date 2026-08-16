@@ -1601,3 +1601,72 @@ mod panel {
         assert!(prove_backoff(4) > prove_backoff(1));
     }
 }
+
+mod radar {
+    use bridgestatus_collectors::parse_rainviewer_index;
+
+    use super::super::{panel_tile_url, radar_layer_from_items};
+
+    const OBSERVED: i64 = 1_786_844_400;
+
+    fn frame_items() -> Vec<bridgestatus_collectors::CollectorItem> {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "host": "https://tilecache.rainviewer.com",
+            "radar": {"past": [{"time": OBSERVED, "path": "/v2/radar/f6ad5f810281"}]},
+        }))
+        .unwrap();
+        parse_rainviewer_index(&body, OBSERVED).unwrap()
+    }
+
+    /// The exact shape RainViewer serves, verified against the live endpoint:
+    /// `{host}{path}/{size}/{z}/{x}/{y}/{colour}/{smoothing}_{snow}.png`. A
+    /// template that is merely plausible produces a map of empty tiles.
+    #[test]
+    fn the_tile_template_matches_the_shape_maplibre_and_rainviewer_agree_on() {
+        let layer =
+            radar_layer_from_items(&frame_items(), OBSERVED * 1_000 + 90_000).expect("a layer");
+        assert_eq!(
+            layer.tile_url_template,
+            "https://tilecache.rainviewer.com/v2/radar/f6ad5f810281/512/{z}/{x}/{y}/4/1_0.png"
+        );
+        // Age is reported so the overlay can say how old it is rather than
+        // implying it is live.
+        assert_eq!(layer.age_seconds, 90);
+        assert!(layer.attribution.contains("RainViewer"));
+    }
+
+    /// The panel asks for the same frame at a coordinate instead of at a tile
+    /// index — RainViewer serves that directly, which is why no projection
+    /// arithmetic exists anywhere in this path. It also asks for the monochrome
+    /// scheme: the colour schemes are not luminance ramps, so a rainbow tile
+    /// converted to grey inverts the intensity ordering mid-range.
+    #[test]
+    fn the_panel_asks_for_a_monochrome_tile_centred_on_the_reader() {
+        let layer = radar_layer_from_items(&frame_items(), OBSERVED * 1_000).unwrap();
+        let url = panel_tile_url(&layer, 25.7699, -80.19005).unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://tilecache.rainviewer.com/v2/radar/f6ad5f810281/256/7/25.7699/-80.1900/0/1_0.png"
+        );
+        // A coordinate that cannot be formatted into a request never becomes one.
+        assert!(panel_tile_url(&layer, f64::NAN, -80.19).is_none());
+        assert!(panel_tile_url(&layer, 25.77, f64::INFINITY).is_none());
+    }
+
+    #[test]
+    fn no_frame_means_no_layer_rather_than_a_broken_one() {
+        assert!(radar_layer_from_items(&[], OBSERVED * 1_000).is_none());
+    }
+
+    /// The console reads camelCase. A silent rename here shows up as a map with
+    /// no radar and no error anywhere.
+    #[test]
+    fn the_layer_crosses_the_bridge_in_the_shape_the_console_reads() {
+        let layer = radar_layer_from_items(&frame_items(), OBSERVED * 1_000).unwrap();
+        let json = serde_json::to_value(&layer).unwrap();
+        assert!(json.get("tileUrlTemplate").is_some());
+        assert!(json.get("observedAt").is_some());
+        assert!(json.get("ageSeconds").is_some());
+        assert!(json.get("attribution").is_some());
+    }
+}

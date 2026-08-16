@@ -7,7 +7,8 @@ import type {
   DisplayDeviceCandidate,
   EinkPreview,
   LocationSearchResult,
-  MutationResult
+  MutationResult,
+  RadarLayer
 } from './types';
 
 const LOCATION_SEARCH_TIMEOUT_MS = 12_000;
@@ -31,6 +32,15 @@ function desktopInvoke<T>(command: string, args?: Record<string, unknown>): Prom
     );
   }
   return invoke<T>(command, args);
+}
+
+// The current radar frame, or null when RainViewer has nothing recent.
+//
+// Resolves to null outside the desktop shell rather than throwing: radar is a
+// decoration, and a browser preview losing it is not an error worth surfacing.
+export async function getRadarLayer(): Promise<RadarLayer | null> {
+  if (!tauriAvailable()) return null;
+  return invoke<RadarLayer | null>('get_radar_layer');
 }
 
 export async function searchLocations(query: string): Promise<LocationSearchResult[]> {

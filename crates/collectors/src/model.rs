@@ -44,6 +44,10 @@ pub enum ItemKind {
     /// bridge that has already moved, this is a forward-looking event: a Miami
     /// River transit that will require the bascule bridges to open.
     VesselMovement,
+    /// A pointer to one observed radar composite: where the imagery lives, not
+    /// the imagery itself. Items are persisted as JSON, so tile bytes must
+    /// never travel this way.
+    RadarFrame,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

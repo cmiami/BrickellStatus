@@ -7,14 +7,15 @@
   // renders empty. Hand MapLibre a Vite-bundled worker URL instead.
   import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
   import { onMount } from 'svelte';
-  import { Crosshair, Globe2, MapPin, MousePointer2 } from '@lucide/svelte';
+  import { CloudRain, Crosshair, Globe2, MapPin, MousePointer2 } from '@lucide/svelte';
   import type { GeoJSONSource, Map as MapLibreMap, Marker as MapLibreMarker, ScaleControl } from 'maplibre-gl';
 
-  import type { LocationMapPoint, UnitSystem, VesselTrack } from '$lib/types';
+  import type { LocationMapPoint, RadarLayer, UnitSystem, VesselTrack } from '$lib/types';
 
   let {
     points = [],
     vesselTracks = [],
+    radar = null,
     candidate = null,
     selectedId = null,
     unitSystem = 'imperial',
@@ -25,6 +26,7 @@
   }: {
     points?: LocationMapPoint[];
     vesselTracks?: VesselTrack[];
+    radar?: RadarLayer | null;
     candidate?: LocationMapPoint | null;
     selectedId?: string | null;
     unitSystem?: UnitSystem;
@@ -40,10 +42,17 @@
   let markers: MapLibreMarker[] = [];
   let scaleControl: ScaleControl | null = null;
   let loaded = $state(false);
+  let radarVisible = $state(true);
   let failed = $state<string | null>(null);
   let prefersReducedMotion = false;
   let lastCameraTarget = '';
   let initialFramed = false;
+
+  const radarAge = $derived.by(() => {
+    if (!radar) return '';
+    const minutes = Math.round(radar.ageSeconds / 60);
+    return minutes < 1 ? 'just now' : `${minutes} min ago`;
+  });
 
   const allPoints = $derived(candidate ? [...points.filter((point) => point.id !== candidate.id), candidate] : points);
   const activePoint = $derived(allPoints.find((point) => point.id === selectedId) ?? candidate ?? null);
@@ -152,6 +161,39 @@
     });
   }
 
+  // Radar sits under the vessel courses so a track is never lost in a storm
+  // cell, and under every marker for the same reason. Rebuilt rather than
+  // mutated when the frame changes: a raster source's tile URL is fixed at
+  // construction, and each frame is a new URL.
+  function syncRadar() {
+    if (!map || !loaded || !map.isStyleLoaded()) return;
+    if (map.getLayer('rainviewer-radar')) map.removeLayer('rainviewer-radar');
+    if (map.getSource('rainviewer-radar')) map.removeSource('rainviewer-radar');
+    if (!radar || !radarVisible) return;
+    map.addSource('rainviewer-radar', {
+      type: 'raster',
+      tiles: [radar.tileUrlTemplate],
+      tileSize: 512,
+      maxzoom: 12,
+      attribution: radar.attribution
+    });
+    map.addLayer(
+      {
+        id: 'rainviewer-radar',
+        type: 'raster',
+        source: 'rainviewer-radar',
+        paint: { 'raster-opacity': 0.62 }
+      },
+      map.getLayer('ais-vessel-courses') ? 'ais-vessel-courses' : undefined
+    );
+  }
+
+  $effect(() => {
+    const radarSignature = `${radar?.tileUrlTemplate ?? ''}:${radarVisible}`;
+    void radarSignature;
+    if (loaded) queueMicrotask(syncRadar);
+  });
+
   $effect(() => {
     const markerSignature = allPoints
       .map((point) => `${point.id}:${point.latitude}:${point.longitude}:${point.enabled}:${point.draggable}`)
@@ -165,6 +207,7 @@
     if (loaded) queueMicrotask(() => {
       syncMarkers();
       syncVesselTracks();
+      syncRadar();
     });
   });
 
@@ -254,6 +297,22 @@
     </small>
   </div>
 
+  {#if radar}
+    <button
+      type="button"
+      class="map-radar-toggle"
+      class:is-on={radarVisible}
+      aria-pressed={radarVisible}
+      onclick={() => (radarVisible = !radarVisible)}
+    >
+      <CloudRain size={15} strokeWidth={1.7} aria-hidden="true" />
+      <span>Radar</span>
+      <!-- Radar composites are minutes old by the time they publish. Saying so
+           is the difference between an overlay and a claim. -->
+      <small>{radarAge}</small>
+    </button>
+  {/if}
+
   <div class="map-instruction">
     {#if candidate?.draggable}
       <MapPin size={16} strokeWidth={1.6} aria-hidden="true" /> Drag the amber pin to tune
@@ -309,10 +368,40 @@
 
   .map-registration,
   .map-instruction,
+  .map-radar-toggle,
   .map-loading,
   .map-fallback {
     position: absolute;
     z-index: 2;
+  }
+
+  .map-radar-toggle {
+    top: 22px;
+    right: 22px;
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    padding: 9px 13px;
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--white);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    cursor: pointer;
+    background: var(--marine);
+    border: 1px solid var(--nav-subdued);
+    box-shadow: var(--strip-shadow);
+  }
+
+  .map-radar-toggle:not(.is-on) {
+    opacity: 0.55;
+  }
+
+  .map-radar-toggle small {
+    font-weight: 500;
+    text-transform: none;
+    opacity: 0.72;
   }
 
   .map-registration {

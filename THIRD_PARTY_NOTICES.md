@@ -38,6 +38,14 @@ DMG. The map must keep this attribution visible and legible:
 - Map data is © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright)
   and is available under the Open Data Commons Open Database License (ODbL).
 
+### Radar overlay
+
+Radar composites come from [RainViewer](https://www.rainviewer.com/) via its
+public weather-maps API. The app fetches an index of frame locations and hands
+MapLibre a tile URL; imagery is never copied into the app or DMG. The radar
+source carries `RainViewer` as its MapLibre attribution, which the map renders
+alongside the base-map credit whenever the overlay is switched on.
+
 MapLibre renders source attribution from the active style. Do not hide,
 obscure, crop, or replace the attribution control in the desktop or browser
 surface. Exported screenshots, video, and print must carry the attribution
@@ -51,7 +59,8 @@ Before publishing a binary:
 2. retain each bundled dependency's complete license text where its license
    requires binary-distribution notice;
 3. confirm the live map exposes OpenFreeMap/OpenMapTiles/OpenStreetMap
-   attribution at every supported window size;
+   attribution at every supported window size, and RainViewer attribution
+   whenever the radar overlay is on;
 4. regenerate dependency/license reports after any lockfile change.
 
 This file is an attribution record, not legal advice or an exhaustive

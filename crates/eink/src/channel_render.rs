@@ -3,11 +3,16 @@ use thiserror::Error;
 
 use crate::{
     ChannelAvailability, ChannelCard, ChannelCardError, ChannelFrame, ChannelUrgency, MonoFrame,
+    RadarFigure,
     channel::display_ascii,
     render_primitives::{fill, fit, label, large, line, outline, strong, text_width, wrap},
 };
 
 const CONTENT_WIDTH: u32 = 232;
+/// Left edge of the radar figure, and therefore the right edge of the headline
+/// when one is present.
+const RADAR_FIGURE_X: i32 = 132;
+const RADAR_FIGURE_Y: i32 = 30;
 const RAIL_LEFT: i32 = 232;
 const SOURCE_TAPE_TOP: i32 = 108;
 
@@ -21,12 +26,36 @@ pub enum ChannelRenderError {
 
 /// Renders one generic signal card into a deterministic 250×122 one-bit frame.
 pub fn render_channel_card(card: &ChannelCard) -> Result<MonoFrame, ChannelRenderError> {
+    render_channel_card_with_radar(card, None)
+}
+
+/// As [`render_channel_card`], with a radar composite beside the headline.
+///
+/// The figure is corroborating texture, not the message: it narrows the
+/// headline rather than replacing any of it, so a card that loses its radar
+/// still says everything it needs to in words.
+pub fn render_channel_card_with_radar(
+    card: &ChannelCard,
+    radar: Option<&RadarFigure>,
+) -> Result<MonoFrame, ChannelRenderError> {
     card.validate()?;
+
+    // An empty composite is not drawn. A handful of dithered specks reads as a
+    // dirty panel rather than as weather, and the headline would rather have
+    // the width back.
+    let radar = radar.filter(|figure| figure.is_worth_drawing());
 
     let mut frame = MonoFrame::white();
     draw_header(&mut frame, card);
     draw_title(&mut frame, card);
-    draw_headline(&mut frame, card);
+    draw_headline(&mut frame, card, radar.is_some());
+    if let Some(figure) = radar {
+        figure.draw(
+            &mut frame,
+            u16::try_from(RADAR_FIGURE_X).unwrap_or(0),
+            u16::try_from(RADAR_FIGURE_Y).unwrap_or(0),
+        );
+    }
     draw_detail(&mut frame, card);
     draw_action(&mut frame, card);
     draw_source_tape(&mut frame, card);
@@ -69,13 +98,21 @@ fn draw_title(frame: &mut MonoFrame, card: &ChannelCard) {
     line(frame, 4, 28, 228, 28, BinaryColor::On);
 }
 
-fn draw_headline(frame: &mut MonoFrame, card: &ChannelCard) {
+fn draw_headline(frame: &mut MonoFrame, card: &ChannelCard, has_radar: bool) {
     let critical = card.urgency == ChannelUrgency::Critical;
     if critical {
-        fill(frame, 0, 30, CONTENT_WIDTH, 42, BinaryColor::On);
+        // The inversion stops at the figure. Radar drawn into a black band
+        // would read inside out — more ink meaning less rain.
+        let width = if has_radar {
+            u32::try_from(RADAR_FIGURE_X).unwrap_or(CONTENT_WIDTH)
+        } else {
+            CONTENT_WIDTH
+        };
+        fill(frame, 0, 30, width, 42, BinaryColor::On);
     }
 
-    let lines = wrap(&card.headline, 22, 2);
+    let columns = if has_radar { 12 } else { 22 };
+    let lines = wrap(&card.headline, columns, 2);
     let first_y = if lines.len() == 1 { 40 } else { 31 };
     for (index, value) in lines.iter().enumerate() {
         large(
@@ -231,7 +268,7 @@ const fn availability_code(availability: ChannelAvailability) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ChannelKind, ChannelSource};
+    use crate::{ChannelKind, ChannelSource, radar_figure_from_png};
 
     fn card(kind: ChannelKind, urgency: ChannelUrgency) -> ChannelCard {
         ChannelCard::new(
@@ -339,5 +376,71 @@ mod tests {
             with_other.packed(),
             "changing only the source name must not change a pixel"
         );
+    }
+
+    /// A composite dense enough to be worth drawing, in the monochrome scheme
+    /// the panel requests.
+    fn wet_figure() -> RadarFigure {
+        let mut image = image::RgbaImage::new(64, 64);
+        for (x, y, pixel) in image.enumerate_pixels_mut() {
+            let intensity = if (x / 8 + y / 8) % 2 == 0 { 30 } else { 200 };
+            *pixel = image::Rgba([intensity, intensity, intensity, 255]);
+        }
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        radar_figure_from_png(&bytes).unwrap()
+    }
+
+    #[test]
+    fn a_radar_card_stays_inside_the_panel_and_leaves_the_words_room() {
+        let card = card(ChannelKind::Weather, ChannelUrgency::Advisory);
+        let with_radar = render_channel_card_with_radar(&card, Some(&wet_figure())).unwrap();
+        let without = render_channel_card(&card).unwrap();
+        assert_ne!(with_radar, without);
+        // Ink in the figure's box, and none where the headline still lives.
+        assert!(with_radar.black_pixel_count() > without.black_pixel_count());
+        assert!((30..72).any(|y| (132..228).any(|x| with_radar.is_black(x, y))));
+    }
+
+    /// An empty sky costs the headline nothing. The figure is dropped and the
+    /// wrap goes back to full width, so the card is identical to one that never
+    /// had radar offered.
+    #[test]
+    fn an_empty_composite_is_dropped_rather_than_drawn_blank() {
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::new(64, 64))
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let empty = radar_figure_from_png(&bytes).unwrap();
+        let card = card(ChannelKind::Weather, ChannelUrgency::Advisory);
+        assert_eq!(
+            render_channel_card_with_radar(&card, Some(&empty)).unwrap(),
+            render_channel_card(&card).unwrap()
+        );
+    }
+
+    /// A critical card inverts its headline band. Radar drawn into that band
+    /// would read inside out — more ink meaning less rain — so the fill stops
+    /// at the figure.
+    #[test]
+    fn a_critical_card_does_not_invert_the_radar() {
+        let card = card(ChannelKind::Weather, ChannelUrgency::Critical);
+        let frame = render_channel_card_with_radar(&card, Some(&wet_figure())).unwrap();
+        // The band is black to the left of the figure...
+        assert!(frame.is_black(20, 50));
+        // ...and the figure's own box is not solid.
+        let black = (30..72)
+            .flat_map(|y| (132..228).map(move |x| (x, y)))
+            .filter(|(x, y)| frame.is_black(*x, *y))
+            .count();
+        assert!(black > 0 && black < 96 * 42, "{black} of {}", 96 * 42);
     }
 }
