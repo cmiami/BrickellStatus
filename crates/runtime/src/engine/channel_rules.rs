@@ -1179,6 +1179,29 @@ fn channel_availability(
     }
 }
 
+/// Whether this source has told us no fresher answer can exist yet.
+///
+/// The argument above — that a budget cannot double as a staleness test for a
+/// source deliberately collected less often than the budget — has a second case
+/// the cadence term does not cover. A market that has closed is not a stale
+/// source. Friday's closing price *is* the current price of AMD all weekend;
+/// polling harder cannot produce a newer one, and there is no fault to report.
+///
+/// Left as it was, the markets channel called itself degraded from Friday's
+/// close to Monday's open, about sixty-five hours, every single week — better
+/// than a third of the time, on a channel that was working perfectly. The cost
+/// is not the false label. It is that a reader could no longer tell a closed
+/// market from a broken feed, which is the one thing the availability line is
+/// there to say.
+fn source_is_quiescent(source: &SourceState) -> bool {
+    source.items.iter().any(|item| {
+        item.attributes
+            .get("session_label")
+            .and_then(Value::as_str)
+            .is_some_and(|session| session.eq_ignore_ascii_case("CLOSED"))
+    })
+}
+
 fn source_availability(
     source: &SourceState,
     channel: &ChannelPreference,
@@ -1205,7 +1228,7 @@ fn source_availability(
         .and_then(|ms| u64::try_from(ms / 1_000).ok())
         .unwrap_or(0);
     let stale_after = budget.saturating_add(cadence);
-    if age_seconds > stale_after {
+    if age_seconds > stale_after && !source_is_quiescent(source) {
         return (AvailabilityDto::Stale, age_seconds);
     }
     if source.last_error.is_some() || source.reported_health != HealthState::Healthy {
@@ -2384,4 +2407,80 @@ pub(crate) fn output_snapshots(preferences: &AppPreferences) -> Vec<OutputSnapsh
             delivery_state: None,
         },
     ]
+}
+
+#[cfg(test)]
+mod availability_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn market_source(session: &str, last_success_ms: i64) -> SourceState {
+        serde_json::from_value(json!({
+            "channel_id": "markets.watchlist",
+            "items": [{
+                "id": "yahoo-chart:AMD",
+                "kind": "market_quote",
+                "title": "AMD",
+                "source": { "name": "Yahoo Finance", "url": null },
+                "attributes": { "session_label": session },
+            }],
+            "reported_health": "healthy",
+            "last_success_ms": last_success_ms,
+            "failure_count": 0,
+            "poll_interval_ms": 300_000,
+        }))
+        .expect("source state fixture")
+    }
+
+    fn markets_channel() -> ChannelPreference {
+        let mut channel = AppPreferences::default().profile.channels[6].clone();
+        channel.max_age_minutes = 20;
+        channel
+    }
+
+    /// Friday's close is the price of AMD all weekend. Judging it against a
+    /// twenty-minute budget marked a working channel degraded from Friday
+    /// afternoon to Monday morning -- about sixty-five hours, every week.
+    #[test]
+    fn a_closed_market_is_current_rather_than_stale() {
+        let now_ms = 1_786_900_000_000;
+        let two_days = 48 * 60 * 60 * 1_000;
+        let (availability, age) =
+            source_availability(&market_source("CLOSED", now_ms - two_days), &markets_channel(), now_ms);
+        assert_eq!(
+            availability,
+            AvailabilityDto::Fresh,
+            "a closed market has no fresher answer to offer"
+        );
+        assert!(
+            age > 100_000,
+            "the age is still reported honestly, it just does not mean stale"
+        );
+    }
+
+    /// ...and the moment it reopens, the ordinary budget applies again, so a
+    /// feed that dies during trading hours is still caught.
+    #[test]
+    fn an_open_market_that_stops_updating_is_still_stale() {
+        let now_ms = 1_786_900_000_000;
+        let an_hour = 60 * 60 * 1_000;
+        let (availability, _) =
+            source_availability(&market_source("OPEN", now_ms - an_hour), &markets_channel(), now_ms);
+        assert_eq!(availability, AvailabilityDto::Stale);
+    }
+
+    /// Quiescence excuses age, never a fault. A closed market whose collector
+    /// is erroring is still broken.
+    #[test]
+    fn a_closed_market_with_a_failing_collector_is_still_reported() {
+        let now_ms = 1_786_900_000_000;
+        let mut source = market_source("CLOSED", now_ms - 48 * 60 * 60 * 1_000);
+        source.last_error = Some("connection refused".into());
+        let (availability, _) = source_availability(&source, &markets_channel(), now_ms);
+        assert_eq!(
+            availability,
+            AvailabilityDto::Delayed,
+            "an error still surfaces even while the market is shut"
+        );
+    }
 }
