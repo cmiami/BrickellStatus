@@ -7,6 +7,7 @@ license.workspace = true
 description = "Tauri-ready application engine for Tender's Log"
 
 [dependencies]
+bridgestatus-contract = { path = "../contract" }
 async-trait.workspace = true
 bridgestatus-collectors = { path = "../collectors" }
 bridgestatus-model = { path = "../model" }

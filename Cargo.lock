@@ -424,6 +424,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bridgestatus-contract"
+version = "0.1.12"
+dependencies = [
+ "jiff",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "bridgestatus-delivery"
 version = "0.1.0"
 dependencies = [
@@ -482,6 +492,7 @@ version = "0.1.12"
 dependencies = [
  "async-trait",
  "bridgestatus-collectors",
+ "bridgestatus-contract",
  "bridgestatus-model",
  "bridgestatus-policy",
  "chrono",
