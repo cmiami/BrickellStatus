@@ -363,17 +363,40 @@ impl FlashRequirement {
     }
 }
 
+/// What asking the board actually produced.
+///
+/// The distinction that matters is between a board that stayed silent and a
+/// board that could not be asked. Collapsing the second into the first is what
+/// made the app demand a flash on every launch: the display worker owns the
+/// serial port, so the firmware probe often cannot open it, and "I could not
+/// ask" was being read as "it is not running our firmware".
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DeviceProbe {
+    /// No Espressif device is attached.
+    NoPort,
+    /// A device is attached but the port could not be opened or read — most
+    /// often because something else already holds it.
+    Unreachable,
+    /// The port was opened and the board was given its chance to speak.
+    Answered(DeviceBanner),
+}
+
 /// Decides whether an attached board needs the bundled firmware.
 ///
 /// Kept free of I/O so the decision is testable without a device: every branch
 /// here is reachable in a unit test, and the wrong answer either nags a working
 /// device or silently leaves a dead one unflashed.
 pub fn evaluate_flash_requirement(
-    banner: Option<&DeviceBanner>,
+    probe: &DeviceProbe,
     bundled_build: Option<&str>,
 ) -> FlashRequirement {
-    let Some(banner) = banner else {
-        return FlashRequirement::NoDevice;
+    let banner = match probe {
+        DeviceProbe::NoPort => return FlashRequirement::NoDevice,
+        // Fail toward silence. An unreachable port is not evidence about what
+        // the board is running, and guessing wrong here nags someone whose
+        // hardware is working perfectly.
+        DeviceProbe::Unreachable => return FlashRequirement::UnknownBuild,
+        DeviceProbe::Answered(banner) => banner,
     };
     if !banner.saw_ready {
         return FlashRequirement::Required {
@@ -826,7 +849,7 @@ mod tests {
 
     #[test]
     fn no_device_means_no_prompt() {
-        let requirement = evaluate_flash_requirement(None, Some("abc1234"));
+        let requirement = evaluate_flash_requirement(&DeviceProbe::NoPort, Some("abc1234"));
         assert_eq!(requirement, FlashRequirement::NoDevice);
         assert!(!requirement.should_prompt());
     }
@@ -835,7 +858,7 @@ mod tests {
     fn a_silent_board_is_prompted_to_flash() {
         // Enumerated over USB but never announced itself: blank or crashed.
         let requirement = evaluate_flash_requirement(
-            Some(&DeviceBanner {
+            &DeviceProbe::Answered(DeviceBanner {
                 saw_ready: false,
                 build: None,
             }),
@@ -853,7 +876,7 @@ mod tests {
     #[test]
     fn a_matching_build_is_left_alone() {
         let requirement = evaluate_flash_requirement(
-            Some(&DeviceBanner::parse("READY INK1 250x122 3904 abc1234")),
+            &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904 abc1234")),
             Some("abc1234"),
         );
         assert!(!requirement.should_prompt());
@@ -868,7 +891,7 @@ mod tests {
     #[test]
     fn a_different_build_is_prompted_to_flash() {
         let requirement = evaluate_flash_requirement(
-            Some(&DeviceBanner::parse("READY INK1 250x122 3904 old0001")),
+            &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904 old0001")),
             Some("abc1234"),
         );
         assert!(requirement.should_prompt());
@@ -888,7 +911,7 @@ mod tests {
         // Firmware predating build reporting still works. Treating "cannot say"
         // as "wrong" would prompt a reflash every launch for no reason.
         let requirement = evaluate_flash_requirement(
-            Some(&DeviceBanner::parse("READY INK1 250x122 3904")),
+            &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904")),
             Some("abc1234"),
         );
         assert!(!requirement.should_prompt());
@@ -898,7 +921,7 @@ mod tests {
     #[test]
     fn a_bundle_without_a_revision_cannot_declare_a_mismatch() {
         let requirement = evaluate_flash_requirement(
-            Some(&DeviceBanner::parse("READY INK1 250x122 3904 abc1234")),
+            &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904 abc1234")),
             None,
         );
         assert!(!requirement.should_prompt());
@@ -930,5 +953,35 @@ mod tests {
             Err(FirmwareError::NoVariants) => {}
             Err(error) => panic!("bundled firmware is invalid: {error}"),
         }
+    }
+
+    /// The bug this exists to prevent: the display worker owns the serial port,
+    /// so the firmware probe frequently cannot open it. Reading that as "the
+    /// board did not answer" demanded a flash on every single launch of a
+    /// perfectly working device.
+    #[test]
+    fn a_port_that_cannot_be_opened_is_never_read_as_an_unflashed_board() {
+        let requirement = evaluate_flash_requirement(&DeviceProbe::Unreachable, Some("abc1234"));
+        assert!(
+            !requirement.should_prompt(),
+            "an unreachable port must not raise the flash prompt"
+        );
+        assert_eq!(requirement, FlashRequirement::UnknownBuild);
+    }
+
+    /// ...while a board that genuinely stays silent still gets prompted, so the
+    /// fix above cannot be mistaken for suppressing the prompt entirely.
+    #[test]
+    fn silence_from_a_reachable_board_still_prompts() {
+        assert!(
+            evaluate_flash_requirement(
+                &DeviceProbe::Answered(DeviceBanner {
+                    saw_ready: false,
+                    build: None
+                }),
+                Some("abc1234")
+            )
+            .should_prompt()
+        );
     }
 }

@@ -18,6 +18,12 @@ use thiserror::Error;
 /// IANA time zone governing the bridge schedule.
 pub const BRICKELL_TIME_ZONE: &str = "America/New_York";
 
+/// Hours over which observed openings track the hour/half-hour pattern even on
+/// days the regulation leaves on signal. Outside these, observed openings
+/// scattered across the hour at chance level.
+const DAYTIME_START_HOUR: u8 = 7;
+const DAYTIME_END_HOUR: u8 = 22;
+
 const RESTRICTED_START: u16 = 7 * 60;
 const RESTRICTED_END: u16 = 19 * 60;
 const BLACKOUTS: [(u16, u16); 3] = [
@@ -86,11 +92,26 @@ pub struct ScheduleStatus {
     /// Next ordinary opening opportunity. This is `None` when the bridge is
     /// already continuously on signal.
     pub next_ordinary_opening_at: Option<TimestampMillis>,
+    /// The next `:00` or `:30` on the clock, whether or not the schedule
+    /// restricts openings then.
+    ///
+    /// Deliberately not a legal claim — it says nothing about what is allowed.
+    /// It exists because observed openings cluster on those minutes even on
+    /// days the regulation does not restrict, and a field that only appears in
+    /// scheduled mode cannot express that.
+    #[serde(default = "epoch_millis")]
+    pub next_clock_slot_at: TimestampMillis,
     /// Federal holiday responsible for `on_signal` mode, when applicable.
     pub holiday: Option<FederalHoliday>,
     /// Always true: public vessels, tugs with tows, and emergencies may be
     /// handled outside the ordinary schedule.
     pub exceptions_may_open: bool,
+}
+
+/// Serde fallback for [`ScheduleStatus::next_clock_slot_at`] when reading a
+/// status written before the field existed.
+fn epoch_millis() -> TimestampMillis {
+    TimestampMillis(0)
 }
 
 /// Schedule construction or conversion failure.
@@ -151,6 +172,18 @@ impl BrickellSchedule {
         } else {
             Some(self.next_ordinary_opening(&local, mode, at_slot)?)
         };
+        // Pure arithmetic on the clock: minutes to the next half-hour boundary.
+        let minutes_to_clock_slot = if at_slot && local.second() == 0 {
+            0
+        } else {
+            30 - (minute_of_day % 30)
+        };
+        let next_clock_slot_at = TimestampMillis(
+            instant
+                .0
+                .saturating_add(i64::from(minutes_to_clock_slot) * 60_000)
+                .saturating_sub(i64::from(local.second()) * 1_000),
+        );
 
         Ok(ScheduleStatus {
             evaluated_at: instant,
@@ -165,6 +198,7 @@ impl BrickellSchedule {
             mode,
             ordinary_opening_allowed,
             next_ordinary_opening_at,
+            next_clock_slot_at,
             holiday,
             exceptions_may_open: true,
         })
@@ -189,6 +223,24 @@ impl BrickellSchedule {
             return Ok(Some(instant));
         }
         Ok(status.next_ordinary_opening_at)
+    }
+
+    /// The next `:00`/`:30` at or after `instant`, but only during the daytime
+    /// hours where observed openings actually track those minutes.
+    ///
+    /// This is the on-signal counterpart to
+    /// [`Self::ordinary_opening_at_or_after`]. It makes no claim about what is
+    /// permitted — on signal everything is — only about when traffic has been
+    /// seen to move.
+    pub fn daytime_clock_slot_at_or_after(
+        &self,
+        instant: TimestampMillis,
+    ) -> Result<Option<TimestampMillis>, ScheduleError> {
+        let status = self.evaluate(instant)?;
+        if !(DAYTIME_START_HOUR..DAYTIME_END_HOUR).contains(&status.local_time.hour) {
+            return Ok(None);
+        }
+        Ok(Some(status.next_clock_slot_at))
     }
 
     fn next_ordinary_opening(

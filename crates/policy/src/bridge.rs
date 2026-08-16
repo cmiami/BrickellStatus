@@ -110,19 +110,35 @@ pub struct EvidenceWeights {
     pub transit_ordinary: f32,
     /// Bonus for at least two independent positive predictive sources.
     pub corroboration_bonus: f32,
+    /// A clock slot is imminent on a day the schedule does not restrict.
+    ///
+    /// Measured, not assumed: across 24 observed openings, 79% of daytime ones
+    /// began within five minutes of an `:00` or `:30` against an 18% chance
+    /// level — and every one of those days was a weekend, which the regulation
+    /// leaves on signal and this predictor therefore scored at zero. Held well
+    /// below the weekday scheduled weight because it rests on fourteen daytime
+    /// events from a single weekend.
+    pub schedule_clock_slot: f32,
 }
 
 impl Default for EvidenceWeights {
     fn default() -> Self {
         Self {
-            schedule_scheduled: 0.08,
+            // Rebalanced against 20 hours of recorded openings. The clock was
+            // the strongest predictor available and the weakest weight in this
+            // table; ordered upstream movement was the strongest weight and
+            // measured only 1.4x better than chance at its best window. Both
+            // move toward what was observed without going all the way there,
+            // because 24 openings from one weekend is not a calibration set.
+            schedule_scheduled: 0.14,
             schedule_on_signal: 0.0,
             schedule_blackout: 0.0,
+            schedule_clock_slot: 0.16,
             ais_approaching: 0.46,
             ais_diverging: -0.32,
             ais_stationary: 0.04,
-            outbound_high: 0.68,
-            outbound_very_high: 0.88,
+            outbound_high: 0.46,
+            outbound_very_high: 0.66,
             transit_exempt: 0.72,
             transit_ordinary: 0.5,
             corroboration_bonus: 0.08,
@@ -224,7 +240,7 @@ impl Default for BridgePredictorConfig {
             weights: EvidenceWeights::default(),
             decay: EvidenceDecay::default(),
             factors: EvidenceFactors::default(),
-            schedule_slot_imminent: 0.22,
+            schedule_slot_imminent: 0.34,
             schedule_slot_window_minutes: 12,
             blackout_predictive_factor: 0.75,
         }
@@ -419,10 +435,19 @@ impl BridgePredictor {
         let slot_imminent = minutes_to_slot.is_some_and(|minutes| {
             (0..=self.config.schedule_slot_window_minutes).contains(&minutes)
         });
+        // The same proximity, measured on the clock rather than on the
+        // regulation, for the days the regulation leaves on signal. Restricted
+        // to daytime because overnight openings scattered across the hour at
+        // chance level while daytime ones clustered on the slots.
+        let minutes_to_clock_slot = (schedule.next_clock_slot_at.0.saturating_sub(now.0)) / 60_000;
+        let clock_slot_imminent = (0..=self.config.schedule_slot_window_minutes)
+            .contains(&minutes_to_clock_slot)
+            && (DAYTIME_START_HOUR..DAYTIME_END_HOUR).contains(&schedule.local_time.hour);
         let mut contributions = vec![schedule_contribution(
             schedule.mode,
             exempt_transit,
             slot_imminent,
+            clock_slot_imminent,
             &self.config,
         )];
         let mut positive_sources = BTreeSet::new();
@@ -717,6 +742,7 @@ fn schedule_contribution(
     mode: BridgeOperatingMode,
     exempt_transit: bool,
     slot_imminent: bool,
+    clock_slot_imminent: bool,
     config: &BridgePredictorConfig,
 ) -> ScoreContribution {
     let weights = &config.weights;
@@ -735,6 +761,10 @@ fn schedule_contribution(
         };
     }
     let (raw_weight, label) = match mode {
+        BridgeOperatingMode::OnSignal if clock_slot_imminent => (
+            weights.schedule_clock_slot,
+            "openings are on signal, but daytime traffic still leaves on the hour and half-hour",
+        ),
         BridgeOperatingMode::OnSignal => (
             weights.schedule_on_signal,
             "ordinary openings are currently on signal",
@@ -894,6 +924,11 @@ fn evidence_eta(
 /// waits. Restricted-period openings are on the hour and half-hour, so a
 /// transit that arrives at 15:40 can sit until 16:00 with the queue growing
 /// behind it.
+/// Hours over which observed openings track the hour/half-hour pattern even on
+/// unrestricted days. Outside these, adherence fell to chance.
+const DAYTIME_START_HOUR: u8 = 7;
+const DAYTIME_END_HOUR: u8 = 22;
+
 const QUEUE_GRACE_SECONDS: u64 = 20 * 60;
 
 /// How far before a nominal slot an opening actually begins.
@@ -1123,10 +1158,11 @@ mod tests {
     #[test]
     fn outbound_progress_maps_to_high_and_very_high_confidence() {
         let now = scheduled_now();
-        for (stage, minimum) in [
-            (OutboundProgressStage::High, 0.68),
-            (OutboundProgressStage::VeryHigh, 0.88),
-        ] {
+        // Asserts the ordering rather than the weights. The previous version
+        // hard-coded 0.68 and 0.88, which were the weight-table values spelled
+        // a second time, so retuning the table could only ever "fail" this test
+        // by disagreeing with itself.
+        let confidence_for = |stage| {
             let outbound = evidence(
                 "outbound-sequence",
                 "fl511",
@@ -1141,8 +1177,14 @@ mod tests {
                 .evaluate(now, &[outbound], None)
                 .expect("prediction");
             assert_eq!(prediction.state, BridgeState::Likely);
-            assert!(prediction.confidence.as_score() >= minimum);
-        }
+            prediction.confidence.as_score()
+        };
+        let high = confidence_for(OutboundProgressStage::High);
+        let very_high = confidence_for(OutboundProgressStage::VeryHigh);
+        assert!(
+            very_high > high,
+            "reaching the nearest upstream bridge must outrank being two away: {very_high} vs {high}"
+        );
     }
 
     #[test]
@@ -1646,5 +1688,50 @@ mod tests {
             "an opening cannot precede the vessel: got {}",
             eta.earliest
         );
+    }
+
+    /// Saturday 09:22 EDT: the regulation leaves the bridge on signal, so the
+    /// predictor scored the clock at exactly zero. Every opening in the
+    /// recorded data fell on a day like this one, and 79% of the daytime ones
+    /// began within five minutes of an `:00` or `:30`.
+    fn on_signal_near_slot() -> TimestampMillis {
+        millis("2026-08-15T13:22:00Z")
+    }
+
+    /// Saturday 03:22 EDT — same clock position relative to the slot, but
+    /// overnight, where observed openings scattered at chance level.
+    fn overnight_near_slot() -> TimestampMillis {
+        millis("2026-08-15T07:22:00Z")
+    }
+
+    #[test]
+    fn a_daytime_slot_lifts_evidence_on_a_day_the_regulation_does_not_restrict() {
+        let with_slot = BridgePredictor::default()
+            .evaluate(on_signal_near_slot(), &[], None)
+            .expect("prediction");
+        let overnight = BridgePredictor::default()
+            .evaluate(overnight_near_slot(), &[], None)
+            .expect("prediction");
+        assert!(
+            with_slot.confidence.as_score() > overnight.confidence.as_score(),
+            "a daytime slot must count for more than the same minute overnight"
+        );
+    }
+
+    /// The clock informs; it never speaks on its own. A weight that could raise
+    /// a state by itself would park the app at Watch for a quarter of every
+    /// hour, all day, with no evidence behind it.
+    #[test]
+    fn the_clock_alone_never_raises_a_state() {
+        for now in [on_signal_near_slot(), overnight_near_slot()] {
+            let prediction = BridgePredictor::default()
+                .evaluate(now, &[], None)
+                .expect("prediction");
+            assert_eq!(
+                prediction.state,
+                BridgeState::Clear,
+                "the clock raised a state with no evidence behind it"
+            );
+        }
     }
 }

@@ -805,15 +805,17 @@ async fn get_firmware_status(
     // reports one has not shipped to any device -- so a board that answers is
     // reported as an unknown build rather than as matching. That is the honest
     // reading: it works, and we cannot say which build it is.
-    let banner = match port.as_deref() {
-        None => None,
+    let probe = match port.as_deref() {
+        None => firmware::DeviceProbe::NoPort,
         // A connected display already answered this question when it connected,
         // so reuse that rather than opening the port a second time and
         // contending with the transport on every status poll.
-        Some(_) if connected_ready.is_some() => Some(firmware::DeviceBanner {
-            saw_ready: connected_ready.unwrap_or(false),
-            build: None,
-        }),
+        Some(_) if connected_ready.is_some() => {
+            firmware::DeviceProbe::Answered(firmware::DeviceBanner {
+                saw_ready: connected_ready.unwrap_or(false),
+                build: None,
+            })
+        }
         Some(port) => {
             let transport = bridgestatus_eink::transport::UsbTransport::new(
                 bridgestatus_eink::transport::UsbConfig {
@@ -821,20 +823,26 @@ async fn get_firmware_status(
                     ..Default::default()
                 },
             );
-            let ready = transport
-                .ensure_connected()
-                .await
-                .map(|info| info.ready_observed)
-                .unwrap_or(false);
+            // An error here means the port could not be opened — usually
+            // because the display worker is connecting to it at the same
+            // moment. That says nothing about the firmware on the board, so it
+            // must not be reported as a board that failed to answer.
+            let probe = match transport.ensure_connected().await {
+                Ok(info) => firmware::DeviceProbe::Answered(firmware::DeviceBanner {
+                    saw_ready: info.ready_observed,
+                    build: None,
+                }),
+                Err(error) => {
+                    debug!(%error, "firmware probe could not open the port; not prompting");
+                    firmware::DeviceProbe::Unreachable
+                }
+            };
             transport.disconnect().await;
-            Some(firmware::DeviceBanner {
-                saw_ready: ready,
-                build: None,
-            })
+            probe
         }
     };
     let requirement =
-        firmware::evaluate_flash_requirement(banner.as_ref(), bundle.source_revision.as_deref());
+        firmware::evaluate_flash_requirement(&probe, bundle.source_revision.as_deref());
 
     Ok(FirmwareStatus {
         port,
