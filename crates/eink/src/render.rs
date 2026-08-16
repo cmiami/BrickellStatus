@@ -5,6 +5,7 @@ use crate::{
     ConfidenceBand, LiveSnapshot, MonoFrame, SnapshotState, SpanStatus,
     channel::display_ascii,
     model::SnapshotError,
+    panel_grid::{self, CONTENT_RIGHT, MARGIN_LEFT},
     panel_rail::{self, CONTENT_WIDTH},
     render_primitives::{fill, fit, huge, label, line, text_width},
 };
@@ -29,6 +30,19 @@ impl Default for RenderConfig {
         }
     }
 }
+
+/// The bridge panel's vertical grid, top to bottom. Each row is derived from
+/// the one above it, so moving a band moves what follows rather than colliding
+/// with it — the tape at the bottom is shared with the channel card and is the
+/// fixed point everything else is measured against.
+const TITLE_BASELINE: i32 = 1;
+const TITLE_RULE_Y: i32 = 12;
+const BAND_TOP: i32 = 15;
+const BAND_HEIGHT: u32 = 43;
+const BAND_BOTTOM: i32 = BAND_TOP + BAND_HEIGHT as i32;
+const TIMING_BASELINE: i32 = BAND_BOTTOM + 3;
+const CONFIDENCE_BASELINE: i32 = TIMING_BASELINE + 22;
+const SPANS_BASELINE: i32 = CONFIDENCE_BASELINE + 12;
 
 /// Failure to turn a semantic snapshot into pixels.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -59,6 +73,7 @@ pub fn render_snapshot(
     if !spans.is_empty() {
         draw_spans(&mut frame, &spans);
     }
+    draw_freshness_tape(&mut frame, snapshot);
     draw_rail(&mut frame, snapshot, config);
     Ok(frame)
 }
@@ -67,13 +82,21 @@ pub fn render_snapshot(
 /// absent: a driver deciding whether to turn does not care whether the answer
 /// came from a bridge controller or a vessel feed, only whether it is current.
 fn draw_title(frame: &mut MonoFrame, snapshot: &LiveSnapshot) {
-    label(frame, 4, 1, &fit(&snapshot.channel, 26), BinaryColor::On);
-    if snapshot.freshness.is_stale() {
-        let mark = format!("STALE {}", snapshot.freshness.age_label());
-        let x = 228 - text_width(&mark, 6);
-        label(frame, x, 1, &mark, BinaryColor::On);
-    }
-    line(frame, 4, 12, 228, 12, BinaryColor::On);
+    label(
+        frame,
+        MARGIN_LEFT,
+        TITLE_BASELINE,
+        &fit(&snapshot.channel, 36),
+        BinaryColor::On,
+    );
+    line(
+        frame,
+        MARGIN_LEFT,
+        TITLE_RULE_Y,
+        CONTENT_RIGHT,
+        TITLE_RULE_Y,
+        BinaryColor::On,
+    );
 }
 
 /// The state, as large and as loud as a one-bit panel allows.
@@ -84,7 +107,14 @@ fn draw_title(frame: &mut MonoFrame, snapshot: &LiveSnapshot) {
 fn draw_state_band(frame: &mut MonoFrame, snapshot: &LiveSnapshot) {
     let alerting = matches!(snapshot.state, SnapshotState::Open | SnapshotState::Likely);
     if alerting {
-        fill(frame, 0, 15, CONTENT_WIDTH, 46, BinaryColor::On);
+        fill(
+            frame,
+            0,
+            BAND_TOP,
+            CONTENT_WIDTH,
+            BAND_HEIGHT,
+            BinaryColor::On,
+        );
     }
     let ink = if alerting {
         BinaryColor::Off
@@ -100,7 +130,14 @@ fn draw_state_band(frame: &mut MonoFrame, snapshot: &LiveSnapshot) {
     draw_bascule(frame, 150, 20, snapshot.state == SnapshotState::Open, ink);
 
     if !alerting {
-        line(frame, 4, 60, 228, 60, BinaryColor::On);
+        line(
+            frame,
+            MARGIN_LEFT,
+            BAND_BOTTOM,
+            CONTENT_RIGHT,
+            BAND_BOTTOM,
+            BinaryColor::On,
+        );
     }
 }
 
@@ -123,14 +160,27 @@ fn draw_timing(frame: &mut MonoFrame, snapshot: &LiveSnapshot) {
     // stem, and at the longest permitted string that reached into the rail.
     let word = fit(&headline, 22);
     let x = ((CONTENT_WIDTH as i32 - text_width(&word, 10)) / 2).max(2);
-    huge(frame, x, 66, &word, BinaryColor::On);
+    huge(frame, x, TIMING_BASELINE, &word, BinaryColor::On);
 
     if let Some(confidence) = snapshot.confidence_percent.filter(|_| predictive) {
         let band = ConfidenceBand::from_percent(confidence).label();
         let note = format!("{confidence}% {band}");
         let x = ((CONTENT_WIDTH as i32 - text_width(&note, 6)) / 2).max(2);
-        label(frame, x, 88, &note, BinaryColor::On);
+        label(frame, x, CONFIDENCE_BASELINE, &note, BinaryColor::On);
     }
+}
+
+/// The same tape the channel card carries, saying the same thing in the same
+/// place. This panel used to announce staleness at top right and only when
+/// stale, so a reader rotating between the two families looked in two places
+/// for one fact and saw nothing at all while the reading was fresh.
+fn draw_freshness_tape(frame: &mut MonoFrame, snapshot: &LiveSnapshot) {
+    let state = if snapshot.freshness.is_stale() {
+        "STALE"
+    } else {
+        "LIVE"
+    };
+    panel_grid::draw_tape(frame, state, &snapshot.freshness.age_label());
 }
 
 fn spans_to_draw(snapshot: &LiveSnapshot) -> Vec<&SpanStatus> {
@@ -218,7 +268,7 @@ fn draw_bascule(frame: &mut MonoFrame, x: i32, y: i32, open: bool, color: Binary
 }
 
 fn draw_spans(frame: &mut MonoFrame, spans: &[&SpanStatus]) {
-    let top = 105;
+    let top = SPANS_BASELINE;
     for (index, span) in spans.iter().enumerate() {
         let x = 5 + i32::try_from(index).unwrap_or(0) * 112;
         let code = fit(&span.code, 3);

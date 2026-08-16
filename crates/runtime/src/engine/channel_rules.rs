@@ -335,6 +335,7 @@ fn channel_signal(
     let mut band = None;
     let mut imminence_minutes = None;
     let mut series = Vec::new();
+    let mut previous_close = None;
     let (detail, action, severity): (String, String, Option<String>) = match kind {
         ChannelKindDto::Weather => {
             let weather = weather_signal(item, channel, now_ms, unit_system);
@@ -411,6 +412,7 @@ fn channel_signal(
                 .and_then(Value::as_array)
                 .map(|values| values.iter().filter_map(Value::as_f64).collect())
                 .unwrap_or_default();
+            previous_close = quote.previous_close;
             band = Some(format!(
                 "{}:{}",
                 if quote.change_percent < 0.0 {
@@ -449,6 +451,7 @@ fn channel_signal(
         band,
         imminence_minutes,
         series,
+        previous_close,
     })
 }
 
@@ -1905,6 +1908,9 @@ fn earthquake_matches_scope(
 struct MarketQuoteView<'a> {
     label: &'a str,
     price: f64,
+    /// The level `change_percent` is measured against, so a surface plotting the
+    /// series can draw the same reference the number quotes.
+    previous_close: Option<f64>,
     currency: &'a str,
     change_percent: f64,
     session: &'a str,
@@ -2017,6 +2023,11 @@ fn market_quote_view(item: &CollectorItem) -> Option<MarketQuoteView<'_>> {
     Some(MarketQuoteView {
         label,
         price,
+        previous_close: item
+            .attributes
+            .get("previous_close")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value > 0.0),
         currency: item
             .attributes
             .get("currency")

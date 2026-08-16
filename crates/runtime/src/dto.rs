@@ -239,6 +239,15 @@ pub struct ChannelSignalDto {
     /// nothing computes with it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub series: Vec<f64>,
+    /// The level the change beside the series is measured against.
+    ///
+    /// Carried with the series because a plot without it is a shape with no
+    /// meaning: a reader sees the price wander and cannot see which side of the
+    /// day's starting point it wandered on. The series' own first sample is not
+    /// a substitute — that is the open, and a quote that gapped down overnight
+    /// can climb all session while still printing a loss.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_close: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

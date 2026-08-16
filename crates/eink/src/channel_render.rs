@@ -5,6 +5,7 @@ use crate::{
     ChannelAvailability, ChannelCard, ChannelCardError, ChannelFrame, ChannelUrgency, MonoFrame,
     RadarFigure,
     channel::display_ascii,
+    panel_grid::{self, CONTENT_RIGHT, MARGIN_LEFT},
     panel_rail::{self, CONTENT_WIDTH},
     render_primitives::{
         LABEL_GLYPH_WIDTH, STRONG_GLYPH_WIDTH, fill, fit, label, large, line, outline, strong,
@@ -12,11 +13,27 @@ use crate::{
     },
 };
 
+/// The card's vertical grid, top to bottom. Each row is derived from the one
+/// above it, so moving a band moves what follows rather than colliding with it,
+/// and a drifted band is visible here rather than buried in a call.
+const HEADER_HEIGHT: u32 = 15;
+const TITLE_BASELINE: i32 = HEADER_HEIGHT as i32 + 2;
+const TITLE_RULE_Y: i32 = TITLE_BASELINE + 11;
+const HEADLINE_TOP: i32 = TITLE_RULE_Y + 2;
+const HEADLINE_HEIGHT: u32 = 42;
+/// Leading for the display face in the headline band, and for the emphatic face
+/// when a figure has taken the width.
+const HEADLINE_LEADING: i32 = 20;
+const FIGURE_HEADLINE_LEADING: i32 = 14;
+const DETAIL_BASELINE: i32 = HEADLINE_TOP + HEADLINE_HEIGHT as i32 + 3;
+const DETAIL_RULE_Y: i32 = DETAIL_BASELINE + 11;
+const ACTION_TOP: i32 = DETAIL_RULE_Y + 3;
+const ACTION_HEIGHT: u32 = 16;
+
 /// Left edge of the radar figure, and therefore the right edge of the headline
 /// when one is present.
 const RADAR_FIGURE_X: i32 = 132;
-const RADAR_FIGURE_Y: i32 = 30;
-const SOURCE_TAPE_TOP: i32 = 108;
+const RADAR_FIGURE_Y: i32 = HEADLINE_TOP;
 
 /// Failure to turn a generic channel card into pixels.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -77,13 +94,13 @@ pub fn render_channel_frame(frame: &ChannelFrame) -> Result<MonoFrame, ChannelRe
 /// here and again in the tape along the bottom — on a panel with roughly six
 /// usable rows.
 fn draw_header(frame: &mut MonoFrame, card: &ChannelCard) {
-    fill(frame, 0, 0, CONTENT_WIDTH, 15, BinaryColor::On);
+    fill(frame, 0, 0, CONTENT_WIDTH, HEADER_HEIGHT, BinaryColor::On);
     let urgency = card.urgency.label();
-    let right_x = 228 - text_width(urgency, LABEL_GLYPH_WIDTH);
-    let channel_width = characters_between(4, right_x);
+    let right_x = CONTENT_RIGHT - text_width(urgency, LABEL_GLYPH_WIDTH);
+    let channel_width = characters_between(MARGIN_LEFT, right_x);
     label(
         frame,
-        4,
+        MARGIN_LEFT,
         2,
         &fit(card.channel.label(), channel_width),
         BinaryColor::Off,
@@ -95,12 +112,19 @@ fn draw_header(frame: &mut MonoFrame, card: &ChannelCard) {
 fn draw_title(frame: &mut MonoFrame, card: &ChannelCard) {
     label(
         frame,
-        4,
-        17,
-        &fit(&card.title, characters_between(4, 228)),
+        MARGIN_LEFT,
+        TITLE_BASELINE,
+        &fit(&card.title, characters_between(MARGIN_LEFT, CONTENT_RIGHT)),
         BinaryColor::On,
     );
-    line(frame, 4, 28, 228, 28, BinaryColor::On);
+    line(
+        frame,
+        MARGIN_LEFT,
+        TITLE_RULE_Y,
+        CONTENT_RIGHT,
+        TITLE_RULE_Y,
+        BinaryColor::On,
+    );
 }
 
 /// Characters of the label face that fit between two x positions.
@@ -118,30 +142,87 @@ fn draw_headline(frame: &mut MonoFrame, card: &ChannelCard, has_radar: bool) {
         } else {
             CONTENT_WIDTH
         };
-        fill(frame, 0, 30, width, 42, BinaryColor::On);
+        fill(
+            frame,
+            0,
+            HEADLINE_TOP,
+            width,
+            HEADLINE_HEIGHT,
+            BinaryColor::On,
+        );
     }
 
-    let columns = if has_radar { 12 } else { 22 };
-    let lines = wrap(&card.headline, columns, 2);
-    let first_y = if lines.len() == 1 { 40 } else { 31 };
+    let ink = if critical {
+        BinaryColor::Off
+    } else {
+        BinaryColor::On
+    };
+
+    // A figure takes most of the width, and the headline has to survive losing
+    // it. At the display face that left twelve characters a line, which cut the
+    // message to make room for the picture corroborating it — "Heavy rain in 12
+    // minutes" reached the panel as "IN 12 MINUT>". The emphatic face is two
+    // pixels narrower and four shorter, which buys fifteen characters across
+    // and a third line down: forty-five against twenty-four, for type that is
+    // still bold and still legible at distance.
+    if has_radar {
+        let lines = wrap(
+            &card.headline,
+            FIGURE_HEADLINE_COLUMNS,
+            FIGURE_HEADLINE_LINES,
+        );
+        for (index, value) in lines.iter().enumerate() {
+            strong(
+                frame,
+                MARGIN_LEFT,
+                HEADLINE_TOP + 1 + i32::try_from(index).unwrap_or(0) * FIGURE_HEADLINE_LEADING,
+                value,
+                ink,
+            );
+        }
+        return;
+    }
+
+    let lines = wrap(&card.headline, 22, 2);
+    let first_y = if lines.len() == 1 {
+        HEADLINE_TOP + 10
+    } else {
+        HEADLINE_TOP + 1
+    };
     for (index, value) in lines.iter().enumerate() {
         large(
             frame,
-            4,
-            first_y + i32::try_from(index * 20).unwrap_or(0),
+            MARGIN_LEFT,
+            first_y + i32::try_from(index).unwrap_or(0) * HEADLINE_LEADING,
             value,
-            if critical {
-                BinaryColor::Off
-            } else {
-                BinaryColor::On
-            },
+            ink,
         );
     }
 }
 
+/// Headline budget on a card carrying a figure, derived from the gap the figure
+/// leaves and the face that fills it.
+const FIGURE_HEADLINE_COLUMNS: usize =
+    ((RADAR_FIGURE_X - MARGIN_LEFT - 4) / STRONG_GLYPH_WIDTH) as usize;
+/// Three rows of the emphatic face fit the headline band exactly.
+const FIGURE_HEADLINE_LINES: usize = 3;
+
 fn draw_detail(frame: &mut MonoFrame, card: &ChannelCard) {
-    label(frame, 5, 75, &fit(&card.detail, 37), BinaryColor::On);
-    line(frame, 4, 86, 228, 86, BinaryColor::On);
+    label(
+        frame,
+        DETAIL_TEXT_X,
+        DETAIL_BASELINE,
+        &fit(&card.detail, DETAIL_CHARACTERS),
+        BinaryColor::On,
+    );
+    line(
+        frame,
+        MARGIN_LEFT,
+        DETAIL_RULE_Y,
+        CONTENT_RIGHT,
+        DETAIL_RULE_Y,
+        BinaryColor::On,
+    );
 }
 
 /// The action line, and the panel's emphasis ration.
@@ -158,27 +239,41 @@ fn draw_action(frame: &mut MonoFrame, card: &ChannelCard) {
     let headline_owns_emphasis = card.urgency == ChannelUrgency::Critical;
     let inverse = card.urgency.is_interrupting() && !headline_owns_emphasis;
     if inverse {
-        fill(frame, 4, 89, 224, 16, BinaryColor::On);
+        fill(
+            frame,
+            MARGIN_LEFT,
+            ACTION_TOP,
+            ACTION_WIDTH,
+            ACTION_HEIGHT,
+            BinaryColor::On,
+        );
     } else {
         outline(
             frame,
-            4,
-            89,
-            224,
-            16,
+            MARGIN_LEFT,
+            ACTION_TOP,
+            ACTION_WIDTH,
+            ACTION_HEIGHT,
             if headline_owns_emphasis { 2 } else { 1 },
         );
         if card.urgency == ChannelUrgency::Advisory {
             // One solid registration edge, which is the system's own mark for a
             // state. The two hairlines this replaces read at panel scale as a
             // stray artefact or a pause glyph rather than as advisory.
-            fill(frame, 4, 89, 3, 16, BinaryColor::On);
+            fill(
+                frame,
+                MARGIN_LEFT,
+                ACTION_TOP,
+                3,
+                ACTION_HEIGHT,
+                BinaryColor::On,
+            );
         }
     }
     strong(
         frame,
         ACTION_TEXT_X,
-        90,
+        ACTION_TOP + 1,
         &fit(&card.action, ACTION_CHARACTERS),
         if inverse {
             BinaryColor::Off
@@ -188,12 +283,20 @@ fn draw_action(frame: &mut MonoFrame, card: &ChannelCard) {
     );
 }
 
-/// Left edge of the action line, clear of the advisory registration rules.
-const ACTION_TEXT_X: i32 = 13;
+/// The detail line runs the full width, so its budget comes straight from the
+/// gap rather than from `characters_between`, which reserves a trailing column
+/// for a right-aligned value this row does not have.
+const DETAIL_TEXT_X: i32 = MARGIN_LEFT + 1;
+const DETAIL_CHARACTERS: usize = ((CONTENT_RIGHT - DETAIL_TEXT_X) / LABEL_GLYPH_WIDTH) as usize;
+
+/// Width of the action box, from the left margin to the content edge.
+const ACTION_WIDTH: u32 = (CONTENT_RIGHT - MARGIN_LEFT) as u32;
+/// Left edge of the action line, clear of the advisory registration rule.
+const ACTION_TEXT_X: i32 = MARGIN_LEFT + 9;
 /// Characters the action line fits, derived rather than guessed: a wider face
 /// buys legible letterforms and costs budget, and the box must win that trade
 /// by truncating rather than by printing over its own border.
-const ACTION_CHARACTERS: usize = ((228 - ACTION_TEXT_X) / STRONG_GLYPH_WIDTH) as usize;
+const ACTION_CHARACTERS: usize = ((CONTENT_RIGHT - ACTION_TEXT_X) / STRONG_GLYPH_WIDTH) as usize;
 
 /// Bottom tape: whether this reading can be trusted, and how old it is.
 ///
@@ -208,22 +311,7 @@ const ACTION_CHARACTERS: usize = ((228 - ACTION_TEXT_X) / STRONG_GLYPH_WIDTH) as
 /// removed from. `ChannelSource::name` is still carried on the card so Settings
 /// can name it; nothing draws it.
 fn draw_source_tape(frame: &mut MonoFrame, card: &ChannelCard) {
-    fill(
-        frame,
-        0,
-        SOURCE_TAPE_TOP,
-        CONTENT_WIDTH,
-        14,
-        BinaryColor::On,
-    );
-    // One vocabulary for one state. An unconfigured channel used to call itself
-    // UNAVAILABLE in the header and NOT READY down here.
-    let state = card.availability.label();
-    label(frame, 4, 109, state, BinaryColor::Off);
-
-    let age = source_age(card);
-    let right_x = 228 - text_width(&age, LABEL_GLYPH_WIDTH);
-    label(frame, right_x, 109, &age, BinaryColor::Off);
+    panel_grid::draw_tape(frame, card.availability.label(), &source_age(card));
 }
 
 /// How old the reading is, in the fewest characters that stay honest.
@@ -278,6 +366,38 @@ mod tests {
             "Take cover by 4:20 PM",
             ChannelSource::aged("Open-Meteo", 42),
         )
+    }
+
+    /// The grid has to stay a grid. Every band is derived from the one above
+    /// it, and the point of that is that a change which would overlap two rows
+    /// fails here rather than shipping as text printed over a rule.
+    #[test]
+    fn no_band_overlaps_the_one_below_it() {
+        let rows: [(&str, i32, i32); 5] = [
+            ("header", 0, HEADER_HEIGHT as i32),
+            ("title", TITLE_BASELINE, TITLE_RULE_Y),
+            (
+                "headline",
+                HEADLINE_TOP,
+                HEADLINE_TOP + HEADLINE_HEIGHT as i32,
+            ),
+            ("detail", DETAIL_BASELINE, DETAIL_RULE_Y),
+            ("action", ACTION_TOP, ACTION_TOP + ACTION_HEIGHT as i32),
+        ];
+        for pair in rows.windows(2) {
+            let (name, _, ends) = pair[0];
+            let (next, starts, _) = pair[1];
+            assert!(
+                ends <= starts,
+                "{name} ends at {ends} but {next} starts at {starts}"
+            );
+        }
+        let (_, _, action_ends) = rows[4];
+        assert!(
+            action_ends <= panel_grid::TAPE_TOP,
+            "the action box runs into the tape at {}",
+            panel_grid::TAPE_TOP
+        );
     }
 
     #[test]

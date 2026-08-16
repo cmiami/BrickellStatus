@@ -1898,7 +1898,7 @@ async fn send_rotating_snapshot_to_display(
             ChannelKindDto::Markets => channel
                 .signal
                 .as_ref()
-                .and_then(|signal| series_figure(&signal.series)),
+                .and_then(|signal| series_figure(&signal.series, signal.previous_close)),
             _ => None,
         };
         match render_channel_card_with_radar(

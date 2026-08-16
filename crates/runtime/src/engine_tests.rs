@@ -2667,6 +2667,7 @@ fn imminent_rain_outranks_a_distant_bridge_prediction_end_to_end() {
         band: rain.band,
         imminence_minutes: rain.imminence_minutes,
         series: Vec::new(),
+        previous_close: None,
     };
 
     let rain_score = channel_priority(
