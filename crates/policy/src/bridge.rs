@@ -612,10 +612,72 @@ impl BridgePredictor {
                 .unwrap_or(u16::MAX)
                 .max(minutes))
         };
-        Ok(Some(EtaRangeMinutes::new(
-            shift(eta.earliest)?,
-            shift(eta.latest)?,
-        )))
+        let aligned = EtaRangeMinutes::new(shift(eta.earliest)?, shift(eta.latest)?);
+        self.cover_daytime_slot(aligned, now)
+    }
+
+    /// Extends a window that would otherwise open and close between slots.
+    ///
+    /// On days the regulation leaves on signal there is no legal wait, so a
+    /// transit window passes through untouched and can land wholly inside the
+    /// gap. Of fourteen daytime openings recorded, three began in that gap
+    /// against 8.9 expected had they been spread evenly across the hour
+    /// (p = 0.002) — so a window living entirely there is naming minutes the
+    /// bridge has been observed to skip.
+    ///
+    /// Only a window with no plausible opening minute in it is touched. One
+    /// that already covers a slot, or that starts close enough to the previous
+    /// one, is left exactly as it is; widening those would trade a real answer
+    /// for a vaguer one.
+    ///
+    /// Only the far edge moves. Pushing the near edge out would risk saying
+    /// "not yet" about a bridge already going up, and warning late is the one
+    /// failure this app cannot have — so an early transit stays covered and the
+    /// window merely also reaches the likelier slot.
+    ///
+    /// Overnight this does nothing. There, nine of ten openings fell in the gap,
+    /// which is what opening on demand looks like.
+    fn cover_daytime_slot(
+        &self,
+        eta: EtaRangeMinutes,
+        now: TimestampMillis,
+    ) -> Result<Option<EtaRangeMinutes>, PredictionError> {
+        let at = |minutes: u16| {
+            TimestampMillis::new(
+                now.0
+                    .saturating_add(i64::from(minutes).saturating_mul(60_000)),
+            )
+        };
+        // Only when the regulation has nothing to say. Restricted hours already
+        // snapped both edges above and this must not reach past that answer.
+        if self
+            .schedule
+            .ordinary_opening_at_or_after(at(eta.earliest))?
+            .is_some()
+        {
+            return Ok(Some(eta));
+        }
+        for minute in eta.earliest..=eta.latest {
+            let status = self.schedule.evaluate(at(minute))?;
+            if !(DAYTIME_START_HOUR..DAYTIME_END_HOUR).contains(&status.local_time.hour) {
+                return Ok(Some(eta));
+            }
+            if minutes_to_nearest_slot(status.local_time.minute) <= SLOT_CLUSTER_MINUTES {
+                return Ok(Some(eta));
+            }
+        }
+        let Some(slot) = self
+            .schedule
+            .daytime_clock_slot_at_or_after(at(eta.latest))?
+        else {
+            return Ok(Some(eta));
+        };
+        let to_slot = (slot.0.saturating_sub(now.0)) / 60_000;
+        let latest = u16::try_from(to_slot.max(0))
+            .unwrap_or(u16::MAX)
+            .saturating_add(SLOT_TAIL_MINUTES)
+            .max(eta.latest);
+        Ok(Some(EtaRangeMinutes::new(eta.earliest, latest)))
     }
 
     fn score_evidence(
@@ -985,6 +1047,22 @@ fn predicted_window_seconds(fact: &BridgeObservation) -> u64 {
 /// its width grew with distance and the farthest bridge produced the vaguest
 /// answer at exactly the moment there was most time to act on a sharp one.
 const MAX_ETA_SPAN_MINUTES: u16 = 20;
+
+/// How near a slot an opening has been observed to begin. Minutes further out
+/// than this are the gap the bridge skips during the day.
+const SLOT_CLUSTER_MINUTES: u8 = 5;
+
+/// Minutes from a clock minute to the nearer of `:00` and `:30`.
+fn minutes_to_nearest_slot(minute: u8) -> u8 {
+    minute.min(minute.abs_diff(30)).min(60 - minute)
+}
+
+/// How far past a slot the window still reaches.
+///
+/// Recorded openings began within about five minutes either side of the slot
+/// they belonged to. Three covers the late half of that without stretching the
+/// window into the following gap.
+const SLOT_TAIL_MINUTES: u16 = 3;
 
 /// Narrowest window worth claiming.
 ///
@@ -1825,5 +1903,73 @@ mod tests {
         let sharp = EtaRangeMinutes::new(4, 9);
         assert_eq!(tighten_eta(sharp, 1), sharp);
         assert_eq!(tighten_eta(sharp, 4), sharp);
+    }
+
+    /// The reported case. Sunday 10:05 EDT, a vessel 4 to 15 minutes out: the
+    /// window covered 10:09 to 10:20 and the next slot was 10:30. Three of
+    /// fourteen recorded daytime openings began in that gap against 8.9
+    /// expected, so the window named minutes the bridge skips.
+    #[test]
+    fn a_daytime_window_that_lands_between_slots_reaches_the_slot() {
+        let now = millis("2026-08-16T14:05:00Z");
+        let predictor = BridgePredictor::default();
+        let eta = predictor
+            .scheduled_eta(Some(EtaRangeMinutes::new(4, 15)), now, false)
+            .expect("eta")
+            .expect("some");
+        assert_eq!(eta.earliest, 4, "the near edge never moves");
+        // 25 minutes to 10:30, plus the observed late tail.
+        assert_eq!(eta.latest, 28);
+    }
+
+    /// A window that already covers a plausible minute is left alone. Widening
+    /// it would trade a sharp answer for a vague one.
+    #[test]
+    fn a_window_already_covering_a_slot_is_untouched() {
+        let predictor = BridgePredictor::default();
+        // 10:26 to 10:34 straddles the half hour.
+        let now = millis("2026-08-16T14:20:00Z");
+        let across = EtaRangeMinutes::new(6, 14);
+        assert_eq!(
+            predictor.scheduled_eta(Some(across), now, false).unwrap(),
+            Some(across)
+        );
+        // 10:02 to 10:07 sits inside the cluster after the hour.
+        let now = millis("2026-08-16T14:00:00Z");
+        let after_slot = EtaRangeMinutes::new(2, 7);
+        assert_eq!(
+            predictor
+                .scheduled_eta(Some(after_slot), now, false)
+                .unwrap(),
+            Some(after_slot)
+        );
+    }
+
+    /// Overnight, nine of ten openings fell in that gap. Extending there would
+    /// be modelling a pattern the data says is absent.
+    #[test]
+    fn an_overnight_window_between_slots_is_left_alone() {
+        let now = millis("2026-08-16T07:05:00Z"); // 03:05 EDT
+        let between = EtaRangeMinutes::new(4, 15);
+        assert_eq!(
+            BridgePredictor::default()
+                .scheduled_eta(Some(between), now, false)
+                .unwrap(),
+            Some(between)
+        );
+    }
+
+    /// A tug with a tow opens the bridge when it arrives; the clock does not
+    /// apply to it.
+    #[test]
+    fn an_exempt_transit_is_never_pushed_to_a_slot() {
+        let now = millis("2026-08-16T14:05:00Z");
+        let arrival = EtaRangeMinutes::new(4, 15);
+        assert_eq!(
+            BridgePredictor::default()
+                .scheduled_eta(Some(arrival), now, true)
+                .unwrap(),
+            Some(arrival)
+        );
     }
 }
