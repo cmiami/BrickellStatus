@@ -125,7 +125,10 @@ pub async fn send_frame(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DeviceReply {
-    Ready,
+    /// Carries the whole banner line, because it names the build running on the
+    /// board. That identity used to be read off the wire and dropped, leaving
+    /// the app unable to tell an up-to-date device from an unknown one.
+    Ready(String),
     Ack,
     Nack(String),
 }
@@ -139,8 +142,13 @@ pub(crate) fn device_reply(bytes: &[u8]) -> Option<DeviceReply> {
     if text.contains("ACK INK1") {
         return Some(DeviceReply::Ack);
     }
-    if text.contains("READY INK1") || text.trim() == "READY" {
-        return Some(DeviceReply::Ready);
+    if let Some(start) = text.find("READY INK1") {
+        return Some(DeviceReply::Ready(safe_device_text(
+            text[start..].lines().next().unwrap_or("READY INK1"),
+        )));
+    }
+    if text.trim() == "READY" {
+        return Some(DeviceReply::Ready("READY".into()));
     }
     None
 }

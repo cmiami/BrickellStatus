@@ -478,6 +478,20 @@ impl DisplayController {
     /// Reusing the live connection's observation avoids opening the port a
     /// second time just to ask a question it already answered, which would
     /// contend with the transport on every status poll.
+    /// The banner the connected board sent, if it is on USB and spoke one.
+    ///
+    /// Read back from the transport rather than copied into this enum: the
+    /// transport already retains it, and a second copy is a second thing that
+    /// can go stale. `ensure_connected` returns the cached state for an already
+    /// open port, so this never reopens anything.
+    async fn usb_banner(&self) -> Option<String> {
+        let transport = match self.active.read().await.as_ref() {
+            Some(ActiveDisplay::Usb { transport, .. }) => Arc::clone(transport),
+            _ => return None,
+        };
+        transport.ensure_connected().await.ok()?.banner
+    }
+
     async fn usb_ready_observed(&self) -> Option<bool> {
         match self.active.read().await.as_ref() {
             Some(ActiveDisplay::Usb { ready_observed, .. }) => Some(*ready_observed),
@@ -772,6 +786,9 @@ async fn get_firmware_status(
         .await
         .unwrap_or_default();
     let port = devices.first().map(|device| device.port.clone());
+    let attached_serial = devices
+        .first()
+        .and_then(|device| device.serial_number.clone());
 
     let Some(root) = firmware_root(&app) else {
         return Ok(FirmwareStatus {
@@ -811,10 +828,17 @@ async fn get_firmware_status(
         // so reuse that rather than opening the port a second time and
         // contending with the transport on every status poll.
         Some(_) if connected_ready.is_some() => {
-            firmware::DeviceProbe::Answered(firmware::DeviceBanner {
-                saw_ready: connected_ready.unwrap_or(false),
-                build: None,
-            })
+            // The connected display already heard the banner; parse the build
+            // out of it rather than reducing it to "something answered".
+            match state.display.usb_banner().await {
+                Some(banner) => {
+                    firmware::DeviceProbe::Answered(firmware::DeviceBanner::parse(&banner))
+                }
+                None => firmware::DeviceProbe::Answered(firmware::DeviceBanner {
+                    saw_ready: connected_ready.unwrap_or(false),
+                    build: None,
+                }),
+            }
         }
         Some(port) => {
             let transport = bridgestatus_eink::transport::UsbTransport::new(
@@ -828,9 +852,12 @@ async fn get_firmware_status(
             // moment. That says nothing about the firmware on the board, so it
             // must not be reported as a board that failed to answer.
             let probe = match transport.ensure_connected().await {
-                Ok(info) => firmware::DeviceProbe::Answered(firmware::DeviceBanner {
-                    saw_ready: info.ready_observed,
-                    build: None,
+                Ok(info) => firmware::DeviceProbe::Answered(match info.banner.as_deref() {
+                    Some(banner) => firmware::DeviceBanner::parse(banner),
+                    None => firmware::DeviceBanner {
+                        saw_ready: info.ready_observed,
+                        build: None,
+                    },
                 }),
                 Err(error) => {
                     debug!(%error, "firmware probe could not open the port; not prompting");
@@ -841,8 +868,24 @@ async fn get_firmware_status(
             probe
         }
     };
-    let requirement =
-        firmware::evaluate_flash_requirement(&probe, bundle.source_revision.as_deref());
+    let remembered = state
+        .store
+        .get_json::<firmware::FlashRecord>(FLASH_RECORD_KEY)
+        .await
+        .ok()
+        .flatten()
+        // Only for the board actually in front of us. A record from a different
+        // device says nothing about this one.
+        .filter(|record| {
+            attached_serial
+                .as_deref()
+                .is_some_and(|serial| serial == record.serial_number)
+        });
+    let requirement = firmware::evaluate_flash_requirement(
+        &probe,
+        bundle.source_revision.as_deref(),
+        remembered.as_ref(),
+    );
 
     Ok(FirmwareStatus {
         port,
@@ -876,6 +919,9 @@ async fn flash_firmware(
         .variant(&variant_id)
         .ok_or_else(|| format!("unknown firmware variant {variant_id:?}"))?
         .clone();
+    let bundled_build = bundle.source_revision.clone();
+    let variant_id_for_record = variant_id.clone();
+    let port_for_record = port.clone();
 
     // The display transport holds this same USB CDC device open and macOS hands
     // it out exclusively, so flashing while connected fails instantly with
@@ -909,7 +955,41 @@ async fn flash_firmware(
         let preferences = state.engine.get_preferences().await;
         state.display.restore_port_after_flash(&preferences).await;
     }
-    outcome.map_err(|error| error.to_string())
+    outcome.map_err(|error| error.to_string())?;
+
+    // Remember what went onto which board. The banner is only spoken at boot
+    // and the port is usually held by the display worker, so a device that is
+    // running exactly this build routinely cannot say so — and was being
+    // prompted to flash again on every launch as a result.
+    if let Some(serial) = attached_board_serial(&port_for_record).await {
+        let record = firmware::FlashRecord {
+            serial_number: serial,
+            build: bundled_build.clone().unwrap_or_default(),
+            variant_id: variant_id_for_record,
+            flashed_at: Timestamp::now().to_string(),
+        };
+        if let Err(error) = state
+            .store
+            .set_json(FLASH_RECORD_KEY, &record, &Timestamp::now().to_string())
+            .await
+        {
+            warn!(%error, "could not record the firmware that was just written");
+        }
+    }
+    Ok(())
+}
+
+/// Key for the last-flashed record in the settings table.
+const FLASH_RECORD_KEY: &str = "firmware.last_flash";
+
+/// The USB serial number of the board at `port`, when it reports one.
+async fn attached_board_serial(port: &str) -> Option<String> {
+    bridgestatus_eink::transport::discover_espressif_devices()
+        .await
+        .ok()?
+        .into_iter()
+        .find(|device| device.port == port)
+        .and_then(|device| device.serial_number)
 }
 
 struct EmitProgress {

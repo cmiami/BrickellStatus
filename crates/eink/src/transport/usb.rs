@@ -18,6 +18,11 @@ use super::{
 /// One Espressif-compatible native USB serial interface discovered on the host.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UsbDeviceInfo {
+    /// The board's own identifier, stable across reboots and reflashes — on an
+    /// ESP32-S3 this is its MAC address. It is the only thing about an attached
+    /// board that does not change when the firmware does, which makes it the
+    /// key anything wanting to remember a board has to use.
+    pub serial_number: Option<String>,
     /// Stable serial device path used to open this interface.
     pub port: String,
     /// Concise device label assembled from USB descriptors.
@@ -33,6 +38,9 @@ pub struct UsbConnectionInfo {
     pub port: String,
     /// Whether the firmware's `READY INK1` banner was observed.
     pub ready_observed: bool,
+    /// The banner exactly as the board sent it, when one arrived. It names the
+    /// build, which is the only self-reported identity the device offers.
+    pub banner: Option<String>,
 }
 
 /// USB vendor ID used by the ESP32-S3 native USB/JTAG interface.
@@ -74,6 +82,9 @@ impl Default for UsbConfig {
 struct UsbState {
     stream: Option<SerialStream>,
     ready_observed: bool,
+    /// Retained so a later status query can read the build without reopening
+    /// the port, which the display worker usually already holds.
+    banner: Option<String>,
 }
 
 /// Tokio serial writer for the E213 native USB interface.
@@ -90,11 +101,12 @@ impl UsbTransport {
             state: Mutex::new(UsbState {
                 stream: None,
                 ready_observed: false,
+                banner: None,
             }),
         }
     }
 
-    async fn connect(&self) -> Result<(SerialStream, bool, String), TransportError> {
+    async fn connect(&self) -> Result<(SerialStream, Option<String>, String), TransportError> {
         let port_name = match &self.config.port {
             Some(port) => {
                 let attached = discover_espressif_devices().await?;
@@ -130,8 +142,8 @@ impl UsbTransport {
             .map_err(|error| usb_io(error.to_string()))?;
 
         sleep(self.config.startup_delay).await;
-        let ready = probe_ready(&mut stream, self.config.ready_timeout).await?;
-        Ok((stream, ready, port_name))
+        let banner = probe_ready(&mut stream, self.config.ready_timeout).await?;
+        Ok((stream, banner, port_name))
     }
 
     /// Opens the configured interface and retains it for later frame writes.
@@ -143,12 +155,14 @@ impl UsbTransport {
     pub async fn ensure_connected(&self) -> Result<UsbConnectionInfo, TransportError> {
         let mut state = self.state.lock().await;
         if state.stream.is_none() {
-            let (stream, ready, port) = self.connect().await?;
+            let (stream, banner, port) = self.connect().await?;
             state.stream = Some(stream);
-            state.ready_observed = ready;
+            state.ready_observed = banner.is_some();
+            state.banner = banner.clone();
             return Ok(UsbConnectionInfo {
                 port,
-                ready_observed: ready,
+                ready_observed: banner.is_some(),
+                banner,
             });
         }
         Ok(UsbConnectionInfo {
@@ -158,6 +172,7 @@ impl UsbTransport {
                 .clone()
                 .unwrap_or_else(|| "Espressif USB".into()),
             ready_observed: state.ready_observed,
+            banner: state.banner.clone(),
         })
     }
 
@@ -166,6 +181,7 @@ impl UsbTransport {
         let mut state = self.state.lock().await;
         state.stream = None;
         state.ready_observed = false;
+        state.banner = None;
     }
 
     async fn send_on_stream(
@@ -199,9 +215,10 @@ impl PacketTransport for UsbTransport {
         validate_for_transport(packet)?;
         let mut state = self.state.lock().await;
         if state.stream.is_none() {
-            let (stream, ready, _) = self.connect().await?;
+            let (stream, banner, _) = self.connect().await?;
             state.stream = Some(stream);
-            state.ready_observed = ready;
+            state.ready_observed = banner.is_some();
+            state.banner = banner;
         }
 
         let result = self
@@ -216,6 +233,7 @@ impl PacketTransport for UsbTransport {
             Err(error) => {
                 state.stream = None;
                 state.ready_observed = false;
+                state.banner = None;
                 Err(error)
             }
         }
@@ -257,6 +275,12 @@ pub async fn discover_espressif_devices() -> Result<Vec<UsbDeviceInfo>, Transpor
                             facts.push(manufacturer.to_owned());
                         }
                         UsbDeviceInfo {
+                            serial_number: details
+                                .serial_number
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                                .map(str::to_owned),
                             port: port.port_name,
                             name,
                             detail: facts.join(" · "),
@@ -273,10 +297,15 @@ pub async fn discover_espressif_devices() -> Result<Vec<UsbDeviceInfo>, Transpor
     .map_err(|error| usb_io(error.to_string()))?
 }
 
+/// Reads the boot banner, returning it verbatim.
+///
+/// The banner names the build on the board. Returning only "did it speak"
+/// discarded that, which is why a device running exactly the bundled firmware
+/// still reported an unknown build.
 async fn probe_ready(
     stream: &mut SerialStream,
     duration: Duration,
-) -> Result<bool, TransportError> {
+) -> Result<Option<String>, TransportError> {
     let mut received = Vec::new();
     let outcome = timeout(duration, async {
         let mut chunk = [0_u8; 256];
@@ -291,7 +320,7 @@ async fn probe_ready(
             }
             received.extend_from_slice(&chunk[..count]);
             match device_reply(&received) {
-                Some(DeviceReply::Ready) => return Ok(true),
+                Some(DeviceReply::Ready(banner)) => return Ok(Some(banner)),
                 Some(DeviceReply::Nack(message)) => return Err(TransportError::Nack(message)),
                 Some(DeviceReply::Ack) | None => {}
             }
@@ -300,7 +329,7 @@ async fn probe_ready(
     .await;
     match outcome {
         Ok(result) => result,
-        Err(_) => Ok(false),
+        Err(_) => Ok(None),
     }
 }
 
@@ -321,7 +350,7 @@ async fn wait_for_ack(stream: &mut SerialStream, duration: Duration) -> Result<(
             match device_reply(&received) {
                 Some(DeviceReply::Ack) => return Ok(()),
                 Some(DeviceReply::Nack(message)) => return Err(TransportError::Nack(message)),
-                Some(DeviceReply::Ready) | None => {}
+                Some(DeviceReply::Ready(_)) | None => {}
             }
         }
     })

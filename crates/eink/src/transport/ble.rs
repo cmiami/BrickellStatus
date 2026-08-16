@@ -198,7 +198,7 @@ impl BleTransport {
             .ok()
             .as_deref()
             .and_then(device_reply)
-            == Some(DeviceReply::Ready);
+            .is_some_and(|reply| matches!(reply, DeviceReply::Ready(_)));
 
         let chunk_size = self.config.chunk_size.max(1);
         for chunk in packet.chunks(chunk_size) {
@@ -222,7 +222,7 @@ impl BleTransport {
                     Some(DeviceReply::Nack(message)) => {
                         return Err(TransportError::Nack(message));
                     }
-                    Some(DeviceReply::Ready) | None => {}
+                    Some(DeviceReply::Ready(_)) | None => {}
                 }
             }
             Err(ble_io("notification stream ended before ACK INK1".into()))

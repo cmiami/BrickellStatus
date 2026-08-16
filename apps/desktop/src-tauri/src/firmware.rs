@@ -363,6 +363,25 @@ impl FlashRequirement {
     }
 }
 
+/// What this app last wrote to a particular board.
+///
+/// The board's own banner is the better answer when it can be heard, but it is
+/// only spoken at boot and the port is usually held by the display worker, so
+/// it frequently cannot be. This is the record that does not depend on catching
+/// a moment: the app knows what it flashed and to which board, and that stays
+/// true across restarts, busy ports, and missed banners.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlashRecord {
+    /// Board identity, from its USB serial number.
+    pub serial_number: String,
+    /// The bundled build that was written.
+    pub build: String,
+    /// Which panel variant was written, so the prompt can offer the other one.
+    pub variant_id: String,
+    pub flashed_at: String,
+}
+
 /// What asking the board actually produced.
 ///
 /// The distinction that matters is between a board that stayed silent and a
@@ -389,13 +408,24 @@ pub enum DeviceProbe {
 pub fn evaluate_flash_requirement(
     probe: &DeviceProbe,
     bundled_build: Option<&str>,
+    remembered: Option<&FlashRecord>,
 ) -> FlashRequirement {
     let banner = match probe {
         DeviceProbe::NoPort => return FlashRequirement::NoDevice,
         // Fail toward silence. An unreachable port is not evidence about what
         // the board is running, and guessing wrong here nags someone whose
         // hardware is working perfectly.
-        DeviceProbe::Unreachable => return FlashRequirement::UnknownBuild,
+        DeviceProbe::Unreachable => {
+            // Unless we wrote it ourselves, in which case we already know.
+            return match (remembered, bundled_build) {
+                (Some(record), Some(bundled)) if record.build == bundled => {
+                    FlashRequirement::UpToDate {
+                        build: record.build.clone(),
+                    }
+                }
+                _ => FlashRequirement::UnknownBuild,
+            };
+        }
         DeviceProbe::Answered(banner) => banner,
     };
     if !banner.saw_ready {
@@ -403,7 +433,14 @@ pub fn evaluate_flash_requirement(
             reason: FlashReason::NotResponding,
         };
     }
-    match (banner.build.as_deref(), bundled_build) {
+    // The board's own word wins when it gives one; our record answers when it
+    // does not. A firmware old enough to omit its build id is exactly the case
+    // the record exists for.
+    let reported = banner
+        .build
+        .as_deref()
+        .or_else(|| remembered.map(|record| record.build.as_str()));
+    match (reported, bundled_build) {
         (Some(device), Some(bundled)) if device == bundled => FlashRequirement::UpToDate {
             build: device.to_owned(),
         },
@@ -849,7 +886,7 @@ mod tests {
 
     #[test]
     fn no_device_means_no_prompt() {
-        let requirement = evaluate_flash_requirement(&DeviceProbe::NoPort, Some("abc1234"));
+        let requirement = evaluate_flash_requirement(&DeviceProbe::NoPort, Some("abc1234"), None);
         assert_eq!(requirement, FlashRequirement::NoDevice);
         assert!(!requirement.should_prompt());
     }
@@ -863,6 +900,7 @@ mod tests {
                 build: None,
             }),
             Some("abc1234"),
+            None,
         );
         assert!(requirement.should_prompt());
         assert_eq!(
@@ -878,6 +916,7 @@ mod tests {
         let requirement = evaluate_flash_requirement(
             &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904 abc1234")),
             Some("abc1234"),
+            None,
         );
         assert!(!requirement.should_prompt());
         assert_eq!(
@@ -893,6 +932,7 @@ mod tests {
         let requirement = evaluate_flash_requirement(
             &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904 old0001")),
             Some("abc1234"),
+            None,
         );
         assert!(requirement.should_prompt());
         assert_eq!(
@@ -913,6 +953,7 @@ mod tests {
         let requirement = evaluate_flash_requirement(
             &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904")),
             Some("abc1234"),
+            None,
         );
         assert!(!requirement.should_prompt());
         assert_eq!(requirement, FlashRequirement::UnknownBuild);
@@ -922,6 +963,7 @@ mod tests {
     fn a_bundle_without_a_revision_cannot_declare_a_mismatch() {
         let requirement = evaluate_flash_requirement(
             &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904 abc1234")),
+            None,
             None,
         );
         assert!(!requirement.should_prompt());
@@ -961,7 +1003,8 @@ mod tests {
     /// perfectly working device.
     #[test]
     fn a_port_that_cannot_be_opened_is_never_read_as_an_unflashed_board() {
-        let requirement = evaluate_flash_requirement(&DeviceProbe::Unreachable, Some("abc1234"));
+        let requirement =
+            evaluate_flash_requirement(&DeviceProbe::Unreachable, Some("abc1234"), None);
         assert!(
             !requirement.should_prompt(),
             "an unreachable port must not raise the flash prompt"
@@ -979,7 +1022,104 @@ mod tests {
                     saw_ready: false,
                     build: None
                 }),
-                Some("abc1234")
+                Some("abc1234"),
+                None,
+            )
+            .should_prompt()
+        );
+    }
+
+    fn record(build: &str) -> FlashRecord {
+        FlashRecord {
+            serial_number: "F0:9E:9E:3B:26:B4".into(),
+            build: build.into(),
+            variant_id: "vision-master-e213".into(),
+            flashed_at: "2026-08-16T13:00:00Z".into(),
+        }
+    }
+
+    /// The reported case: flashed repeatedly, prompted again on every launch.
+    /// The banner naming the build is only spoken at boot and the display
+    /// worker holds the port, so the board that is running exactly this build
+    /// usually cannot say so. What this app wrote is the answer that survives.
+    #[test]
+    fn a_board_we_flashed_ourselves_is_up_to_date_even_when_it_cannot_be_reached() {
+        let requirement = evaluate_flash_requirement(
+            &DeviceProbe::Unreachable,
+            Some("abc1234"),
+            Some(&record("abc1234")),
+        );
+        assert!(!requirement.should_prompt());
+        assert_eq!(
+            requirement,
+            FlashRequirement::UpToDate {
+                build: "abc1234".into()
+            }
+        );
+    }
+
+    /// ...but the record only speaks for the build it actually wrote. A newer
+    /// app shipping a newer build must still offer to flash it.
+    #[test]
+    fn a_stale_record_does_not_suppress_a_real_upgrade() {
+        let requirement = evaluate_flash_requirement(
+            &DeviceProbe::Unreachable,
+            Some("def5678"),
+            Some(&record("abc1234")),
+        );
+        assert_eq!(requirement, FlashRequirement::UnknownBuild);
+    }
+
+    /// The board's own word outranks our memory of it. Someone flashing the
+    /// board from esptool behind our back is exactly why the record cannot be
+    /// the only source.
+    #[test]
+    fn the_boards_own_banner_wins_over_what_we_remember_writing() {
+        let requirement = evaluate_flash_requirement(
+            &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904 other999")),
+            Some("abc1234"),
+            Some(&record("abc1234")),
+        );
+        assert_eq!(
+            requirement,
+            FlashRequirement::Required {
+                reason: FlashReason::BuildMismatch {
+                    device: "other999".into(),
+                    bundled: "abc1234".into()
+                }
+            }
+        );
+    }
+
+    /// A firmware old enough to omit its build id still answers; the record
+    /// fills in what the banner left out.
+    #[test]
+    fn a_record_names_the_build_a_silent_banner_omits() {
+        let requirement = evaluate_flash_requirement(
+            &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904")),
+            Some("abc1234"),
+            Some(&record("abc1234")),
+        );
+        assert_eq!(
+            requirement,
+            FlashRequirement::UpToDate {
+                build: "abc1234".into()
+            }
+        );
+    }
+
+    /// And a board that never answered and was never flashed by us is still the
+    /// case worth prompting about.
+    #[test]
+    fn a_silent_unknown_board_still_prompts() {
+        assert!(
+            evaluate_flash_requirement(
+                &DeviceProbe::Answered(DeviceBanner {
+                    saw_ready: false,
+                    build: None
+                }),
+                Some("abc1234"),
+                None,
             )
             .should_prompt()
         );
