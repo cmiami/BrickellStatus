@@ -15,6 +15,7 @@ mod protocol;
 pub mod radar;
 mod render;
 mod render_primitives;
+#[cfg(feature = "hardware")]
 pub mod transport;
 
 pub use channel::{
