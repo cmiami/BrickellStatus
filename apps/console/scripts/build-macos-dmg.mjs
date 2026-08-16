@@ -84,27 +84,43 @@ function architectureSuffix(target) {
 
 function waitForNonemptyFile(path, timeoutMilliseconds) {
   const deadline = Date.now() + timeoutMilliseconds;
-  const pause = new Int32Array(new SharedArrayBuffer(4));
   do {
     if (existsSync(path) && lstatSync(path).isFile() && lstatSync(path).size > 0) {
       return true;
     }
-    Atomics.wait(pause, 0, 0, 250);
+    sleep(250);
   } while (Date.now() < deadline);
   return false;
 }
 
+function sleep(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+// Ejecting right after the layout script races Finder, which still holds the
+// volume open for a moment after its window closes. The retries used to fire
+// back to back and were all spent inside that moment, so a release could fail
+// on "Resource busy" with nothing actually wrong. Wait between attempts, and
+// give the forced eject the same patience rather than one shot.
 function detach(device) {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const result = spawnSync('hdiutil', ['detach', device], {
-      cwd: repositoryRoot,
-      env: process.env,
-      encoding: 'utf8',
-      stdio: 'pipe'
-    });
+  const attempts = [0, 1_000, 2_000, 4_000, 8_000];
+  let lastOutput = '';
+  for (const [index, wait] of attempts.entries()) {
+    if (wait) sleep(wait);
+    const forced = index >= attempts.length - 2;
+    const result = spawnSync(
+      'hdiutil',
+      forced ? ['detach', '-force', device] : ['detach', device],
+      { cwd: repositoryRoot, env: process.env, encoding: 'utf8', stdio: 'pipe' }
+    );
     if (result.status === 0) return;
+    lastOutput = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
   }
-  run('hdiutil', ['detach', '-force', device]);
+  throw new Error(
+    `hdiutil could not detach ${device} after ${attempts.length} attempts${
+      lastOutput ? `:\n${lastOutput}` : ''
+    }`
+  );
 }
 
 run(process.execPath, [
