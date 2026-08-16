@@ -22,6 +22,41 @@ CREATE TABLE IF NOT EXISTS bridge_state_intervals (
     CHECK (ended_at_ms IS NULL OR ended_at_ms >= started_at_ms)
 );
 
+-- Booked river movements, kept so the transit offset can be learned.
+--
+-- The pilots' board publishes boarding times, not bridge times, and turning one
+-- into a Brickell ETA needs an offset measured against openings that actually
+-- happened. The bridge side of that pair was already durable in
+-- bridge_state_intervals; this is the other side. Without it the app observed
+-- both halves every ten minutes, used them live, and discarded the predictor --
+-- so the offset its own collector calls uncalibrated could never stop being so.
+--
+-- Keyed by the movement rather than by the fetch: the same booking reappears on
+-- the board for hours and may be revised, and what calibration needs is one row
+-- per movement carrying the schedule it settled on.
+CREATE TABLE IF NOT EXISTS river_transits (
+    source_id TEXT NOT NULL,
+    movement_key TEXT NOT NULL,
+    vessel TEXT NOT NULL,
+    action TEXT NOT NULL,
+    -- Direction past the bridge; NULL when the board did not say.
+    river_direction TEXT,
+    -- Pilot boarding time from the board, which is what an offset is measured
+    -- from.
+    scheduled_at_ms INTEGER NOT NULL,
+    -- The collector's uncalibrated guess, retained so a learned offset can be
+    -- compared against the placeholder it replaces.
+    estimated_bridge_at_ms INTEGER,
+    estimated_offset_minutes INTEGER,
+    first_seen_at_ms INTEGER NOT NULL,
+    last_seen_at_ms INTEGER NOT NULL,
+    session_id TEXT,
+    PRIMARY KEY (source_id, movement_key)
+);
+
+CREATE INDEX IF NOT EXISTS river_transits_schedule
+    ON river_transits(scheduled_at_ms);
+
 CREATE UNIQUE INDEX IF NOT EXISTS bridge_state_intervals_current
     ON bridge_state_intervals(source_id, bridge_key)
     WHERE ended_at_ms IS NULL;

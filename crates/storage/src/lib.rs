@@ -135,6 +135,38 @@ pub struct BridgeObservation<'a> {
     pub session_id: &'a str,
 }
 
+/// One booked river movement, as the pilots' board published it.
+///
+/// Recorded so the transit offset between a boarding time and a Brickell
+/// opening can be measured later. The collector emits an explicitly
+/// uncalibrated estimate and says the real offset has to be learned from
+/// observed openings; nothing was keeping the movements, so it never could be.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RiverTransitObservation<'a> {
+    pub source_id: &'a str,
+    /// Stable identity of the movement, not of the fetch that saw it.
+    pub movement_key: &'a str,
+    pub vessel: &'a str,
+    pub action: &'a str,
+    pub river_direction: Option<&'a str>,
+    pub scheduled_at_ms: i64,
+    pub estimated_bridge_at_ms: Option<i64>,
+    pub estimated_offset_minutes: Option<i64>,
+    pub observed_at_ms: i64,
+    pub session_id: &'a str,
+}
+
+/// One recorded movement, for calibration.
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct RiverTransitRecord {
+    pub vessel: String,
+    pub action: String,
+    pub river_direction: Option<String>,
+    pub scheduled_at_ms: i64,
+    pub estimated_bridge_at_ms: Option<i64>,
+    pub estimated_offset_minutes: Option<i64>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PruneReport {
     pub scrubbed_destinations: u64,
@@ -151,6 +183,63 @@ impl StoreTransaction<'_> {
         updated_at: &str,
     ) -> Result<(), StorageError> {
         set_json_on(&mut self.inner, key, value, updated_at).await
+    }
+
+    /// Records a booked movement, or refreshes the one already held.
+    ///
+    /// Upserted on the movement rather than appended per fetch: the same
+    /// booking sits on the board for hours and may be revised, and calibration
+    /// wants the schedule it settled on, with the window over which it was
+    /// visible. `first_seen_at_ms` is preserved so a revision cannot make a
+    /// movement look newly announced.
+    pub async fn record_river_transit(
+        &mut self,
+        observation: RiverTransitObservation<'_>,
+    ) -> Result<(), StorageError> {
+        let RiverTransitObservation {
+            source_id,
+            movement_key,
+            vessel,
+            action,
+            river_direction,
+            scheduled_at_ms,
+            estimated_bridge_at_ms,
+            estimated_offset_minutes,
+            observed_at_ms,
+            session_id,
+        } = observation;
+        sqlx::query(
+            r#"
+            INSERT INTO river_transits(
+                source_id, movement_key, vessel, action, river_direction,
+                scheduled_at_ms, estimated_bridge_at_ms, estimated_offset_minutes,
+                first_seen_at_ms, last_seen_at_ms, session_id
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)
+            ON CONFLICT(source_id, movement_key) DO UPDATE SET
+                vessel = excluded.vessel,
+                action = excluded.action,
+                river_direction = excluded.river_direction,
+                scheduled_at_ms = excluded.scheduled_at_ms,
+                estimated_bridge_at_ms = excluded.estimated_bridge_at_ms,
+                estimated_offset_minutes = excluded.estimated_offset_minutes,
+                last_seen_at_ms = excluded.last_seen_at_ms,
+                session_id = excluded.session_id
+            "#,
+        )
+        .bind(source_id)
+        .bind(movement_key)
+        .bind(vessel)
+        .bind(action)
+        .bind(river_direction)
+        .bind(scheduled_at_ms)
+        .bind(estimated_bridge_at_ms)
+        .bind(estimated_offset_minutes)
+        .bind(observed_at_ms)
+        .bind(session_id)
+        .execute(&mut *self.inner)
+        .await?;
+        Ok(())
     }
 
     /// Extends the current interval or starts a new one when FL511 changes.
@@ -1839,6 +1928,64 @@ mod tests {
     fn compares_versions_numerically() {
         assert_eq!(parse_version("3.51.3").unwrap(), (3, 51, 3));
         assert!(parse_version("not-a-version").is_err());
+    }
+
+    /// The board republishes the same booking for hours and sometimes revises
+    /// it. Calibration wants one row per movement carrying the schedule it
+    /// settled on, and it wants to know when the movement was first announced —
+    /// a revision that reset that would make a long-planned transit look like it
+    /// appeared minutes ago.
+    #[tokio::test]
+    async fn a_revised_movement_updates_its_schedule_without_losing_when_it_appeared() {
+        let store = Store::in_memory().await.unwrap();
+        let observe = |scheduled: i64, seen: i64| RiverTransitObservation {
+            source_id: "bbpilots.bridge.brickell",
+            movement_key: "bbp-movement-1",
+            vessel: "MV EXAMPLE",
+            action: "departure",
+            river_direction: Some("outbound"),
+            scheduled_at_ms: scheduled,
+            estimated_bridge_at_ms: Some(scheduled + 20 * 60_000),
+            estimated_offset_minutes: Some(20),
+            observed_at_ms: seen,
+            session_id: "session-a",
+        };
+
+        let mut transaction = store.begin_transaction().await.unwrap();
+        transaction
+            .record_river_transit(observe(1_000_000, 900_000))
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        // Same movement, later fetch, schedule pushed back half an hour.
+        let mut transaction = store.begin_transaction().await.unwrap();
+        transaction
+            .record_river_transit(observe(2_800_000, 2_000_000))
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let row: (i64, i64, i64, String) = sqlx::query_as(
+            "SELECT scheduled_at_ms, first_seen_at_ms, last_seen_at_ms, vessel \
+             FROM river_transits",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.0, 2_800_000,
+            "the revised schedule is what calibration reads"
+        );
+        assert_eq!(row.1, 900_000, "first sighting survives the revision");
+        assert_eq!(row.2, 2_000_000, "last sighting moves forward");
+        assert_eq!(row.3, "MV EXAMPLE");
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM river_transits")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "one row per movement, not one per fetch");
     }
 
     #[tokio::test]

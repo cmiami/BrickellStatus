@@ -877,6 +877,52 @@ impl RuntimeEngine {
                     .await?;
             }
         }
+        // The other half of the pair. FL511 says a bridge opened; the pilots'
+        // board says a ship was booked through hours earlier. Both were being
+        // observed every cycle and only the outcome was kept, so the transit
+        // offset the collector explicitly calls uncalibrated had no way to stop
+        // being one -- the predictor was discarded before anything could measure
+        // it against what actually happened.
+        for source_id in state
+            .active_sources
+            .keys()
+            .filter(|source_id| source_id.starts_with("bbpilots."))
+        {
+            let Some(source) = state.sources.get(source_id) else {
+                continue;
+            };
+            for item in &source.items {
+                if item.kind != ItemKind::VesselMovement {
+                    continue;
+                }
+                let attribute = |name: &str| item.attributes.get(name).and_then(Value::as_str);
+                // A movement with no scheduled time cannot anchor an offset, so
+                // it is not worth a row.
+                let Some(scheduled_at_ms) = item.starts_at.map(|value| value.timestamp_millis())
+                else {
+                    continue;
+                };
+                transaction
+                    .record_river_transit(tenders_storage::RiverTransitObservation {
+                        source_id,
+                        movement_key: &item.id,
+                        vessel: attribute("vessel").unwrap_or(item.title.as_str()),
+                        action: attribute("action").unwrap_or("unknown"),
+                        river_direction: attribute("river_direction"),
+                        scheduled_at_ms,
+                        estimated_bridge_at_ms: attribute("bridge_eta_at")
+                            .and_then(|value| value.parse::<Timestamp>().ok())
+                            .map(Timestamp::as_millisecond),
+                        estimated_offset_minutes: item
+                            .attributes
+                            .get("bridge_eta_offset_minutes")
+                            .and_then(Value::as_i64),
+                        observed_at_ms: now_ms,
+                        session_id: &self.session_id,
+                    })
+                    .await?;
+            }
+        }
         transaction
             .set_json(LIVE_STATE_KEY, state, &updated_at)
             .await?;

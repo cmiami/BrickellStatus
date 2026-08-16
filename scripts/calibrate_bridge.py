@@ -24,6 +24,13 @@ DECISION RULES, pre-registered so a future window is not read by eye.
     measuring 1.4x and 0.86x is not evidence either way; it is one regime,
     measured twice, on a river the regulation leaves on signal.
 
+  Transit offset (`DEFAULT_INBOUND_TRANSIT_MINUTES`, `DEFAULT_OUTBOUND_TRANSIT_MINUTES`
+  in crates/collectors/src/bbpilots.rs, currently 60 and 20 as placeholders)
+    Replace a placeholder with the measured median once a direction has 20+
+    movements pairing to an opening, and set `eta_calibrated` true only then.
+    Report the interquartile range with it: an offset with a 40-minute spread is
+    a number, not a countdown, and the panel should not treat it as one.
+
   Clock slot (weight `schedule_clock_slot`)
     Judge on the asymmetric window, which is what survived re-measurement: the
     tender lifts ahead of the scheduled minute. Compare -10..+5 against its own
@@ -58,6 +65,82 @@ RIVER = [
     "sw_2_ave", "sw_1_st", "w_flagler", "nw_5_st",
     "nw_12_ave", "nw_17_ave", "nw_22_ave", "nw_27_ave",
 ]
+
+
+def read_transits(path: Path):
+    """Booked river movements, if this build has been recording them."""
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        present = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='river_transits'"
+        ).fetchone()
+        if not present:
+            return None
+        return connection.execute(
+            "SELECT vessel, action, river_direction, scheduled_at_ms, "
+            "estimated_offset_minutes FROM river_transits ORDER BY scheduled_at_ms"
+        ).fetchall()
+    finally:
+        connection.close()
+
+
+def transit_section(transits, openings) -> None:
+    """Learns the offset between a pilot boarding time and a bridge opening."""
+    print("\nRIVER TRANSITS  (the pilots' board against what the bridge did)")
+    if transits is None:
+        print("  no river_transits table — this database predates the build that")
+        print("  records movements. The offset cannot be learned until the app")
+        print("  runs long enough to collect them.")
+        return
+    if not transits:
+        print("  table present, no movements recorded yet. The board publishes")
+        print("  hours ahead, so give it a day of running before reading this.")
+        return
+
+    print(f"  {len(transits)} movements recorded")
+    by_direction = defaultdict(list)
+    for vessel, action, direction, scheduled, placeholder in transits:
+        # The opening that followed the boarding time, within a generous bound:
+        # a transit that never produced one inside three hours was not this
+        # bridge's traffic.
+        following = [t for t in openings if scheduled < t <= scheduled + 180 * MINUTE]
+        if not following:
+            continue
+        by_direction[direction or "unknown"].append(
+            ((min(following) - scheduled) / MINUTE, placeholder)
+        )
+
+    if not by_direction:
+        print("  none of them pair to an opening yet")
+        return
+
+    print(f"  {'direction':<12}{'paired':>8}{'median':>9}{'IQR':>16}{'placeholder':>13}")
+    for direction, pairs in sorted(by_direction.items()):
+        offsets = sorted(p[0] for p in pairs)
+        placeholder = next((p[1] for p in pairs if p[1] is not None), None)
+        median = statistics.median(offsets)
+        if len(offsets) >= 4:
+            low, high = statistics.quantiles(offsets, n=4)[0], statistics.quantiles(offsets, n=4)[2]
+            spread = f"{low:.0f} to {high:.0f} min"
+        else:
+            spread = "--"
+        shown = f"{placeholder} min" if placeholder is not None else "--"
+        print(f"  {direction:<12}{len(offsets):>8}{median:>6.0f} min{spread:>16}{shown:>13}")
+
+    print("\n  VERDICT (pre-registered)")
+    for direction, pairs in sorted(by_direction.items()):
+        offsets = [p[0] for p in pairs]
+        if len(offsets) < 20:
+            print(f"    {direction}: {len(offsets)} pairs — need 20 before replacing a placeholder")
+            continue
+        median = statistics.median(offsets)
+        low, high = statistics.quantiles(offsets, n=4)[0], statistics.quantiles(offsets, n=4)[2]
+        if high - low > 40:
+            print(f"    {direction}: median {median:.0f} min but IQR {high - low:.0f} min — too")
+            print("      loose to publish as a countdown; keep eta_calibrated false")
+        else:
+            print(f"    {direction}: set the placeholder to {median:.0f} min "
+                  f"(IQR {high - low:.0f}) and eta_calibrated true")
 
 
 def read(path: Path):
@@ -283,6 +366,7 @@ def main() -> int:
 
     clock_section(openings)
     upstream_section(ups, openings, lo, hi)
+    transit_section(read_transits(path), openings)
     backtest(ups, openings, lo, hi)
     print("\nNothing was changed. Weights live in crates/policy/src/bridge.rs.")
     return 0
