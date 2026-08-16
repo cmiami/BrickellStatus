@@ -2492,3 +2492,210 @@ fn switching_unit_systems_does_not_change_the_weather_band() {
         weather_signal(&item, &channel, now_ms, UnitSystem::Metric).band
     );
 }
+
+fn weather_minutely_item(now_ms: i64, millimetres: f64, starts_in_minutes: i64) -> CollectorItem {
+    CollectorItem {
+        id: format!("open-meteo:minutely-15:{starts_in_minutes}"),
+        kind: ItemKind::WeatherMinutely,
+        title: "15-minute forecast".into(),
+        summary: Some(format!("{millimetres} mm in 15 minutes")),
+        observed_at: None,
+        starts_at: Some(
+            chrono::DateTime::from_timestamp_millis(now_ms + starts_in_minutes * 60_000).unwrap(),
+        ),
+        ends_at: None,
+        location: Some(Location::point(25.7617, -80.1918)),
+        source: SourceLink {
+            name: "Open-Meteo".into(),
+            url: Some(Url::parse("https://open-meteo.com/").unwrap()),
+        },
+        attributes: BTreeMap::from([
+            ("precipitation".into(), json!(millimetres)),
+            ("rain".into(), json!(millimetres)),
+            (
+                "units".into(),
+                json!({"precipitation": "mm", "rain": "mm", "showers": "mm"}),
+            ),
+        ]),
+    }
+}
+
+/// An hourly bucket answers "some time in the next hour". A 15-minute bin
+/// answers "in eight minutes". Only the second is worth interrupting someone
+/// for, so when both are available the bin has to be the one that speaks.
+#[test]
+fn a_measured_quarter_hour_speaks_over_an_hourly_probability() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let hourly = weather_hourly_item(now_ms, 90.0, 10.0);
+    let minutely = weather_minutely_item(now_ms, 0.6, 8);
+
+    let (summary, active) = weather_activation(
+        &channel,
+        &[&hourly, &minutely],
+        AvailabilityDto::Fresh,
+        now_ms,
+    );
+    assert!(active);
+    assert!(summary.contains("mm expected"), "{summary}");
+    assert!(!summary.contains("chance"), "{summary}");
+    assert!(summary.contains("within 8 min"), "{summary}");
+}
+
+/// The amount rule reads only its own bin, so there is no path by which a
+/// coarser bucket or a bin beyond the window can be reported as a 15-minute
+/// answer. Without a qualifying bin it falls back to probability and says so.
+#[test]
+fn the_amount_rule_fails_closed_outside_its_window_and_units() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let dry_hourly = weather_hourly_item(now_ms, 10.0, 10.0);
+
+    let beyond_window = weather_minutely_item(now_ms, 5.0, 45);
+    assert!(!weather_activation(&channel, &[&beyond_window], AvailabilityDto::Fresh, now_ms).1);
+
+    let already_ended = weather_minutely_item(now_ms, 5.0, -30);
+    assert!(!weather_activation(&channel, &[&already_ended], AvailabilityDto::Fresh, now_ms).1);
+
+    let mut wrong_units = weather_minutely_item(now_ms, 5.0, 8);
+    wrong_units
+        .attributes
+        .insert("units".into(), json!({"precipitation": "inch"}));
+    assert!(!weather_activation(&channel, &[&wrong_units], AvailabilityDto::Fresh, now_ms).1);
+
+    // Below the amount floor: drizzle nobody would notice.
+    let drizzle = weather_minutely_item(now_ms, 0.01, 8);
+    assert!(!weather_activation(&channel, &[&drizzle], AvailabilityDto::Fresh, now_ms).1);
+
+    // And with no usable bin at all, the hourly rule still applies on its own.
+    let wet_hourly = weather_hourly_item(now_ms, 90.0, 10.0);
+    let (summary, active) = weather_activation(
+        &channel,
+        &[&wet_hourly, &drizzle, &dry_hourly],
+        AvailabilityDto::Fresh,
+        now_ms,
+    );
+    assert!(active);
+    assert!(summary.contains("chance"), "{summary}");
+}
+
+/// The band and the ETA come from the same fact, so a bin in progress reads as
+/// rain now rather than as a forecast, and its rule is named.
+#[test]
+fn rain_falling_now_reports_zero_lead_and_an_amount_band() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let falling = weather_minutely_item(now_ms, 1.4, 0);
+    let signal = weather_signal(&falling, &channel, now_ms, UnitSystem::Imperial);
+
+    assert_eq!(signal.imminence_minutes, Some(0));
+    assert_eq!(signal.band.as_deref(), Some("rain-amount:0-5:moderate"));
+    assert!(signal.detail.contains("Rain now"), "{}", signal.detail);
+
+    // Heavier rain in the same bin is a different band, so it re-alerts.
+    let heavier = weather_minutely_item(now_ms, 4.0, 0);
+    assert_ne!(
+        signal.band,
+        weather_signal(&heavier, &channel, now_ms, UnitSystem::Imperial).band
+    );
+}
+
+/// An hourly probability must never be dressed up as an ETA. It is the term
+/// that outranks every other channel, and a bucket does not know the answer.
+#[test]
+fn an_hourly_probability_never_reports_an_imminence() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let hourly = weather_hourly_item(now_ms, 95.0, 10.0);
+    assert_eq!(
+        weather_signal(&hourly, &channel, now_ms, UnitSystem::Imperial).imminence_minutes,
+        None
+    );
+}
+
+/// The ordering the redesign exists to produce, through the real wiring rather
+/// than through the scoring function alone: a channel that can say when it
+/// matters outranks one that says "some time in the next half hour", even when
+/// the second is the app's own anchor.
+#[test]
+fn imminent_rain_outranks_a_distant_bridge_prediction_end_to_end() {
+    let now_ms = 1_786_741_200_000;
+    let weather_channel = AppPreferences::default().profile.channels[1].clone();
+    let rain = weather_signal(
+        &weather_minutely_item(now_ms, 0.6, 8),
+        &weather_channel,
+        now_ms,
+        UnitSystem::Imperial,
+    );
+    assert_eq!(rain.imminence_minutes, Some(8));
+
+    let decision = |state: BridgeStateDto, eta_min: Option<u16>| DecisionSnapshot {
+        channel_id: "bridge.brickell".into(),
+        subject: "Brickell Avenue Bridge".into(),
+        state,
+        state_label: String::new(),
+        meaning: String::new(),
+        action: String::new(),
+        eta_min,
+        eta_max: eta_min.map(|minutes| minutes + 3),
+        confidence_bps: Some(7_000),
+        confidence_label: None,
+        confidence_basis: None,
+        next_legal_slot: None,
+        opening_allowed_now: true,
+        availability: AvailabilityDto::Fresh,
+        source_age_seconds: 0,
+    };
+    let rain_signal = ChannelSignalDto {
+        headline: "Rain".into(),
+        detail: rain.detail,
+        action: String::new(),
+        severity: Some("Heads-up".into()),
+        expires_at: None,
+        band: rain.band,
+        imminence_minutes: rain.imminence_minutes,
+    };
+
+    let rain_score = channel_priority(
+        ChannelKindDto::Weather,
+        Some(&rain_signal),
+        &decision(BridgeStateDto::Clear, None),
+        false,
+    )
+    .score;
+    let distant_bridge = channel_priority(
+        ChannelKindDto::Bridge,
+        None,
+        &decision(BridgeStateDto::Likely, Some(35)),
+        true,
+    )
+    .score;
+    let imminent_bridge = channel_priority(
+        ChannelKindDto::Bridge,
+        None,
+        &decision(BridgeStateDto::Likely, Some(4)),
+        true,
+    )
+    .score;
+    let open_bridge = channel_priority(
+        ChannelKindDto::Bridge,
+        None,
+        &decision(BridgeStateDto::Open, None),
+        true,
+    )
+    .score;
+
+    assert!(
+        rain_score > distant_bridge,
+        "rain in 8 min ({rain_score}) must outrank a bridge predicted at T-35 ({distant_bridge})"
+    );
+    // And the converse, so this can never be read as "the bridge always loses".
+    assert!(
+        imminent_bridge > rain_score,
+        "a bridge at T-4 ({imminent_bridge}) must outrank rain in 8 min ({rain_score})"
+    );
+    assert!(
+        open_bridge > rain_score,
+        "a raised span ({open_bridge}) outranks every forecast ({rain_score})"
+    );
+}

@@ -9,8 +9,8 @@
   "current_units": {
     "time": "iso8601",
     "interval": "seconds",
-    "temperature_2m": "°C",
-    "apparent_temperature": "°C",
+    "temperature_2m": "\u00b0C",
+    "apparent_temperature": "\u00b0C",
     "relative_humidity_2m": "%",
     "precipitation": "mm",
     "weather_code": "wmo code",
@@ -28,16 +28,68 @@
   },
   "hourly_units": {
     "time": "iso8601",
-    "temperature_2m": "°C",
+    "temperature_2m": "\u00b0C",
     "precipitation_probability": "%",
     "precipitation": "mm",
     "weather_code": "wmo code"
   },
   "hourly": {
-    "time": ["2026-08-14T22:00", "2026-08-14T23:00", "2026-08-15T00:00"],
-    "temperature_2m": [30.4, 29.8, 29.1],
-    "precipitation_probability": [70, 55, 30],
-    "precipitation": [1.2, 0.4, 0.0],
-    "weather_code": [80, 61, 3]
+    "time": [
+      "2026-08-14T22:00",
+      "2026-08-14T23:00",
+      "2026-08-15T00:00"
+    ],
+    "temperature_2m": [
+      30.4,
+      29.8,
+      29.1
+    ],
+    "precipitation_probability": [
+      70,
+      55,
+      30
+    ],
+    "precipitation": [
+      1.2,
+      0.4,
+      0.0
+    ],
+    "weather_code": [
+      80,
+      61,
+      3
+    ]
+  },
+  "minutely_15_units": {
+    "time": "iso8601",
+    "precipitation": "mm",
+    "rain": "mm",
+    "showers": "mm"
+  },
+  "minutely_15": {
+    "time": [
+      "2026-08-14T22:00",
+      "2026-08-14T22:15",
+      "2026-08-14T22:30",
+      "2026-08-14T22:45"
+    ],
+    "precipitation": [
+      0.0,
+      0.0,
+      0.6,
+      0.6
+    ],
+    "rain": [
+      0.0,
+      0.0,
+      0.6,
+      0.6
+    ],
+    "showers": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
   }
 }

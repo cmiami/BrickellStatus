@@ -200,6 +200,7 @@ async fn escalating_weather_re_alerts_while_jitter_does_not() {
         severity: Some("Heads-up".into()),
         expires_at: None,
         band: None,
+        imminence_minutes: None,
     });
 
     let identity = |snapshot: &AppSnapshot, band: &str| {
@@ -248,6 +249,7 @@ async fn sourced_signal_copy_reaches_message_native_and_epaper_surfaces() {
         action: "Move to higher ground now.".into(),
         severity: Some("Extreme".into()),
         band: None,
+        imminence_minutes: None,
         expires_at: Some("2026-08-15T02:00:00Z".into()),
     });
 
@@ -323,6 +325,7 @@ async fn critical_quiet_bypass_uses_event_severity_not_interrupt_preset() {
         severity: Some("Severe".into()),
         expires_at: None,
         band: None,
+        imminence_minutes: None,
     });
 
     // Severe is Action, not Emergency, so quiet hours still hold it.

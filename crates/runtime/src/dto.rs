@@ -223,6 +223,14 @@ pub struct ChannelSignalDto {
     /// a stable identity of their own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub band: Option<String>,
+    /// Minutes until this signal's material starts to affect the reader.
+    ///
+    /// This is the one term that reorders channels against each other, so it
+    /// must only be set by a rule that genuinely knows the answer. `None` costs
+    /// the channel the imminence bonus, which is the correct price for not
+    /// being able to say when something matters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imminence_minutes: Option<u16>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -38,7 +38,16 @@ fn channel_urgency(
         // worth showing, not worth stepping in front of weather you are about
         // to walk into.
         ChannelKindDto::News => UrgencyDto::HeadsUp,
-        ChannelKindDto::Weather | ChannelKindDto::Hurricane => UrgencyDto::HeadsUp,
+        // Rain already falling in this quarter-hour changes a decision you are
+        // about to make; rain later today does not.
+        ChannelKindDto::Weather => {
+            if signal.and_then(|signal| signal.imminence_minutes) == Some(0) {
+                UrgencyDto::Action
+            } else {
+                UrgencyDto::HeadsUp
+            }
+        }
+        ChannelKindDto::Hurricane => UrgencyDto::HeadsUp,
         // A market move never changes whether you should leave the building.
         ChannelKindDto::Markets => UrgencyDto::Routine,
         ChannelKindDto::System => UrgencyDto::Routine,
@@ -72,16 +81,31 @@ fn channel_severity_rank(kind: ChannelKindDto, signal: Option<&ChannelSignalDto>
 /// The bridge answers from its own prediction. Other channels have no dated
 /// forecast yet, so they report `None` and score no imminence: an event that
 /// cannot say when it matters has not earned a position over one that can.
-fn channel_imminence_minutes(kind: ChannelKindDto, decision: &DecisionSnapshot) -> Option<u16> {
+/// Millimetres in one 15-minute bin that count as rain worth mentioning.
+/// Below this the provider is reporting drizzle the reader would not notice.
+const DEFAULT_RAIN_AMOUNT_MM: f64 = 0.05;
+/// How far ahead the amount rule looks. Half an hour is the horizon over which
+/// a quarter-hour bin is still a useful answer rather than a guess.
+const DEFAULT_RAIN_WINDOW_MINUTES: f64 = 30.0;
+/// One 15-minute bin, in milliseconds.
+const MINUTELY_BIN_MS: i64 = 15 * 60 * 1_000;
+
+fn channel_imminence_minutes(
+    kind: ChannelKindDto,
+    signal: Option<&ChannelSignalDto>,
+    decision: &DecisionSnapshot,
+) -> Option<u16> {
     match kind {
+        // The bridge's ETA lives on the decision rather than the signal,
+        // because it is the product of the whole predictor rather than of one
+        // matched item.
         ChannelKindDto::Bridge => match decision.state {
             // Already blocking the road; nothing is sooner than now.
             BridgeStateDto::Open => Some(0),
             _ => decision.eta_min,
         },
-        // No other channel carries a dated forecast yet. Reporting `None` costs
-        // them the imminence term rather than inventing a time for them.
-        _ => None,
+        // Everything else says so itself, or says nothing.
+        _ => signal.and_then(|signal| signal.imminence_minutes),
     }
 }
 
@@ -92,7 +116,7 @@ fn channel_priority(
     is_anchor: bool,
 ) -> ChannelPriorityDto {
     let urgency = channel_urgency(kind, signal, decision);
-    let imminence_minutes = channel_imminence_minutes(kind, decision);
+    let imminence_minutes = channel_imminence_minutes(kind, signal, decision);
     let confirmed = matches!(kind, ChannelKindDto::Bridge) && decision.state == BridgeStateDto::Open;
     let score = bridgestatus_policy::priority_score(bridgestatus_policy::PriorityInput {
         urgency: match urgency {
@@ -303,14 +327,20 @@ fn channel_signal(
     // Set only by the kinds whose material is a measurement. The rest are
     // authored events and already have a stable identity of their own.
     let mut band = None;
+    let mut imminence_minutes = None;
     let (detail, action, severity): (String, String, Option<String>) = match kind {
         ChannelKindDto::Weather => {
             let weather = weather_signal(item, channel, now_ms, unit_system);
             band = weather.band;
+            imminence_minutes = weather.imminence_minutes;
             (
                 weather.detail,
                 "Forecast conditions cross the configured weather thresholds.".into(),
-                Some("Heads-up".into()),
+                Some(if imminence_minutes == Some(0) {
+                    "Falling now".into()
+                } else {
+                    "Heads-up".into()
+                }),
             )
         }
         ChannelKindDto::Official => (
@@ -404,6 +434,7 @@ fn channel_signal(
         severity,
         expires_at,
         band,
+        imminence_minutes,
     })
 }
 
@@ -574,8 +605,75 @@ fn news_item_is_breaking(item: &CollectorItem) -> bool {
 #[derive(Clone, Copy, Debug)]
 struct RainActivationFact {
     lead_minutes: i64,
-    probability: f64,
-    threshold: f64,
+    measure: RainMeasure,
+}
+
+/// Which rule armed the rain heads-up, and the number that armed it.
+///
+/// The two are not interchangeable and must never be presented as if they
+/// were: an hourly bucket can say "some time in the next hour", a 15-minute
+/// bin can say "in eight minutes". Keeping the rule attached to the number is
+/// what stops the second sentence being written from the first one's data.
+#[derive(Clone, Copy, Debug)]
+enum RainMeasure {
+    /// Millimetres falling in one 15-minute bin. Unlike the probability rule
+    /// there is no threshold to report: the floor is a "would anyone notice
+    /// this" constant rather than something the reader chose.
+    Amount { millimetres: f64 },
+    /// Percent chance across an hourly bucket.
+    Probability { percent: f64, threshold: f64 },
+}
+
+impl RainMeasure {
+    /// Named in the band so an amount answer can never dedupe against a
+    /// probability one that happened to land in the same bins.
+    fn rule(self) -> &'static str {
+        match self {
+            Self::Amount { .. } => "rain-amount",
+            Self::Probability { .. } => "rain-probability",
+        }
+    }
+
+    fn band(self) -> &'static str {
+        match self {
+            Self::Amount { millimetres } => amount_band(millimetres),
+            Self::Probability { percent, .. } => probability_band(percent),
+        }
+    }
+
+    /// The parenthetical that tells the reader which question was answered.
+    fn describe(self) -> String {
+        match self {
+            Self::Amount { millimetres } => format!("{millimetres:.2} mm expected"),
+            Self::Probability {
+                percent, threshold, ..
+            } => format!("{percent:.0}% chance, threshold {threshold:.0}%"),
+        }
+    }
+
+    /// Orders two facts with the same lead time. Heavier and likelier first.
+    fn magnitude(self) -> f64 {
+        match self {
+            Self::Amount { millimetres } => millimetres,
+            Self::Probability { percent, .. } => percent,
+        }
+    }
+
+    fn is_amount(self) -> bool {
+        matches!(self, Self::Amount { .. })
+    }
+}
+
+/// Rain intensity bands, in millimetres per 15-minute bin. The boundaries are
+/// roughly 0.2, 1 and 3 mm/h once scaled to the hour, which is the usual
+/// light/moderate/heavy split.
+fn amount_band(millimetres: f64) -> &'static str {
+    match millimetres {
+        amount if amount < 0.25 => "trace",
+        amount if amount < 0.75 => "light",
+        amount if amount < 2.5 => "moderate",
+        _ => "heavy",
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -590,9 +688,70 @@ fn rain_activation_fact(
     channel: &ChannelPreference,
     now_ms: i64,
 ) -> Option<RainActivationFact> {
-    if !scope_boolean(channel, "rainAlertEnabled", false) || item.kind != ItemKind::WeatherHourly {
+    if !scope_boolean(channel, "rainAlertEnabled", false) {
         return None;
     }
+    match item.kind {
+        ItemKind::WeatherMinutely => rain_amount_fact(item, channel, now_ms),
+        ItemKind::WeatherHourly => rain_probability_fact(item, channel, now_ms),
+        _ => None,
+    }
+}
+
+/// The preferred rule: a named quarter-hour with measured millimetres in it.
+///
+/// Deliberately narrow. It reads only its own bin, so a bin that does not reach
+/// the window simply does not arm — there is no path by which a coarser bucket
+/// can be reported as a 15-minute answer.
+fn rain_amount_fact(
+    item: &CollectorItem,
+    channel: &ChannelPreference,
+    now_ms: i64,
+) -> Option<RainActivationFact> {
+    let threshold = scope_f64(channel, "rainAmountMm", DEFAULT_RAIN_AMOUNT_MM);
+    if !threshold.is_finite() || threshold <= 0.0 {
+        return None;
+    }
+    let window_minutes = scope_f64(channel, "rainWindowMinutes", DEFAULT_RAIN_WINDOW_MINUTES)
+        .round()
+        .clamp(0.0, 180.0) as i64;
+    let starts_ms = item.starts_at.as_ref()?.timestamp_millis();
+    // A bin describes its own quarter-hour, so the one in progress stays useful
+    // until it ends.
+    if starts_ms.saturating_add(MINUTELY_BIN_MS) < now_ms {
+        return None;
+    }
+    if starts_ms.saturating_sub(now_ms).max(0) / 60_000 > window_minutes {
+        return None;
+    }
+    let millimetres = item
+        .attributes
+        .get("precipitation")?
+        .as_f64()
+        .filter(|value| value.is_finite() && *value >= 0.0)?;
+    if item
+        .attributes
+        .get("units")?
+        .as_object()?
+        .get("precipitation")?
+        .as_str()?
+        .trim()
+        != "mm"
+    {
+        return None;
+    }
+    (millimetres >= threshold).then_some(RainActivationFact {
+        // A bin already in progress is rain now, not rain later.
+        lead_minutes: starts_ms.saturating_sub(now_ms).max(0) / 60_000,
+        measure: RainMeasure::Amount { millimetres },
+    })
+}
+
+fn rain_probability_fact(
+    item: &CollectorItem,
+    channel: &ChannelPreference,
+    now_ms: i64,
+) -> Option<RainActivationFact> {
     let threshold = scope_f64(channel, "rainProbabilityThreshold", 60.0);
     if !threshold.is_finite() || !(0.0..=100.0).contains(&threshold) {
         return None;
@@ -628,8 +787,10 @@ fn rain_activation_fact(
     }
     (probability >= threshold).then_some(RainActivationFact {
         lead_minutes,
-        probability,
-        threshold,
+        measure: RainMeasure::Probability {
+            percent: probability,
+            threshold,
+        },
     })
 }
 
@@ -712,8 +873,17 @@ fn weather_item_activation_score(
     channel: &ChannelPreference,
     now_ms: i64,
 ) -> Option<f64> {
-    let rain = rain_activation_fact(item, channel, now_ms)
-        .map(|fact| 20_000.0 - fact.lead_minutes as f64 + fact.probability / 1_000.0);
+    let rain = rain_activation_fact(item, channel, now_ms).map(|fact| {
+        // Amount sits a band above probability so a measured quarter-hour is
+        // always the item chosen to speak, even when an hourly bucket claims a
+        // shorter lead.
+        let rule_floor = if fact.measure.is_amount() {
+            30_000.0
+        } else {
+            20_000.0
+        };
+        rule_floor - fact.lead_minutes as f64 + fact.measure.magnitude() / 1_000.0
+    });
     let wind = wind_activation_fact(item, channel, now_ms).map(|fact| 10_000.0 + fact.mph);
     match (rain, wind) {
         (Some(rain), Some(wind)) => Some(rain.max(wind)),
@@ -730,6 +900,10 @@ fn weather_item_activation_score(
 struct WeatherSignal {
     detail: String,
     band: Option<String>,
+    /// Set only by the amount rule. An hourly probability describes a bucket,
+    /// not a moment, so reporting it as an ETA would be a guess wearing a
+    /// number — and it is the term that outranks every other channel.
+    imminence_minutes: Option<u16>,
 }
 
 fn weather_signal(
@@ -741,10 +915,12 @@ fn weather_signal(
     let rain_fact = rain_activation_fact(item, channel, now_ms);
     let wind_fact = wind_activation_fact(item, channel, now_ms);
     let rain = rain_fact.map(|fact| {
-        format!(
-            "Rain {:.0}% in {} min (threshold {:.0}%)",
-            fact.probability, fact.lead_minutes, fact.threshold
-        )
+        let timing = if fact.lead_minutes == 0 {
+            "now".into()
+        } else {
+            format!("in {} min", fact.lead_minutes)
+        };
+        format!("Rain {timing} ({})", fact.measure.describe())
     });
     let wind = wind_fact.map(|fact| {
         let timing = if fact.lead_minutes == 0 {
@@ -767,9 +943,10 @@ fn weather_signal(
     let mut parts = Vec::new();
     if let Some(fact) = rain_fact {
         parts.push(format!(
-            "rain-probability:{}:{}",
+            "{}:{}:{}",
+            fact.measure.rule(),
             lead_band(fact.lead_minutes),
-            probability_band(fact.probability)
+            fact.measure.band()
         ));
     }
     if let Some(fact) = wind_fact {
@@ -785,6 +962,9 @@ fn weather_signal(
     WeatherSignal {
         detail: bounded_signal_text(&detail, 360),
         band: (!parts.is_empty()).then(|| parts.join("+")),
+        imminence_minutes: rain_fact
+            .filter(|fact| fact.measure.is_amount())
+            .map(|fact| fact.lead_minutes.clamp(0, i64::from(u16::MAX)) as u16),
     }
 }
 
@@ -1878,6 +2058,16 @@ fn evaluate_weather_activation(
     )
 }
 
+/// "now" for a bin already in progress, "in N min" otherwise. The amount rule
+/// can legitimately report zero lead; the probability rule effectively cannot.
+fn rain_timing(fact: &RainActivationFact) -> String {
+    if fact.lead_minutes == 0 {
+        "now".into()
+    } else {
+        format!("within {} min", fact.lead_minutes)
+    }
+}
+
 fn evaluate_weather_activation_with_units(
     channel: &ChannelPreference,
     items: &[&CollectorItem],
@@ -1918,9 +2108,14 @@ fn evaluate_weather_activation_with_units(
             })
         })
         .min_by(|(left, _), (right, _)| {
-            left.lead_minutes
-                .cmp(&right.lead_minutes)
-                .then_with(|| right.probability.total_cmp(&left.probability))
+            // Amount first: an hourly bucket must never speak over a measured
+            // quarter-hour, however short its nominal lead.
+            right
+                .measure
+                .is_amount()
+                .cmp(&left.measure.is_amount())
+                .then_with(|| left.lead_minutes.cmp(&right.lead_minutes))
+                .then_with(|| right.measure.magnitude().total_cmp(&left.measure.magnitude()))
         });
 
     let wind = items
@@ -1947,16 +2142,19 @@ fn evaluate_weather_activation_with_units(
             WeatherActivation {
                 state: PersonalWeatherState::RainAndWindHeadsUp,
                 summary: format!(
-                    "Personal weather heads-up · {rain_area}: rain {:.0}% within {} min (≥{:.0}%) · {wind_area}: gusts {gust:.0} {label} in {} min (≥{threshold:.0} {label}){delayed_suffix}",
-                    rain.probability, rain.lead_minutes, rain.threshold, wind.lead_minutes,
+                    "Personal weather heads-up · {rain_area}: rain {} ({}) · {wind_area}: gusts {gust:.0} {label} in {} min (≥{threshold:.0} {label}){delayed_suffix}",
+                    rain_timing(&rain),
+                    rain.measure.describe(),
+                    wind.lead_minutes,
                 ),
             }
         }
         (Some((rain, area)), None) => WeatherActivation {
             state: PersonalWeatherState::RainHeadsUp,
             summary: format!(
-                "Personal rain heads-up · {area}: {:.0}% within {} min (threshold {:.0}%){delayed_suffix}",
-                rain.probability, rain.lead_minutes, rain.threshold,
+                "Personal rain heads-up · {area}: {} ({}){delayed_suffix}",
+                rain_timing(&rain),
+                rain.measure.describe(),
             ),
         },
         (None, Some((wind, area))) => {

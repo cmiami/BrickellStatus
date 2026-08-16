@@ -31,6 +31,10 @@ pub enum ItemKind {
     Bridge,
     WeatherCurrent,
     WeatherHourly,
+    /// One 15-minute precipitation bin. Hourly buckets can only answer "some
+    /// time in the next hour"; these can answer "in eight minutes", which is
+    /// the difference between a forecast and a warning.
+    WeatherMinutely,
     OfficialAlert,
     TropicalCyclone,
     Earthquake,

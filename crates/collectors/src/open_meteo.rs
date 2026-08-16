@@ -19,6 +19,13 @@ const HOURLY_FIELDS: &str = "temperature_2m,apparent_temperature,precipitation_p
 // snap: it tolerates coarse grids while still binding a response to the
 // configured region instead of accepting coordinates from elsewhere.
 const RESPONSE_GRID_SNAP_TOLERANCE_DEGREES: f64 = 0.5;
+/// Precipitation amount, not probability. A bin that says how much rain falls
+/// in a named quarter-hour supports an actual ETA; an hourly chance does not.
+const MINUTELY_FIELDS: &str = "precipitation,rain,showers";
+/// One hour of bins. The rain rule looks half an hour ahead, and the first bin
+/// is the one already in progress, so four leaves margin without asking the
+/// provider for a forecast nobody reads.
+const MINUTELY_BINS: u16 = 4;
 
 pub struct OpenMeteoCollector {
     latitude: f64,
@@ -56,6 +63,8 @@ impl OpenMeteoCollector {
             .append_pair("longitude", &format!("{longitude:.5}"))
             .append_pair("current", CURRENT_FIELDS)
             .append_pair("hourly", HOURLY_FIELDS)
+            .append_pair("minutely_15", MINUTELY_FIELDS)
+            .append_pair("forecast_minutely_15", &MINUTELY_BINS.to_string())
             .append_pair("forecast_hours", &forecast_hours.to_string())
             .append_pair("timezone", "UTC");
         Ok(Self {
@@ -209,6 +218,69 @@ pub fn parse_open_meteo(
         });
     }
 
+    // Absent rather than required. `minutely_15` coverage is region-dependent,
+    // so demanding it would turn an uncovered location into a schema error and
+    // take the hourly forecast down with it. When it is missing the rain rule
+    // falls back to hourly probability and says so.
+    if let Some(minutely) = object.get("minutely_15").and_then(Value::as_object) {
+        let times = minutely
+            .get("time")
+            .and_then(Value::as_array)
+            .ok_or_else(|| CollectorError::SchemaChanged {
+                collector: "open-meteo",
+                detail: "minutely_15.time array is missing".into(),
+            })?;
+        let minutely_units = object
+            .get("minutely_15_units")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        for (key, values) in minutely {
+            if key != "time"
+                && values
+                    .as_array()
+                    .is_none_or(|values| values.len() != times.len())
+            {
+                return Err(CollectorError::SchemaChanged {
+                    collector: "open-meteo",
+                    detail: format!("minutely_15.{key} length does not match minutely_15.time"),
+                });
+            }
+        }
+        for (index, value) in times.iter().enumerate() {
+            let time = required_time(Some(value), &format!("minutely_15.time[{index}]"))?;
+            let mut attributes = BTreeMap::new();
+            for (key, values) in minutely {
+                if key == "time" {
+                    continue;
+                }
+                attributes.insert(
+                    key.clone(),
+                    values
+                        .as_array()
+                        .and_then(|values| values.get(index))
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                );
+            }
+            attributes.insert("units".into(), minutely_units.clone());
+            items.push(CollectorItem {
+                id: format!("open-meteo:minutely-15:{}", time.timestamp()),
+                kind: ItemKind::WeatherMinutely,
+                title: "15-minute forecast".into(),
+                summary: attributes
+                    .get("precipitation")
+                    .filter(|value| !value.is_null())
+                    .map(|amount| format!("{amount} mm in 15 minutes")),
+                observed_at: None,
+                starts_at: Some(time),
+                ends_at: None,
+                location: Some(location.clone()),
+                source: source.clone(),
+                attributes,
+            });
+        }
+    }
+
     Ok(items)
 }
 
@@ -332,17 +404,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_current_and_hourly_weather() {
+    fn parses_current_hourly_and_minutely_weather() {
         let items = parse_open_meteo(
             include_bytes!("../fixtures/open-meteo.json"),
             25.7699,
             -80.19005,
         )
         .unwrap();
-        assert_eq!(items.len(), 4);
+        assert_eq!(items.len(), 8);
         assert_eq!(items[0].kind, ItemKind::WeatherCurrent);
         assert_eq!(items[1].kind, ItemKind::WeatherHourly);
         assert_eq!(items[1].attributes["precipitation_probability"], json!(70));
+
+        let bins = items
+            .iter()
+            .filter(|item| item.kind == ItemKind::WeatherMinutely)
+            .collect::<Vec<_>>();
+        assert_eq!(bins.len(), 4);
+        // Each bin is dated, which is the whole point: an hourly bucket cannot
+        // say which quarter of the hour the rain arrives in.
+        assert_eq!(bins[2].attributes["precipitation"], json!(0.6));
+        assert_eq!(bins[2].attributes["units"]["precipitation"], json!("mm"));
+        assert_ne!(bins[0].starts_at, bins[1].starts_at);
+    }
+
+    /// `minutely_15` coverage is region-dependent. A location without it must
+    /// still get its hourly forecast rather than a schema error.
+    #[test]
+    fn a_response_without_minutely_bins_still_parses() {
+        let mut without: Value =
+            serde_json::from_slice(include_bytes!("../fixtures/open-meteo.json")).unwrap();
+        let object = without.as_object_mut().unwrap();
+        object.remove("minutely_15");
+        object.remove("minutely_15_units");
+        let items =
+            parse_open_meteo(&serde_json::to_vec(&without).unwrap(), 25.7699, -80.19005).unwrap();
+        assert_eq!(items.len(), 4);
+        assert!(
+            items
+                .iter()
+                .all(|item| item.kind != ItemKind::WeatherMinutely)
+        );
+    }
+
+    /// Present but malformed is a different matter: a length mismatch means the
+    /// bins cannot be paired with their times, and pairing them anyway would
+    /// date rain to the wrong quarter-hour.
+    #[test]
+    fn ragged_minutely_bins_are_a_schema_error_rather_than_a_guess() {
+        let mut ragged: Value =
+            serde_json::from_slice(include_bytes!("../fixtures/open-meteo.json")).unwrap();
+        ragged["minutely_15"]["precipitation"] = json!([0.0, 0.6]);
+        assert!(
+            parse_open_meteo(&serde_json::to_vec(&ragged).unwrap(), 25.7699, -80.19005).is_err()
+        );
     }
 
     #[test]
