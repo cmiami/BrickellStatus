@@ -12,13 +12,13 @@
 //!
 //! Nothing here reaches a network, a disk, or a clock it was not handed.
 
-use bridgestatus_contract::{
-    AppPreferences, AppSnapshot, AvailabilityDto, BridgeStateDto, ChannelKindDto, ChannelSnapshot,
-    InterruptPreset, UrgencyDto,
-};
 use bridgestatus_eink::{
     ChannelAvailability, ChannelCard, ChannelKind, ChannelSource, ChannelUrgency, EtaRange,
     Evidence, Freshness, LiveSnapshot, MonoFrame, RenderConfig, SnapshotState, render_snapshot,
+};
+use bridgestatus_runtime::{
+    AppPreferences, AppSnapshot, AvailabilityDto, BridgeStateDto, ChannelKindDto, ChannelSnapshot,
+    InterruptPreset, UrgencyDto,
 };
 use jiff::{Timestamp, tz::TimeZone};
 use std::collections::BTreeMap;
@@ -115,7 +115,7 @@ pub fn display_snapshot(snapshot: &AppSnapshot) -> LiveSnapshot {
     let source = snapshot
         .evidence
         .iter()
-        .find(|item| item.state == bridgestatus_contract::EvidenceStateDto::Live)
+        .find(|item| item.state == bridgestatus_runtime::EvidenceStateDto::Live)
         .map(|item| item.source_label.clone())
         .unwrap_or_else(|| "Tender's Log".into());
     let mut output = LiveSnapshot::brickell(
@@ -134,7 +134,7 @@ pub fn display_snapshot(snapshot: &AppSnapshot) -> LiveSnapshot {
     output.evidence = snapshot
         .evidence
         .iter()
-        .filter(|item| item.state == bridgestatus_contract::EvidenceStateDto::Live)
+        .filter(|item| item.state == bridgestatus_runtime::EvidenceStateDto::Live)
         .take(3)
         .map(|item| {
             Evidence::new(
@@ -185,13 +185,12 @@ pub fn span_code(bridge_key: &str, bridge_name: &str) -> String {
 /// is history, and reporting it as still up would tell a driver the river is
 /// blocked when it is not.
 pub fn upstream_spans(
-    intervals: &[bridgestatus_contract::BridgeStateIntervalDto],
+    intervals: &[bridgestatus_runtime::BridgeStateIntervalDto],
     zone: Option<&TimeZone>,
 ) -> Vec<bridgestatus_eink::SpanStatus> {
-    let mut latest: BTreeMap<&str, &bridgestatus_contract::BridgeStateIntervalDto> =
-        BTreeMap::new();
+    let mut latest: BTreeMap<&str, &bridgestatus_runtime::BridgeStateIntervalDto> = BTreeMap::new();
     for interval in intervals {
-        if interval.relation != bridgestatus_contract::BridgeRelationDto::Upstream {
+        if interval.relation != bridgestatus_runtime::BridgeRelationDto::Upstream {
             continue;
         }
         let winner = match latest.get(interval.bridge_key.as_str()) {
@@ -215,7 +214,7 @@ pub fn upstream_spans(
         .into_iter()
         .map(|interval| {
             let open = interval.ended_at.is_none()
-                && interval.state == bridgestatus_contract::ObservedBridgeStateDto::Up;
+                && interval.state == bridgestatus_runtime::ObservedBridgeStateDto::Up;
             let mut span = bridgestatus_eink::SpanStatus::new(
                 span_code(&interval.bridge_key, &interval.bridge_name),
                 open,
