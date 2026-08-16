@@ -523,6 +523,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "bridgestatus-wasm-core"
+version = "0.1.12"
+dependencies = [
+ "bridgestatus-contract",
+ "bridgestatus-eink",
+ "bridgestatus-projection",
+ "bridgestatus-runtime",
+ "serde_json",
+ "sha2 0.10.9",
+ "tenders-storage",
+ "tokio",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "brotli"
 version = "8.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

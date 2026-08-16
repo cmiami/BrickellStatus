@@ -1,0 +1,27 @@
+[package]
+name = "bridgestatus-wasm-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The prediction and rendering core, compiled for a JavaScript host"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bridgestatus-contract = { path = "../contract" }
+bridgestatus-eink = { path = "../eink", default-features = false }
+bridgestatus-projection = { path = "../projection" }
+serde_json.workspace = true
+wasm-bindgen = "0.2.127"
+
+[dev-dependencies]
+bridgestatus-runtime = { path = "../runtime" }
+sha2.workspace = true
+tokio = { workspace = true }
+tenders-storage = { path = "../storage" }
+
+[lints.rust]
+missing_docs = "allow"
+unsafe_code = "forbid"
