@@ -4,7 +4,7 @@ use embedded_graphics::{
     Drawable,
     mono_font::{
         MonoTextStyle,
-        ascii::{FONT_6X10, FONT_7X13_BOLD, FONT_10X20},
+        ascii::{FONT_6X10, FONT_8X13_BOLD, FONT_10X20},
     },
     pixelcolor::BinaryColor,
     prelude::{Point, Primitive},
@@ -56,24 +56,41 @@ pub(crate) fn label(frame: &mut MonoFrame, x: i32, y: i32, value: &str, color: B
     text(frame, x, y, value, MonoTextStyle::new(&FONT_6X10, color));
 }
 
+/// The emphatic small face: rail codes and the action line.
+///
+/// 8x13 rather than the 7x13 bold it replaced, which rendered W as H at panel
+/// scale with no overprint involved — the offline card advised `CHECK NETHORK`.
+/// Same height, so the vertical grid is unchanged; one pixel wider, so callers
+/// budget [`STRONG_GLYPH_WIDTH`] per character.
 pub(crate) fn strong(frame: &mut MonoFrame, x: i32, y: i32, value: &str, color: BinaryColor) {
     text(
         frame,
         x,
         y,
         value,
-        MonoTextStyle::new(&FONT_7X13_BOLD, color),
+        MonoTextStyle::new(&FONT_8X13_BOLD, color),
     );
 }
+
+/// Advance width of the [`strong`] face, for callers sizing a string to a box.
+pub(crate) const STRONG_GLYPH_WIDTH: i32 = 8;
 
 /// Draws the largest available font with a faux-bold stroke.
 ///
 /// embedded-graphics tops out at a 10x20 mono face, which is not enough weight
-/// to carry a status across a room. Overprinting at one-pixel offsets thickens
-/// every stem, which on a one-bit panel is the difference between text you read
-/// and a state you recognise.
+/// to carry a status across a room. Overprinting thickens every stem, which on a
+/// one-bit panel is the difference between text you read and a state you
+/// recognise.
+///
+/// The overprint is vertical only, and that is not a detail. Smearing sideways
+/// closes the one-pixel gaps *between* strokes, and in this face the gaps are
+/// what distinguish W from H: the panel spent its largest type announcing
+/// `WATCH` and drew `HATCH`. Smearing downward thickens the same stems without
+/// touching the horizontal gaps, so the weight is bought and the letterforms
+/// survive. Any change here has to be checked by rendering the state
+/// vocabulary, not by reading the diff.
 pub(crate) fn huge(frame: &mut MonoFrame, x: i32, y: i32, value: &str, color: BinaryColor) {
-    for (offset_x, offset_y) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+    for (offset_x, offset_y) in [(0, 0), (0, 1)] {
         large(frame, x + offset_x, y + offset_y, value, color);
     }
 }
@@ -131,5 +148,87 @@ fn infallible<T>(result: Result<T, Infallible>) {
     match result {
         Ok(_) => {}
         Err(error) => match error {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ink laid down by one word, as a set of coordinates, so two words can be
+    /// compared for how much of their form they actually share.
+    fn glyph(
+        draw: fn(&mut MonoFrame, i32, i32, &str, BinaryColor),
+        value: &str,
+    ) -> Vec<(u16, u16)> {
+        let mut frame = MonoFrame::white();
+        draw(&mut frame, 2, 2, value, BinaryColor::On);
+        let mut set = Vec::new();
+        for y in 0..crate::HEIGHT {
+            for x in 0..crate::WIDTH {
+                if frame.is_black(x, y) {
+                    set.push((x, y));
+                }
+            }
+        }
+        set
+    }
+
+    /// Share of `a`'s ink that also appears in `b`. 1.0 means one letterform is
+    /// wholly contained in the other, which for W and H means the reader has no
+    /// way to tell them apart.
+    fn overlap(a: &[(u16, u16)], b: &[(u16, u16)]) -> f32 {
+        let common = a.iter().filter(|point| b.contains(point)).count();
+        common as f32 / a.iter().len().max(1) as f32
+    }
+
+    /// The bug this exists to prevent: `WATCH` drawn as `HATCH`.
+    ///
+    /// A bolding pass that smears sideways fills the gap between W's inner
+    /// strokes until every pixel of H lies inside W, leaving a reader no cue at
+    /// all — and the state word is the largest, most consequential element the
+    /// panel draws. Containment reaching 1.0 is the mechanically detectable
+    /// form of this failure, and it is what the four-pass overprint produced.
+    ///
+    /// It is a floor, not a proof of legibility. A face can keep W and H
+    /// formally distinct and still read alike at panel scale: the 7x13 bold this
+    /// module used for `strong` measured a healthy 89% containment while
+    /// visibly drawing `CHECK NETHORK`. Nothing here can replace rendering the
+    /// vocabulary and looking at it; this only guarantees the glyphs never
+    /// collapse into one another entirely.
+    #[test]
+    fn no_panel_face_lets_h_disappear_inside_w() {
+        for (face, draw) in [
+            (
+                "state",
+                huge as fn(&mut MonoFrame, i32, i32, &str, BinaryColor),
+            ),
+            ("emphatic", strong),
+            ("label", label),
+        ] {
+            let shared = overlap(&glyph(draw, "H"), &glyph(draw, "W"));
+            assert!(
+                shared < 0.99,
+                "in the {face} face H is {:.0}% contained in W, so the reader has \
+                 no way to tell WATCH from HATCH",
+                shared * 100.0
+            );
+        }
+    }
+
+    /// The action line has to fit inside its own box. A face change buys
+    /// legibility with width, and the budget has to follow it — this is what
+    /// stops a wider face from printing over its own border.
+    #[test]
+    fn the_strong_glyph_width_matches_the_face_it_describes() {
+        let mut frame = MonoFrame::white();
+        strong(&mut frame, 0, 0, "MM", BinaryColor::On);
+        let rightmost = (0..crate::WIDTH)
+            .rfind(|x| (0..crate::HEIGHT).any(|y| frame.is_black(*x, y)))
+            .expect("two glyphs leave ink");
+        assert!(
+            i32::from(rightmost) < STRONG_GLYPH_WIDTH * 2,
+            "two glyphs reached x{rightmost}, wider than the declared {STRONG_GLYPH_WIDTH}px advance"
+        );
     }
 }

@@ -5,7 +5,9 @@ use crate::{
     ChannelAvailability, ChannelCard, ChannelCardError, ChannelFrame, ChannelUrgency, MonoFrame,
     RadarFigure,
     channel::display_ascii,
-    render_primitives::{fill, fit, label, large, line, outline, strong, text_width, wrap},
+    render_primitives::{
+        STRONG_GLYPH_WIDTH, fill, fit, label, large, line, outline, strong, text_width, wrap,
+    },
 };
 
 const CONTENT_WIDTH: u32 = 232;
@@ -147,9 +149,9 @@ fn draw_action(frame: &mut MonoFrame, card: &ChannelCard) {
     }
     strong(
         frame,
-        13,
+        ACTION_TEXT_X,
         90,
-        &fit(&card.action, 30),
+        &fit(&card.action, ACTION_CHARACTERS),
         if inverse {
             BinaryColor::Off
         } else {
@@ -157,6 +159,13 @@ fn draw_action(frame: &mut MonoFrame, card: &ChannelCard) {
         },
     );
 }
+
+/// Left edge of the action line, clear of the advisory registration rules.
+const ACTION_TEXT_X: i32 = 13;
+/// Characters the action line fits, derived rather than guessed: a wider face
+/// buys legible letterforms and costs budget, and the box must win that trade
+/// by truncating rather than by printing over its own border.
+const ACTION_CHARACTERS: usize = ((228 - ACTION_TEXT_X) / STRONG_GLYPH_WIDTH) as usize;
 
 /// Bottom tape: what this card is about on the left, how current it is on the
 /// right.
