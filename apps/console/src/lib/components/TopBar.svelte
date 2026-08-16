@@ -6,28 +6,40 @@
   import { notice, persistPreferences, preferences, saving, snapshot } from '$lib/state';
   import type { UnitSystem } from '$lib/types';
 
-  let now = new Date();
-  let refreshing = false;
+  // `$state`, not a plain `let`. Without a rune this component compiled in
+  // legacy mode, where the template's dependencies are found by reading the
+  // expressions in it: `{localTime()}` mentions `localTime` and never `now`, so
+  // reassigning `now` every second invalidated nothing and the clock showed the
+  // moment the app started, forever. Runes track reads at runtime, so calling
+  // through a function is no longer a way to hide a dependency.
+  //
+  // `refreshing` has to come along. One rune puts the whole component in runes
+  // mode, and a plain `let` left behind would quietly stop being reactive --
+  // here that would have frozen the refresh button's spinner instead.
+  let now = $state(new Date());
+  let refreshing = $state(false);
 
   onMount(() => {
     const timer = setInterval(() => (now = new Date()), 1000);
     return () => clearInterval(timer);
   });
 
-  const localTime = () =>
-    new Intl.DateTimeFormat('en-US', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false
-    }).format(now);
+  // Hoisted: constructing an Intl formatter is expensive and these were being
+  // rebuilt twice a second.
+  const TIME_FORMAT = new Intl.DateTimeFormat('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+  const DATE_FORMAT = new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric'
+  });
 
-  const localDate = () =>
-    new Intl.DateTimeFormat('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric'
-    }).format(now);
+  const localTime = $derived(TIME_FORMAT.format(now));
+  const localDate = $derived(DATE_FORMAT.format(now));
 
   const unhealthyCount = () =>
     $snapshot?.system.sources.filter((source) => source.availability !== 'fresh').length ?? 0;
@@ -69,10 +81,10 @@
     </fieldset>
   {/if}
 
-  <div class="clock-block" aria-label={`Local time ${localTime()}, ${localDate()}`}>
+  <div class="clock-block" aria-label={`Local time ${localTime}, ${localDate}`}>
     <span class="registration-label">Local time</span>
-    <strong>{localTime()}</strong>
-    <small>{localDate()}</small>
+    <strong>{localTime}</strong>
+    <small>{localDate}</small>
   </div>
 
   <div class="system-block">
