@@ -108,8 +108,9 @@
     border-inline-start: 4px solid var(--steel);
   }
 
-  /* Urgency is a border weight, not a colour riot. Red is reserved for the
-     bridge being up, which is the one thing this page exists to shout. */
+  /* Urgency rides the registration rule's colour at a constant weight, not a
+     colour riot. Red is reserved for the bridge being up, which is the one
+     thing this page exists to shout. */
   .signal-card[data-urgency='action'] {
     border-inline-start-color: var(--channel);
   }

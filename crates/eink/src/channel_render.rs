@@ -5,17 +5,17 @@ use crate::{
     ChannelAvailability, ChannelCard, ChannelCardError, ChannelFrame, ChannelUrgency, MonoFrame,
     RadarFigure,
     channel::display_ascii,
+    panel_rail::{self, CONTENT_WIDTH},
     render_primitives::{
-        STRONG_GLYPH_WIDTH, fill, fit, label, large, line, outline, strong, text_width, wrap,
+        LABEL_GLYPH_WIDTH, STRONG_GLYPH_WIDTH, fill, fit, label, large, line, outline, strong,
+        text_width, wrap,
     },
 };
 
-const CONTENT_WIDTH: u32 = 232;
 /// Left edge of the radar figure, and therefore the right edge of the headline
 /// when one is present.
 const RADAR_FIGURE_X: i32 = 132;
 const RADAR_FIGURE_Y: i32 = 30;
-const RAIL_LEFT: i32 = 232;
 const SOURCE_TAPE_TOP: i32 = 108;
 
 /// Failure to turn a generic channel card into pixels.
@@ -70,34 +70,42 @@ pub fn render_channel_frame(frame: &ChannelFrame) -> Result<MonoFrame, ChannelRe
     render_channel_card(frame)
 }
 
+/// Identity strip: which channel, and how loudly it is speaking.
+///
+/// Urgency sits here rather than beside the title because the title row now
+/// carries the subject alone. The card used to print that subject twice — once
+/// here and again in the tape along the bottom — on a panel with roughly six
+/// usable rows.
 fn draw_header(frame: &mut MonoFrame, card: &ChannelCard) {
     fill(frame, 0, 0, CONTENT_WIDTH, 15, BinaryColor::On);
-    let availability = card.availability.label();
-    let right_x = 228 - text_width(availability, 6);
-    let label_width = usize::try_from((right_x - 10).max(6) / 6).unwrap_or(1);
+    let urgency = card.urgency.label();
+    let right_x = 228 - text_width(urgency, LABEL_GLYPH_WIDTH);
+    let channel_width = characters_between(4, right_x);
     label(
         frame,
         4,
         2,
-        &fit(card.channel.label(), label_width),
+        &fit(card.channel.label(), channel_width),
         BinaryColor::Off,
     );
-    label(frame, right_x, 2, availability, BinaryColor::Off);
+    label(frame, right_x, 2, urgency, BinaryColor::Off);
 }
 
+/// The subject, with the whole row to itself.
 fn draw_title(frame: &mut MonoFrame, card: &ChannelCard) {
-    let urgency = card.urgency.label();
-    let right_x = 228 - text_width(urgency, 6);
-    let title_width = usize::try_from((right_x - 10).max(6) / 6).unwrap_or(1);
     label(
         frame,
         4,
         17,
-        &fit(&card.title, title_width),
+        &fit(&card.title, characters_between(4, 228)),
         BinaryColor::On,
     );
-    label(frame, right_x, 17, urgency, BinaryColor::On);
     line(frame, 4, 28, 228, 28, BinaryColor::On);
+}
+
+/// Characters of the label face that fit between two x positions.
+fn characters_between(left: i32, right: i32) -> usize {
+    usize::try_from(((right - left - 4).max(LABEL_GLYPH_WIDTH)) / LABEL_GLYPH_WIDTH).unwrap_or(1)
 }
 
 fn draw_headline(frame: &mut MonoFrame, card: &ChannelCard, has_radar: bool) {
@@ -136,15 +144,35 @@ fn draw_detail(frame: &mut MonoFrame, card: &ChannelCard) {
     line(frame, 4, 86, 228, 86, BinaryColor::On);
 }
 
+/// The action line, and the panel's emphasis ration.
+///
+/// Inversion is the only emphasis a one-bit panel has, and exactly one content
+/// band may spend it: which one is itself the signal. Below critical the action
+/// takes it, because the useful thing is what to do. At critical the headline
+/// takes it instead, because the useful thing is what is happening — and the
+/// action falls back to a heavy rule rather than competing. A critical card used
+/// to invert its header, its headline, its action and its tape, four bands out
+/// of six, which left the most urgent card on the panel with the least internal
+/// hierarchy.
 fn draw_action(frame: &mut MonoFrame, card: &ChannelCard) {
-    let inverse = card.urgency.is_interrupting();
+    let headline_owns_emphasis = card.urgency == ChannelUrgency::Critical;
+    let inverse = card.urgency.is_interrupting() && !headline_owns_emphasis;
     if inverse {
         fill(frame, 4, 89, 224, 16, BinaryColor::On);
     } else {
-        outline(frame, 4, 89, 224, 16, 1);
+        outline(
+            frame,
+            4,
+            89,
+            224,
+            16,
+            if headline_owns_emphasis { 2 } else { 1 },
+        );
         if card.urgency == ChannelUrgency::Advisory {
-            line(frame, 7, 91, 7, 102, BinaryColor::On);
-            line(frame, 9, 91, 9, 102, BinaryColor::On);
+            // One solid registration edge, which is the system's own mark for a
+            // state. The two hairlines this replaces read at panel scale as a
+            // stray artefact or a pause glyph rather than as advisory.
+            fill(frame, 4, 89, 3, 16, BinaryColor::On);
         }
     }
     strong(
@@ -167,8 +195,12 @@ const ACTION_TEXT_X: i32 = 13;
 /// by truncating rather than by printing over its own border.
 const ACTION_CHARACTERS: usize = ((228 - ACTION_TEXT_X) / STRONG_GLYPH_WIDTH) as usize;
 
-/// Bottom tape: what this card is about on the left, how current it is on the
-/// right.
+/// Bottom tape: whether this reading can be trusted, and how old it is.
+///
+/// The tape owns freshness outright. It used to repeat the title on the left
+/// while the header carried the availability word and the rail carried a
+/// one-letter code for the same thing — the subject printed twice, the freshness
+/// three times, on a panel where every row is contested.
 ///
 /// The feed that produced the reading is deliberately absent. It was printed
 /// here on every non-bridge card long after the bridge frame had been stripped
@@ -184,79 +216,43 @@ fn draw_source_tape(frame: &mut MonoFrame, card: &ChannelCard) {
         14,
         BinaryColor::On,
     );
-    let right = source_state(card);
-    let right_x = 228 - text_width(&right, 6);
-    let subject_width = usize::try_from((right_x - 10).max(6) / 6).unwrap_or(1);
-    label(
-        frame,
-        4,
-        109,
-        &fit(&card.title, subject_width),
-        BinaryColor::Off,
-    );
-    label(frame, right_x, 109, &right, BinaryColor::Off);
+    // One vocabulary for one state. An unconfigured channel used to call itself
+    // UNAVAILABLE in the header and NOT READY down here.
+    let state = card.availability.label();
+    label(frame, 4, 109, state, BinaryColor::Off);
+
+    let age = source_age(card);
+    let right_x = 228 - text_width(&age, LABEL_GLYPH_WIDTH);
+    label(frame, right_x, 109, &age, BinaryColor::Off);
 }
 
-fn source_state(card: &ChannelCard) -> String {
-    match card.availability {
-        ChannelAvailability::Current => format!(
-            "AGE {}",
-            card.source.age_label().unwrap_or_else(|| "--".into())
-        ),
-        ChannelAvailability::Stale => format!(
-            "STALE {}",
-            card.source.age_label().unwrap_or_else(|| "--".into())
-        ),
-        ChannelAvailability::Offline => card
-            .source
-            .age_label()
-            .map_or_else(|| "NO LINK".into(), |age| format!("LAST {age}")),
-        ChannelAvailability::Unavailable => "NOT READY".into(),
+/// How old the reading is, in the fewest characters that stay honest.
+fn source_age(card: &ChannelCard) -> String {
+    match (card.availability, card.source.age_label()) {
+        // Nothing has ever been collected, so there is no age to report and a
+        // dash would imply a reading that briefly existed.
+        (ChannelAvailability::Unavailable, _) => String::new(),
+        (_, Some(age)) => age,
+        (_, None) => "NO READING".into(),
     }
 }
 
+/// The shared rail. The availability letter it used to carry is gone: the tape
+/// says the same thing in a word, and a lone `X` explained nothing.
 fn draw_rail(frame: &mut MonoFrame, card: &ChannelCard) {
-    fill(frame, RAIL_LEFT, 0, 18, 122, BinaryColor::On);
-    let code = display_ascii(card.channel.code());
-    for (index, character) in code.chars().take(2).enumerate() {
-        strong(
-            frame,
-            237,
-            2 + i32::try_from(index * 13).unwrap_or(0),
-            &character.to_string(),
-            BinaryColor::Off,
-        );
-    }
-    line(frame, 235, 29, 247, 29, BinaryColor::Off);
-
-    let active_slot = urgency_slot(card.urgency);
-    for index in 0..4 {
-        let y = 39 + index * 10;
-        let length = if index % 2 == 0 { 10 } else { 7 };
-        line(frame, 248 - length, y, 248, y, BinaryColor::Off);
-        if index == active_slot {
-            fill(frame, 234, y - 2, 14, 5, BinaryColor::Off);
-        }
-    }
-
-    line(frame, 235, 80, 247, 80, BinaryColor::Off);
-    label(
+    panel_rail::draw_rail(
         frame,
-        238,
-        84,
-        availability_code(card.availability),
-        BinaryColor::Off,
+        &display_ascii(card.channel.code()),
+        urgency_slot(card.urgency),
+        URGENCY_SLOTS,
+        card.urgency.is_interrupting(),
     );
-
-    if card.urgency.is_interrupting() {
-        for y in (100..122).step_by(7) {
-            line(frame, 233, y + 5, 240, y, BinaryColor::Off);
-            line(frame, 241, y + 5, 249, y, BinaryColor::Off);
-        }
-    }
 }
 
-const fn urgency_slot(urgency: ChannelUrgency) -> i32 {
+/// Rungs on the card's ladder, one per urgency, loudest at the top.
+const URGENCY_SLOTS: usize = 4;
+
+const fn urgency_slot(urgency: ChannelUrgency) -> usize {
     match urgency {
         ChannelUrgency::Critical => 0,
         ChannelUrgency::Urgent => 1,
@@ -265,18 +261,10 @@ const fn urgency_slot(urgency: ChannelUrgency) -> i32 {
     }
 }
 
-const fn availability_code(availability: ChannelAvailability) -> &'static str {
-    match availability {
-        ChannelAvailability::Current => "L",
-        ChannelAvailability::Stale => "S",
-        ChannelAvailability::Offline => "O",
-        ChannelAvailability::Unavailable => "X",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render_primitives::TRUNCATION_MARK;
     use crate::{ChannelKind, ChannelSource, radar_figure_from_png};
 
     fn card(kind: ChannelKind, urgency: ChannelUrgency) -> ChannelCard {
@@ -368,8 +356,28 @@ mod tests {
     fn wrapping_prefers_words_and_truncates_only_the_final_line() {
         assert_eq!(
             wrap("TRACK SHIFTED TWENTY FOUR MILES WEST OF MIAMI", 22, 2),
-            vec!["TRACK SHIFTED TWENTY", "FOUR MILES WEST OF MI."]
+            vec!["TRACK SHIFTED TWENTY", "FOUR MILES WEST OF MI>"]
         );
+    }
+
+    /// Copy that was cut has to look cut. The mark used to be a full stop, so
+    /// "UNTIL 6:15 PM FOR DOWNTOWN MIAMI AND." read as a finished sentence and
+    /// silently dropped the rest of a life-safety warning.
+    #[test]
+    fn truncated_copy_cannot_be_mistaken_for_a_finished_sentence() {
+        let cut = fit("MOVE TO HIGHER GROUND IMMEDIATELY AND DO NOT DRIVE", 26);
+        assert!(
+            !cut.ends_with('.'),
+            "{cut:?} ends in punctuation that reads as the end of the sentence"
+        );
+        assert!(cut.ends_with(TRUNCATION_MARK));
+        assert_eq!(cut.chars().count(), 26);
+    }
+
+    /// ...and the mark sits against the last word rather than after a gap.
+    #[test]
+    fn the_truncation_mark_does_not_float_off_the_last_word() {
+        assert_eq!(fit("MOVE TO HIGHER GROUND", 9), "MOVE TO>");
     }
 
     /// Mirrors the bridge-frame guarantee for channel cards.

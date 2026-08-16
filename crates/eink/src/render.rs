@@ -5,11 +5,9 @@ use crate::{
     ConfidenceBand, LiveSnapshot, MonoFrame, SnapshotState, SpanStatus,
     channel::display_ascii,
     model::SnapshotError,
-    render_primitives::{fill, fit, huge, label, line, strong, text_width},
+    panel_rail::{self, CONTENT_WIDTH},
+    render_primitives::{fill, fit, huge, label, line, text_width},
 };
-
-const CONTENT_WIDTH: u32 = 232;
-const RAIL_LEFT: i32 = 232;
 
 /// Small set of layout controls which remain stable across live snapshots.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,7 +119,9 @@ fn draw_timing(frame: &mut MonoFrame, snapshot: &LiveSnapshot) {
         (true, None) => "OPENING EXPECTED".into(),
         _ => snapshot.state.road_meaning().to_owned(),
     };
-    let word = fit(&headline, 23);
+    // 22 rather than 23: the bolding pass adds a pixel to the right of the last
+    // stem, and at the longest permitted string that reached into the rail.
+    let word = fit(&headline, 22);
     let x = ((CONTENT_WIDTH as i32 - text_width(&word, 10)) / 2).max(2);
     huge(frame, x, 66, &word, BinaryColor::On);
 
@@ -147,6 +147,9 @@ fn spans_to_draw(snapshot: &LiveSnapshot) -> Vec<&SpanStatus> {
     chosen
 }
 
+/// Height of the counterweight housings above the deck.
+const HOUSING_RISE: i32 = 7;
+
 /// Double-leaf bascule glyph in a 78x24 box anchored at `x, y`.
 ///
 /// Each leaf is hinged over its own pier and the free ends meet at midspan when
@@ -168,6 +171,29 @@ fn draw_bascule(frame: &mut MonoFrame, x: i32, y: i32, open: bool, color: Binary
     // Fixed approach spans either side.
     line(frame, x, deck, left_pier, deck, color);
     line(frame, right_pier, deck, x + 74, deck, color);
+
+    // Counterweight housings standing above the deck at each hinge.
+    //
+    // Without them the closed state was a single unbroken horizontal line from
+    // one end of the box to the other, with the piers hidden underneath it: a
+    // rule, an equals sign, or a progress bar, but not a bridge. The glyph earns
+    // its pixels on the claim that a driver recognises the silhouette instantly,
+    // and that was only ever true of the open state. These give the closed state
+    // a profile of its own, and they mark where the leaves hinge from, so both
+    // states are visibly the same structure doing different things.
+    // Solid rather than outlined: at this size an outline is four hairlines that
+    // dissolve at reading distance, and mass is the only thing a one-bit panel
+    // can rely on being seen.
+    for pier in [left_pier, right_pier] {
+        fill(
+            frame,
+            pier - 2,
+            deck - HOUSING_RISE,
+            5,
+            HOUSING_RISE.unsigned_abs(),
+            color,
+        );
+    }
 
     if open {
         // Near-vertical, as a bascule sits at full open, leaving a clear gap
@@ -228,38 +254,19 @@ fn draw_spans(frame: &mut MonoFrame, spans: &[&SpanStatus]) {
 }
 
 fn draw_rail(frame: &mut MonoFrame, snapshot: &LiveSnapshot, config: &RenderConfig) {
-    fill(frame, RAIL_LEFT, 0, 18, 122, BinaryColor::On);
-    let code = fit(&config.channel_code, 2);
-    for (index, character) in code.chars().take(2).enumerate() {
-        strong(
-            frame,
-            237,
-            2 + i32::try_from(index * 13).unwrap_or(0),
-            &character.to_string(),
-            BinaryColor::Off,
-        );
-    }
-    line(frame, 235, 29, 247, 29, BinaryColor::Off);
-
-    let slot = state_slot(snapshot.state);
-    for index in 0..5 {
-        let y = 44 + index * 10;
-        let length = if index % 2 == 0 { 10 } else { 6 };
-        line(frame, 248 - length, y, 248, y, BinaryColor::Off);
-        if index == slot {
-            fill(frame, 234, y - 2, 14, 5, BinaryColor::Off);
-        }
-    }
-
-    if snapshot.state.is_interrupting() {
-        for y in (96..122).step_by(7) {
-            line(frame, 233, y + 5, 240, y, BinaryColor::Off);
-            line(frame, 241, y + 5, 249, y, BinaryColor::Off);
-        }
-    }
+    panel_rail::draw_rail(
+        frame,
+        &config.channel_code,
+        state_slot(snapshot.state),
+        STATE_SLOTS,
+        snapshot.state.is_interrupting(),
+    );
 }
 
-const fn state_slot(state: SnapshotState) -> i32 {
+/// Rungs on the bridge ladder, one per state.
+const STATE_SLOTS: usize = 5;
+
+const fn state_slot(state: SnapshotState) -> usize {
     match state {
         SnapshotState::Likely => 0,
         SnapshotState::Open => 1,

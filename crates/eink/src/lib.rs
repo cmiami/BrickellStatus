@@ -10,6 +10,7 @@ mod channel;
 mod channel_render;
 mod frame;
 mod model;
+mod panel_rail;
 mod preview;
 mod protocol;
 pub mod radar;

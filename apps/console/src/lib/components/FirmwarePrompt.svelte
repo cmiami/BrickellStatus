@@ -135,7 +135,7 @@
 
     {#if flashing}
       <div class="progress" aria-live="polite">
-        <div class="bar"><span style={`width:${percent}%`}></span></div>
+        <div class="bar"><span style={`--progress:${percent / 100}`}></span></div>
         <small>
           {stage === 'verifying' ? 'Verifying' : 'Writing'} · {percent}% ·
           do not unplug the board
@@ -215,11 +215,17 @@
     border: 1px solid var(--marine);
   }
 
+  /* Scaled rather than resized: the flash is writing to a serial bootloader on
+     the same machine, and a bar that relayouts on every progress event competes
+     with the one job that must not stall. */
   .bar span {
     display: block;
+    width: 100%;
     height: 100%;
     background: var(--amber);
-    transition: width 200ms linear;
+    transform: scaleX(var(--progress, 0));
+    transform-origin: left center;
+    transition: transform 200ms linear;
   }
 
   .progress small,

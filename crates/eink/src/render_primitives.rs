@@ -14,16 +14,27 @@ use embedded_graphics::{
 
 use crate::{MonoFrame, channel::display_ascii};
 
+/// Mark left where copy was cut.
+///
+/// Not a full stop, which is what this used to append. On a life-safety card a
+/// truncation the reader cannot see is a correctness problem: "UNTIL 6:15 PM FOR
+/// DOWNTOWN MIAMI AND." reads as a finished sentence and quietly drops the rest
+/// of the warning. A character that cannot end a sentence says "there was more"
+/// without ever being mistaken for punctuation.
+pub(crate) const TRUNCATION_MARK: char = '>';
+
 pub(crate) fn fit(value: &str, characters: usize) -> String {
     let value = display_ascii(value);
     if value.chars().count() <= characters {
         return value;
     }
-    value
-        .chars()
-        .take(characters.saturating_sub(1))
-        .collect::<String>()
-        + "."
+    let mut fitted: String = value.chars().take(characters.saturating_sub(1)).collect();
+    // Trailing space before the mark reads as a gap rather than a cut.
+    while fitted.ends_with(' ') {
+        fitted.pop();
+    }
+    fitted.push(TRUNCATION_MARK);
+    fitted
 }
 
 pub(crate) fn wrap(value: &str, characters: usize, maximum_lines: usize) -> Vec<String> {
@@ -55,6 +66,9 @@ pub(crate) fn text_width(value: &str, glyph_width: i32) -> i32 {
 pub(crate) fn label(frame: &mut MonoFrame, x: i32, y: i32, value: &str, color: BinaryColor) {
     text(frame, x, y, value, MonoTextStyle::new(&FONT_6X10, color));
 }
+
+/// Advance width of the [`label`] face, for callers sizing a string to a box.
+pub(crate) const LABEL_GLYPH_WIDTH: i32 = 6;
 
 /// The emphatic small face: rail codes and the action line.
 ///
