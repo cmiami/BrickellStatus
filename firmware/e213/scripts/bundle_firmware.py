@@ -66,11 +66,30 @@ def git(*args: str) -> str:
     ).strip()
 
 
+def is_shallow() -> bool:
+    """Whether this checkout lacks the history the build id is derived from.
+
+    A shallow clone has no parent to diff against, so git attributes every
+    tracked path to the tip commit and the query below answers with the release
+    sha instead of the last firmware change. That is not a missing answer, it is
+    a confidently wrong one: it changes on every release, marks every device
+    outdated, and offers a reflash that writes byte-identical firmware.
+    """
+    try:
+        return git("rev-parse", "--is-shallow-repository") == "true"
+    except (subprocess.CalledProcessError, OSError):
+        return False
+
+
 def source_revision() -> str | None:
     """Identity of the firmware sources, matching what the device reports.
 
     Derived from the tracked firmware paths rather than HEAD so a commit that
     touches nothing under firmware/ does not make every device look outdated.
+
+    This must stay identical to `build_id.py`, which stamps the same value into
+    the banner the device speaks: the app compares the two strings, so any
+    disagreement reports every board as running the wrong firmware.
     """
     try:
         revision = git("log", "-1", "--format=%h", "--", *BUILD_ID_PATHS)
@@ -128,6 +147,11 @@ def main() -> int:
         help="package whatever is already in .pio/build instead of compiling",
     )
     arguments = parser.parse_args()
+
+    if is_shallow():
+        print("This is a shallow clone, so the firmware build id cannot be trusted.")
+        print("Run `git fetch --unshallow`, or set fetch-depth: 0 on the checkout.")
+        return 1
 
     if OUTPUT_ROOT.exists():
         shutil.rmtree(OUTPUT_ROOT)

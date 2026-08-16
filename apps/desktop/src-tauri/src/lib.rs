@@ -10,7 +10,7 @@ use std::{
     process::Command,
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -272,6 +272,22 @@ impl ActiveDisplay {
     }
 }
 
+/// How many refused frames in a row it takes before the app is willing to say
+/// the board is not running this firmware. One is a dropped frame; two in a row
+/// on a route that has never been acknowledged is a board that cannot take one.
+const UNANSWERED_FRAMES_BEFORE_BLAME: u32 = 2;
+
+/// How long the kernel is given to actually free the serial descriptor after
+/// the display connection drops. espflash sees a stale one and reports the port
+/// busy, which reads to the operator as a flash that failed for no reason.
+const PORT_HANDOFF_DELAY: Duration = Duration::from_millis(600);
+
+/// How long a freshly flashed board is given to come back on the USB bus before
+/// the app tries to talk to it. espflash finishes with a hard reset, so the
+/// device disappears and re-enumerates; opening into that gap fails for a reason
+/// that has nothing to do with the board.
+const BOOT_SETTLE_AFTER_FLASH: Duration = Duration::from_millis(1_800);
+
 struct DisplayController {
     operation: AsyncMutex<()>,
     active: RwLock<Option<ActiveDisplay>>,
@@ -280,6 +296,13 @@ struct DisplayController {
     rotation_index: AtomicU64,
     automatic_reconnect: std::sync::atomic::AtomicBool,
     delivery_armed: std::sync::atomic::AtomicBool,
+    /// Frames sent to a connected board that went unacknowledged in a row.
+    ///
+    /// A board that will not take a frame is the only reliable sign of a board
+    /// that is not running this firmware — the banner that would say so is
+    /// spoken at boot and nowhere else. Counted, not latched, so one dropped
+    /// frame does not condemn a working board.
+    unanswered_frames: AtomicU32,
     preferred_usb_port: AsyncMutex<Option<String>>,
     preferred_ble_id: AsyncMutex<Option<String>>,
 }
@@ -306,6 +329,7 @@ impl DisplayController {
             // intentionally not persisted.
             automatic_reconnect: std::sync::atomic::AtomicBool::new(saved_usb.is_some()),
             delivery_armed: std::sync::atomic::AtomicBool::new(false),
+            unanswered_frames: AtomicU32::new(0),
             preferred_usb_port: AsyncMutex::new(saved_usb),
             preferred_ble_id: AsyncMutex::new(None),
         }
@@ -331,6 +355,47 @@ impl DisplayController {
 
     fn delivery_armed(&self) -> bool {
         self.delivery_armed.load(Ordering::Relaxed)
+    }
+
+    /// A frame came back with `ACK INK1`. Only this firmware sends that, so the
+    /// route is proven and any earlier refusals are history.
+    fn note_frame_acknowledged(&self) {
+        self.delivery_armed.store(true, Ordering::Relaxed);
+        self.unanswered_frames.store(0, Ordering::Relaxed);
+    }
+
+    /// A frame went unanswered. Counted rather than latched: one dropped frame
+    /// is not a board running the wrong firmware.
+    fn note_frame_unanswered(&self) {
+        self.unanswered_frames.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// What the live route says about the board, for the firmware decision.
+    ///
+    /// An acknowledged frame is `ACK INK1`, which only this firmware sends, so
+    /// it settles the question outright. Repeated refusals settle it the other
+    /// way. Anything less is not evidence, and the firmware prompt must not
+    /// invent any: reading "has not spoken" as "is not running our firmware" is
+    /// what asked someone to reflash a board they had just flashed.
+    async fn usb_route_evidence(&self) -> firmware::RouteEvidence {
+        if !matches!(
+            self.active.read().await.as_ref(),
+            Some(ActiveDisplay::Usb { .. })
+        ) {
+            return firmware::RouteEvidence::Absent;
+        }
+        // Refusals are read before the acknowledgement, not after it. A board
+        // that answered once and then stopped taking frames is a board that has
+        // died since, and reading the old acknowledgement first would make that
+        // unsayable for the rest of the session — the route would report itself
+        // healthy while the panel sat frozen.
+        if self.unanswered_frames.load(Ordering::Relaxed) >= UNANSWERED_FRAMES_BEFORE_BLAME {
+            firmware::RouteEvidence::Failing
+        } else if self.delivery_armed() {
+            firmware::RouteEvidence::Acknowledged
+        } else {
+            firmware::RouteEvidence::Pending
+        }
     }
 
     async fn scan(
@@ -426,6 +491,7 @@ impl DisplayController {
         *self.active.write().await = Some(active);
         self.automatic_reconnect.store(true, Ordering::Relaxed);
         self.delivery_armed.store(false, Ordering::Relaxed);
+        self.unanswered_frames.store(0, Ordering::Relaxed);
         *self.last_frame.lock().await = None;
         Ok(status)
     }
@@ -458,16 +524,42 @@ impl DisplayController {
         Ok(status)
     }
 
-    /// Frees the serial interface so the flasher can take it.
+    /// Runs a flash with the serial port released, and hands the port back
+    /// afterwards no matter how the write ended.
+    ///
+    /// Releasing and restoring are one operation, expressed as one, because the
+    /// reported bug was the seam between them: the release was unconditional and
+    /// the restore was not, so flashing a board that nothing was connected to
+    /// parked automatic reconnect for the rest of the session. There is now no
+    /// call site that can release the port and forget to give it back.
+    async fn holding_the_port_for_flash<T>(
+        &self,
+        preferences: &AppPreferences,
+        write: impl Future<Output = T>,
+    ) -> T {
+        let was_connected = self.release_port_for_flash().await;
+        debug!(was_connected, "released the display port to flash");
+        // The kernel does not always free the descriptor the instant the handle
+        // drops; espflash sees the stale one and reports it busy.
+        tokio::time::sleep(PORT_HANDOFF_DELAY).await;
+        let outcome = write.await;
+        self.restore_port_after_flash(preferences).await;
+        outcome
+    }
+
+    /// Drops the connection and parks automatic reconnect for the write.
+    ///
+    /// Private to the bracket above: on its own this leaves the display parked,
+    /// which is only ever correct for the length of a flash.
     ///
     /// Flashing drives the same USB CDC device the display transport holds
     /// open, and macOS hands that out exclusively: leaving the connection up
     /// makes espflash fail immediately with "Device or resource busy".
-    /// Automatic reconnect is suppressed for the same reason -- a background
+    /// Automatic reconnect is suppressed for the same reason — a background
     /// reconnect that wins the port mid-write would leave a half-written
     /// bootloader, which is the one outcome that actually bricks the board.
     ///
-    /// Returns whether a display was connected, so it can be restored after.
+    /// Returns whether a display was connected, for the log line.
     async fn release_port_for_flash(&self) -> bool {
         let was_connected = self.active.read().await.is_some();
         let _ = self.disconnect(true).await;
@@ -475,9 +567,27 @@ impl DisplayController {
     }
 
     /// Restores the display connection after flashing.
+    ///
+    /// Called whether or not a display was connected when the flash started,
+    /// and this is the whole point: releasing the port parks automatic
+    /// reconnect, and a flash offered *because* nothing was talking to the
+    /// board is exactly the case where nothing was connected to restore. Leaving
+    /// the park in place then stranded the freshly flashed board on its boot
+    /// screen for the rest of the session — the app had written the firmware
+    /// and then refused to talk to it until it was relaunched.
     async fn restore_port_after_flash(&self, preferences: &AppPreferences) {
         self.automatic_reconnect.store(true, Ordering::Relaxed);
-        let _ = self.reconnect_preferred(preferences).await;
+        // espflash leaves the board in a hard reset, so it is re-enumerating
+        // over USB for a moment. Reconnecting into that gap fails for no reason
+        // worth reporting; waiting also puts the open near the board's boot,
+        // which is the only moment the READY banner can still be heard.
+        tokio::time::sleep(BOOT_SETTLE_AFTER_FLASH).await;
+        if let Err(error) = self.reconnect_preferred(preferences).await {
+            // Not fatal: automatic reconnect is on again, so the display worker
+            // retries on its own ladder. Worth recording, because a board that
+            // never comes back after a flash is a genuine failure.
+            warn!(%error, "display did not reconnect immediately after flashing");
+        }
     }
 
     /// Whether a connected USB display already announced itself.
@@ -508,6 +618,9 @@ impl DisplayController {
 
     async fn disconnect_locked(&self) -> Result<(), String> {
         let active = self.active.write().await.take();
+        // Delivery history belongs to a connection: the next one may not even
+        // be the same board, so it starts with nothing held against it.
+        self.unanswered_frames.store(0, Ordering::Relaxed);
         *self.last_frame.lock().await = None;
         if let Some(active) = active {
             active.disconnect().await?;
@@ -651,8 +764,14 @@ impl DisplayController {
         } else {
             RefreshMode::Fast
         };
-        let receipt = active.send(frame, refresh).await?;
-        self.delivery_armed.store(true, Ordering::Relaxed);
+        let receipt = match active.send(frame, refresh).await {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                self.note_frame_unanswered();
+                return Err(error);
+            }
+        };
+        self.note_frame_acknowledged();
         self.frames_sent.fetch_add(1, Ordering::Relaxed);
         *self.last_frame.lock().await = Some(frame.packed().to_vec());
         Ok(Some((receipt, active.name().to_owned())))
@@ -821,14 +940,14 @@ async fn get_firmware_status(
     };
 
     // Enumeration alone cannot say whether the board is running our firmware,
-    // only that something Espressif is attached. Opening the port and waiting
-    // for the READY INK1 banner is the only way to tell a working device from a
-    // blank one, and a blank one is the case worth prompting about.
-    //
-    // The banner does not yet carry a build id in the field -- the firmware that
-    // reports one has not shipped to any device -- so a board that answers is
-    // reported as an unknown build rather than as matching. That is the honest
-    // reading: it works, and we cannot say which build it is.
+    // only that something Espressif is attached. The board names itself in its
+    // READY INK1 banner, but it speaks that line once, at boot, and opening the
+    // port deliberately does not reset it — so hearing nothing is the ordinary
+    // case for a board that has been running happily for a minute, and means
+    // only that this app did not happen to be listening at the right moment.
+    // Whether that silence is worth a prompt is not decided here; it is decided
+    // against what the app remembers writing and what the display route is
+    // actually managing to deliver.
     let probe = match port.as_deref() {
         None => firmware::DeviceProbe::NoPort,
         // A connected display already answered this question when it connected,
@@ -841,10 +960,7 @@ async fn get_firmware_status(
                 Some(banner) => {
                     firmware::DeviceProbe::Answered(firmware::DeviceBanner::parse(&banner))
                 }
-                None => firmware::DeviceProbe::Answered(firmware::DeviceBanner {
-                    saw_ready: connected_ready.unwrap_or(false),
-                    build: None,
-                }),
+                None => firmware::DeviceProbe::Silent,
             }
         }
         Some(port) => {
@@ -859,13 +975,12 @@ async fn get_firmware_status(
             // moment. That says nothing about the firmware on the board, so it
             // must not be reported as a board that failed to answer.
             let probe = match transport.ensure_connected().await {
-                Ok(info) => firmware::DeviceProbe::Answered(match info.banner.as_deref() {
-                    Some(banner) => firmware::DeviceBanner::parse(banner),
-                    None => firmware::DeviceBanner {
-                        saw_ready: info.ready_observed,
-                        build: None,
-                    },
-                }),
+                Ok(info) => match info.banner.as_deref() {
+                    Some(banner) => {
+                        firmware::DeviceProbe::Answered(firmware::DeviceBanner::parse(banner))
+                    }
+                    None => firmware::DeviceProbe::Silent,
+                },
                 Err(error) => {
                     debug!(%error, "firmware probe could not open the port; not prompting");
                     firmware::DeviceProbe::Unreachable
@@ -892,6 +1007,7 @@ async fn get_firmware_status(
         &probe,
         bundle.source_revision.as_deref(),
         remembered.as_ref(),
+        state.display.usb_route_evidence().await,
     );
 
     Ok(FirmwareStatus {
@@ -928,66 +1044,98 @@ async fn flash_firmware(
         .clone();
     let bundled_build = bundle.source_revision.clone();
     let variant_id_for_record = variant_id.clone();
-    let port_for_record = port.clone();
-
-    // The display transport holds this same USB CDC device open and macOS hands
-    // it out exclusively, so flashing while connected fails instantly with
-    // "Device or resource busy". Release it first, and keep automatic reconnect
-    // suppressed: a reconnect that wins the port mid-write would leave a
-    // half-written bootloader, which is the one outcome that truly bricks the
-    // board.
-    let was_connected = state.display.release_port_for_flash().await;
-    // The kernel does not always free the descriptor the instant the handle
-    // drops; espflash sees the stale one and reports it busy.
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    // Read the board's identity now, while it is still enumerated and holding
+    // still. Afterwards it is in a hard reset and re-enumerating, and a lookup
+    // that comes back empty in that gap loses the record — which is the record
+    // that stops the next launch asking to flash the board it just flashed.
+    let identity_before_write = attached_board_serial(&port).await;
+    let port_for_status = port.clone();
 
     // espflash drives the serial bootloader synchronously and a flash takes
     // tens of seconds, so it must not run on the async runtime.
     let emitter = app.clone();
-    let outcome = tauri::async_runtime::spawn_blocking(move || {
-        let mut progress = EmitProgress {
-            app: emitter,
-            total: variant.total_bytes(),
-            done: 0,
-            current: 0,
-        };
-        firmware::flash_variant(&port, &variant, &mut progress)
-    })
-    .await
-    .map_err(|error| error.to_string())?;
-
-    // Restore the display whether or not the flash worked. A failed flash that
-    // also leaves the display disconnected turns one problem into two.
-    if was_connected {
-        let preferences = state.engine.get_preferences().await;
-        state.display.restore_port_after_flash(&preferences).await;
-    }
-    outcome.map_err(|error| error.to_string())?;
+    let preferences = state.engine.get_preferences().await;
+    let outcome = state
+        .display
+        .holding_the_port_for_flash(&preferences, async move {
+            tauri::async_runtime::spawn_blocking(move || {
+                let mut progress = EmitProgress {
+                    app: emitter,
+                    total: variant.total_bytes(),
+                    done: 0,
+                    current: 0,
+                };
+                firmware::flash_variant(&port, &variant, &mut progress)
+            })
+            .await
+            .map_err(|error| error.to_string())
+        })
+        .await;
+    outcome?.map_err(|error| error.to_string())?;
 
     // Remember what went onto which board. The banner is only spoken at boot
     // and the port is usually held by the display worker, so a device that is
     // running exactly this build routinely cannot say so — and was being
     // prompted to flash again on every launch as a result.
-    if let Some(serial) = attached_board_serial(&port_for_record).await {
-        let record = firmware::FlashRecord {
-            serial_number: serial,
-            build: bundled_build.clone().unwrap_or_default(),
-            variant_id: variant_id_for_record,
-            flashed_at: Timestamp::now().to_string(),
-        };
-        if let Err(error) = state
-            .store
-            .set_json(FLASH_RECORD_KEY, &record, &Timestamp::now().to_string())
-            .await
-        {
-            warn!(%error, "could not record the firmware that was just written");
+    //
+    // Asked again only if the first reading came back empty: by now the board
+    // is back on the bus, so a lookup that landed in the enumeration gap still
+    // has a second chance rather than costing the record entirely.
+    let board_serial = board_identity_for_record(identity_before_write, || {
+        attached_board_serial(&port_for_status)
+    })
+    .await;
+    match board_serial {
+        Some(serial) => {
+            let record = firmware::FlashRecord {
+                serial_number: serial,
+                build: bundled_build.clone().unwrap_or_default(),
+                variant_id: variant_id_for_record,
+                flashed_at: Timestamp::now().to_string(),
+            };
+            if let Err(error) = state
+                .store
+                .set_json(FLASH_RECORD_KEY, &record, &Timestamp::now().to_string())
+                .await
+            {
+                warn!(%error, "could not record the firmware that was just written");
+            }
         }
+        // Without an identity for the board there is nothing to key the record
+        // to, and the next launch has only the board's own silence to go on.
+        None => warn!(
+            port = %port_for_status,
+            "flashed a board that reports no USB serial number; it cannot be remembered"
+        ),
     }
     Ok(())
 }
 
 /// Key for the last-flashed record in the settings table.
 const FLASH_RECORD_KEY: &str = "firmware.last_flash";
+
+/// Which reading of the board's identity the flash record is keyed to.
+///
+/// The reading taken before the write wins whenever there is one. A flash ends
+/// in a hard reset, so the lookup afterwards is asking about a port that was
+/// vacant a moment ago and may not be the same board when it fills again —
+/// recording that answer would attach this build to somebody else's hardware.
+/// The later reading is a fallback for the case that would otherwise be lost
+/// entirely: no identity at all, and a board that gets asked to flash again on
+/// the next launch because nothing remembers it.
+async fn board_identity_for_record<F, Fut>(
+    before_write: Option<String>,
+    after_write: F,
+) -> Option<String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Option<String>>,
+{
+    match before_write {
+        Some(serial) => Some(serial),
+        None => after_write().await,
+    }
+}
 
 /// The USB serial number of the board at `port`, when it reports one.
 async fn attached_board_serial(port: &str) -> Option<String> {

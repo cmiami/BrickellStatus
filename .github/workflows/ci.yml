@@ -21,6 +21,11 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The firmware build id is derived from history; see release-macos.yml.
+          # CI builds the same bundle, so it needs the same history to stamp the
+          # same identity and to exercise the manifest/image agreement test.
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

@@ -53,6 +53,234 @@ fn exact_saved_usb_route_is_armed_for_restart_reconnect() {
     assert!(!display.delivery_armed());
 }
 
+/// A USB display that has been opened but has not carried a frame yet, which is
+/// what the display worker holds between connecting and proving the route.
+fn connected_usb_display() -> ActiveDisplay {
+    ActiveDisplay::Usb {
+        name: "E213 on /dev/cu.usbmodem14B4201".into(),
+        transport: Arc::new(UsbTransport::new(UsbConfig {
+            port: Some("/dev/cu.usbmodem14B4201".into()),
+            ..UsbConfig::default()
+        })),
+        ready_observed: false,
+    }
+}
+
+/// The evidence the firmware decision runs on is read from the live route, not
+/// assumed. Every state below is produced by the same calls the delivery path
+/// makes, so a rename or a rewiring of the send path fails here rather than
+/// silently reporting a board as unproven forever.
+#[tokio::test]
+async fn route_evidence_is_absent_until_a_usb_display_is_actually_connected() {
+    let display = DisplayController::new(&AppPreferences::default());
+    assert_eq!(
+        display.usb_route_evidence().await,
+        firmware::RouteEvidence::Absent,
+        "with no display open, nothing is going to answer for the board"
+    );
+}
+
+#[tokio::test]
+async fn an_open_usb_route_is_pending_until_a_frame_is_answered() {
+    let display = DisplayController::new(&AppPreferences::default());
+    *display.active.write().await = Some(connected_usb_display());
+    assert_eq!(
+        display.usb_route_evidence().await,
+        firmware::RouteEvidence::Pending,
+        "an open route that has not been tried says nothing either way yet"
+    );
+}
+
+#[tokio::test]
+async fn an_acknowledged_frame_proves_the_route() {
+    let display = DisplayController::new(&AppPreferences::default());
+    *display.active.write().await = Some(connected_usb_display());
+    display.note_frame_acknowledged();
+    assert_eq!(
+        display.usb_route_evidence().await,
+        firmware::RouteEvidence::Acknowledged
+    );
+}
+
+#[tokio::test]
+async fn one_refused_frame_is_not_enough_to_condemn_a_board() {
+    let display = DisplayController::new(&AppPreferences::default());
+    *display.active.write().await = Some(connected_usb_display());
+    display.note_frame_unanswered();
+    assert_eq!(
+        display.usb_route_evidence().await,
+        firmware::RouteEvidence::Pending,
+        "a single dropped frame must not be read as the wrong firmware"
+    );
+}
+
+#[tokio::test]
+async fn refusals_in_a_row_are_what_condemn_a_board() {
+    let display = DisplayController::new(&AppPreferences::default());
+    *display.active.write().await = Some(connected_usb_display());
+    for _ in 0..UNANSWERED_FRAMES_BEFORE_BLAME {
+        display.note_frame_unanswered();
+    }
+    assert_eq!(
+        display.usb_route_evidence().await,
+        firmware::RouteEvidence::Failing
+    );
+}
+
+#[tokio::test]
+async fn an_acknowledgement_clears_the_refusals_before_it() {
+    let display = DisplayController::new(&AppPreferences::default());
+    *display.active.write().await = Some(connected_usb_display());
+    for _ in 0..UNANSWERED_FRAMES_BEFORE_BLAME {
+        display.note_frame_unanswered();
+    }
+    display.note_frame_acknowledged();
+    assert_eq!(
+        display.usb_route_evidence().await,
+        firmware::RouteEvidence::Acknowledged,
+        "a board that recovers is not still being judged on frames it dropped"
+    );
+}
+
+/// The converse, and the reason refusals are read before the acknowledgement: a
+/// board that answered once and then stopped answering has died since, and an
+/// acknowledgement kept from earlier in the session must not be able to speak
+/// for it. Otherwise the route calls itself healthy while the panel sits frozen,
+/// and the flash prompt can never be reached again without a relaunch.
+#[tokio::test]
+async fn a_board_that_dies_after_answering_stops_counting_as_proven() {
+    let display = DisplayController::new(&AppPreferences::default());
+    *display.active.write().await = Some(connected_usb_display());
+    display.note_frame_acknowledged();
+    for _ in 0..UNANSWERED_FRAMES_BEFORE_BLAME {
+        display.note_frame_unanswered();
+    }
+    assert_eq!(
+        display.usb_route_evidence().await,
+        firmware::RouteEvidence::Failing,
+        "an acknowledgement from earlier cannot vouch for a board that stopped"
+    );
+}
+
+#[tokio::test]
+async fn a_bluetooth_display_says_nothing_about_the_board_on_usb() {
+    let display = DisplayController::new(&AppPreferences::default());
+    *display.active.write().await = Some(ActiveDisplay::Ble {
+        name: "InkDock E213".into(),
+        transport: Arc::new(BleTransport::new(BleConfig::default())),
+    });
+    display.note_frame_acknowledged();
+    assert_eq!(
+        display.usb_route_evidence().await,
+        firmware::RouteEvidence::Absent,
+        "frames acknowledged over Bluetooth prove nothing about a USB board"
+    );
+}
+
+/// A flash ends in a hard reset, so the identity read afterwards describes a
+/// port that was vacant a moment earlier. The reading taken while the board was
+/// still sitting there is the one the record is keyed to.
+#[tokio::test]
+async fn the_board_identity_read_before_the_write_is_the_one_recorded() {
+    let recorded = board_identity_for_record(Some("F0:9E:9E:3B:26:B4".into()), || async {
+        Some("00:00:00:00:00:00".into())
+    })
+    .await;
+    assert_eq!(
+        recorded.as_deref(),
+        Some("F0:9E:9E:3B:26:B4"),
+        "a board that re-enumerated must not overwrite the identity we wrote to"
+    );
+}
+
+/// ...and asking again is only for the reading that came back empty, which is
+/// otherwise a board nothing remembers flashing — and so a board that gets
+/// offered the same flash again on the next launch.
+#[tokio::test]
+async fn an_identity_missed_before_the_write_is_asked_for_again_after_it() {
+    let recorded =
+        board_identity_for_record(None, || async { Some("F0:9E:9E:3B:26:B4".into()) }).await;
+    assert_eq!(recorded.as_deref(), Some("F0:9E:9E:3B:26:B4"));
+}
+
+#[tokio::test]
+async fn a_board_that_never_reports_an_identity_is_recorded_as_none() {
+    assert_eq!(
+        board_identity_for_record(None, || async { None }).await,
+        None
+    );
+}
+
+fn usb_preferences() -> AppPreferences {
+    let mut preferences = AppPreferences::default();
+    preferences.display.transport = DisplayTransport::Usb;
+    preferences.display.serial_port = "/dev/cu.usbmodem14B4201".into();
+    preferences
+}
+
+/// The reported bug, at the level it actually happened: flashing released the
+/// serial port and parked automatic reconnect, and only put it back when a
+/// display had been connected beforehand. A flash offered *because* nothing was
+/// talking to the board is exactly the case where nothing was connected — so
+/// the freshly flashed board sat on its boot screen until the app was
+/// relaunched, which is the only thing that cleared the park.
+///
+/// Driven through the real bracket rather than through a hand-made
+/// release/restore pair, because the defect was never in either half: it was in
+/// a caller that ran one and skipped the other.
+#[tokio::test(start_paused = true)]
+async fn flashing_hands_the_port_back_even_when_nothing_was_connected() {
+    let preferences = usb_preferences();
+    let display = DisplayController::new(&preferences);
+
+    let parked_during_write = display
+        .holding_the_port_for_flash(&preferences, async {
+            // Observed from inside the write: the port must stay parked for as
+            // long as espflash is driving the bootloader, or a reconnect that
+            // wins the port mid-write leaves a half-written board.
+            !display.automatic_reconnect_enabled()
+        })
+        .await;
+
+    assert!(parked_during_write, "the write must own the port alone");
+    assert!(
+        display.automatic_reconnect_enabled(),
+        "a flashed board must be reconnectable without relaunching the app"
+    );
+}
+
+/// ...and the same holds for the path that already worked, so the fix cannot be
+/// read as having moved the problem from one branch to the other.
+#[tokio::test(start_paused = true)]
+async fn flashing_hands_the_port_back_when_a_display_was_connected() {
+    let preferences = usb_preferences();
+    let display = DisplayController::new(&preferences);
+    *display.active.write().await = Some(connected_usb_display());
+
+    display
+        .holding_the_port_for_flash(&preferences, async {})
+        .await;
+    assert!(display.automatic_reconnect_enabled());
+}
+
+/// A failed write must not cost the display either. This is the one that turns
+/// one problem into two: the flash did not take *and* the panel goes quiet.
+#[tokio::test(start_paused = true)]
+async fn a_failed_flash_still_hands_the_port_back() {
+    let preferences = usb_preferences();
+    let display = DisplayController::new(&preferences);
+
+    let outcome: Result<(), &str> = display
+        .holding_the_port_for_flash(&preferences, async { Err("device or resource busy") })
+        .await;
+
+    assert!(outcome.is_err());
+    assert!(
+        display.automatic_reconnect_enabled(),
+        "a board that refused the write is still a board worth talking to"
+    );
+}
+
 #[test]
 fn aisstream_key_shape_is_bounded_and_control_free() {
     assert!(aisstream_key_shape_valid("12345678"));

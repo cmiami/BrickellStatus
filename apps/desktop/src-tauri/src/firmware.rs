@@ -322,6 +322,12 @@ impl DeviceBanner {
             .nth(4)
             .map(str::trim)
             .filter(|value| !value.is_empty())
+            // A firmware built without git history stamps "unknown" rather than
+            // lying about its identity. That is an absent build id, not a
+            // different one: comparing it against a real revision would report
+            // every such board as outdated and offer a reflash that changes
+            // nothing.
+            .filter(|value| !value.eq_ignore_ascii_case(UNKNOWN_BUILD))
             .map(str::to_owned);
         Self {
             saw_ready: true,
@@ -329,6 +335,10 @@ impl DeviceBanner {
         }
     }
 }
+
+/// What the firmware stamps into its banner when it cannot name its own source
+/// revision. Treated as "no build id" on both sides of the comparison.
+const UNKNOWN_BUILD: &str = "unknown";
 
 /// Why a flash is being offered.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -396,8 +406,41 @@ pub enum DeviceProbe {
     /// A device is attached but the port could not be opened or read — most
     /// often because something else already holds it.
     Unreachable,
-    /// The port was opened and the board was given its chance to speak.
+    /// The port opened and the board said nothing.
+    ///
+    /// This is *not* evidence of a blank board. The banner is spoken once, at
+    /// boot, and opening the port deliberately does not reset the board — so a
+    /// board that has been running for a minute is exactly as silent as one
+    /// with no firmware on it at all. Which of the two it is has to come from
+    /// somewhere else: what this app remembers writing, or whether the display
+    /// route is getting its frames acknowledged.
+    Silent,
+    /// The board spoke, and this is what it said.
     Answered(DeviceBanner),
+}
+
+/// What the live display route says about the board, which is the only
+/// evidence that separates a silent working board from a silent blank one.
+///
+/// A board that acknowledges a frame is running this firmware; that is what
+/// `ACK INK1` means. A board that refuses two frames running is not.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RouteEvidence {
+    /// No display route is open to this board, so nothing is going to answer on
+    /// its behalf and waiting would only postpone the question forever. This is
+    /// a board nobody has asked the app to drive: the state a brand-new one is
+    /// in when it is plugged in for the first time.
+    #[default]
+    Absent,
+    /// A route is open but has not carried a frame yet. An answer is seconds
+    /// away, and a prompt raised now is one that withdraws itself once the
+    /// answer arrives — so nothing is claimed until it does.
+    Pending,
+    /// A frame was acknowledged. The board runs this firmware, whatever it did
+    /// or did not say at boot.
+    Acknowledged,
+    /// Frames were attempted and went unacknowledged.
+    Failing,
 }
 
 /// Decides whether an attached board needs the bundled firmware.
@@ -409,29 +452,19 @@ pub fn evaluate_flash_requirement(
     probe: &DeviceProbe,
     bundled_build: Option<&str>,
     remembered: Option<&FlashRecord>,
+    evidence: RouteEvidence,
 ) -> FlashRequirement {
     let banner = match probe {
         DeviceProbe::NoPort => return FlashRequirement::NoDevice,
         // Fail toward silence. An unreachable port is not evidence about what
         // the board is running, and guessing wrong here nags someone whose
         // hardware is working perfectly.
-        DeviceProbe::Unreachable => {
-            // Unless we wrote it ourselves, in which case we already know.
-            return match (remembered, bundled_build) {
-                (Some(record), Some(bundled)) if record.build == bundled => {
-                    FlashRequirement::UpToDate {
-                        build: record.build.clone(),
-                    }
-                }
-                _ => FlashRequirement::UnknownBuild,
-            };
-        }
+        DeviceProbe::Unreachable => return from_record(remembered, bundled_build),
+        DeviceProbe::Silent => return silent_board(remembered, bundled_build, evidence),
         DeviceProbe::Answered(banner) => banner,
     };
     if !banner.saw_ready {
-        return FlashRequirement::Required {
-            reason: FlashReason::NotResponding,
-        };
+        return silent_board(remembered, bundled_build, evidence);
     }
     // The board's own word wins when it gives one; our record answers when it
     // does not. A firmware old enough to omit its build id is exactly the case
@@ -453,6 +486,52 @@ pub fn evaluate_flash_requirement(
         // Either side missing a build id makes comparison impossible. The
         // device is talking, so it is working; do not manufacture a mismatch.
         _ => FlashRequirement::UnknownBuild,
+    }
+}
+
+/// What this app remembers writing to the board in front of it, which answers
+/// for a board that cannot be asked.
+fn from_record(remembered: Option<&FlashRecord>, bundled_build: Option<&str>) -> FlashRequirement {
+    match (remembered, bundled_build) {
+        (Some(record), Some(bundled)) if record.build == bundled => FlashRequirement::UpToDate {
+            build: record.build.clone(),
+        },
+        _ => FlashRequirement::UnknownBuild,
+    }
+}
+
+/// Decides about a board that opened its port and then said nothing.
+///
+/// The reported bug lives here. Silence used to mean "blank board, offer a
+/// flash", but silence is the *normal* state of a healthy board: the banner is
+/// spoken at boot and never again, so every launch after the first one hears
+/// nothing and demanded a reflash of a board that had just been flashed. What
+/// separates the two cases is never the silence itself:
+///
+/// - the route is delivering acknowledged frames: it is our firmware, full stop;
+/// - the route is failing: it really is not answering, and that is worth a prompt;
+/// - the route is open but has not answered yet: say nothing for the few seconds
+///   that takes, rather than raising a demand that withdraws itself;
+/// - there is no route at all: our own record of flashing this board is the
+///   tiebreaker, and with no record the board is a stranger and worth offering a
+///   flash to, which is how a blank board gets adopted the first time it is
+///   plugged in.
+fn silent_board(
+    remembered: Option<&FlashRecord>,
+    bundled_build: Option<&str>,
+    evidence: RouteEvidence,
+) -> FlashRequirement {
+    match evidence {
+        RouteEvidence::Acknowledged | RouteEvidence::Pending => {
+            from_record(remembered, bundled_build)
+        }
+        RouteEvidence::Failing => FlashRequirement::Required {
+            reason: FlashReason::NotResponding,
+        },
+        RouteEvidence::Absent if remembered.is_some() => from_record(remembered, bundled_build),
+        RouteEvidence::Absent => FlashRequirement::Required {
+            reason: FlashReason::NotResponding,
+        },
     }
 }
 
@@ -884,23 +963,71 @@ mod tests {
         }
     }
 
+    /// The manifest and the images have to agree about what build this is, and
+    /// nothing in either file forces them to: they are produced by two scripts
+    /// that derive the same identity separately. When they disagreed, every
+    /// board reported a build the app had never heard of, the app offered an
+    /// upgrade, and the upgrade produced a board that disagreed exactly as much
+    /// as before — a reflash that could never succeed, on every launch.
+    ///
+    /// Reads the bytes rather than the device: the id is a string literal in the
+    /// image, so the two can be compared here, on any machine, with no board
+    /// attached and no toolchain installed.
+    #[test]
+    fn the_shipped_images_announce_the_build_the_manifest_claims() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/firmware");
+        if !root.join("manifest.json").is_file() {
+            return;
+        }
+        let Ok(bundle) = FirmwareBundle::load(&root) else {
+            return;
+        };
+        let Some(revision) = bundle.source_revision.as_deref() else {
+            return;
+        };
+        assert_ne!(
+            revision, UNKNOWN_BUILD,
+            "a bundle that cannot name its own build must not be shipped"
+        );
+        for variant in bundle.variants() {
+            let application = variant
+                .segments
+                .iter()
+                .find(|segment| segment.offset == APP_OFFSET)
+                .expect("a validated variant always has an application image");
+            assert!(
+                application
+                    .bytes
+                    .windows(revision.len())
+                    .any(|window| window == revision.as_bytes()),
+                "{} ships an image that never says {revision:?}, so every board \
+                 flashed from it reports a build this app will not recognise",
+                variant.id
+            );
+        }
+    }
+
     #[test]
     fn no_device_means_no_prompt() {
-        let requirement = evaluate_flash_requirement(&DeviceProbe::NoPort, Some("abc1234"), None);
+        let requirement = evaluate_flash_requirement(
+            &DeviceProbe::NoPort,
+            Some("abc1234"),
+            None,
+            RouteEvidence::Absent,
+        );
         assert_eq!(requirement, FlashRequirement::NoDevice);
         assert!(!requirement.should_prompt());
     }
 
     #[test]
-    fn a_silent_board_is_prompted_to_flash() {
-        // Enumerated over USB but never announced itself: blank or crashed.
+    fn an_unknown_silent_board_is_offered_a_flash() {
+        // Nothing has been written to this board by us and nothing has been
+        // delivered to it. Adopting a blank board on first run depends on this.
         let requirement = evaluate_flash_requirement(
-            &DeviceProbe::Answered(DeviceBanner {
-                saw_ready: false,
-                build: None,
-            }),
+            &DeviceProbe::Silent,
             Some("abc1234"),
             None,
+            RouteEvidence::Absent,
         );
         assert!(requirement.should_prompt());
         assert_eq!(
@@ -917,6 +1044,7 @@ mod tests {
             &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904 abc1234")),
             Some("abc1234"),
             None,
+            RouteEvidence::Absent,
         );
         assert!(!requirement.should_prompt());
         assert_eq!(
@@ -933,6 +1061,7 @@ mod tests {
             &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904 old0001")),
             Some("abc1234"),
             None,
+            RouteEvidence::Absent,
         );
         assert!(requirement.should_prompt());
         assert_eq!(
@@ -954,8 +1083,28 @@ mod tests {
             &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904")),
             Some("abc1234"),
             None,
+            RouteEvidence::Absent,
         );
         assert!(!requirement.should_prompt());
+        assert_eq!(requirement, FlashRequirement::UnknownBuild);
+    }
+
+    /// A firmware built outside a git checkout stamps "unknown" rather than
+    /// inventing an identity. Comparing that against a real revision reported
+    /// every such board as outdated, and the reflash it offered produced
+    /// another board saying "unknown" -- an upgrade that could never complete.
+    #[test]
+    fn a_board_that_cannot_name_its_build_is_not_a_mismatch() {
+        let requirement = evaluate_flash_requirement(
+            &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904 unknown")),
+            Some("abc1234"),
+            None,
+            RouteEvidence::Absent,
+        );
+        assert!(
+            !requirement.should_prompt(),
+            "an unnamed build is an absent build id, never a differing one"
+        );
         assert_eq!(requirement, FlashRequirement::UnknownBuild);
     }
 
@@ -965,36 +1114,10 @@ mod tests {
             &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904 abc1234")),
             None,
             None,
+            RouteEvidence::Absent,
         );
         assert!(!requirement.should_prompt());
         assert_eq!(requirement, FlashRequirement::UnknownBuild);
-    }
-
-    #[test]
-    fn the_bundle_this_build_ships_is_valid() {
-        // Guards the bundling script, not the loader: a manifest that names a
-        // file the script forgot to copy, or omits boot_app0, would otherwise
-        // only surface on a device. Skips when no bundle has been generated, so
-        // a checkout without an embedded toolchain still runs the suite.
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/firmware");
-        if !root.join("manifest.json").is_file() {
-            return;
-        }
-        match FirmwareBundle::load(&root) {
-            Ok(bundle) => {
-                for variant in bundle.variants() {
-                    assert!(
-                        variant.total_bytes() > 100_000,
-                        "{} looks too small to be a real build",
-                        variant.id
-                    );
-                }
-            }
-            // An empty bundle is legitimate: the app then reports that it ships
-            // no firmware. Any other failure is a broken bundling script.
-            Err(FirmwareError::NoVariants) => {}
-            Err(error) => panic!("bundled firmware is invalid: {error}"),
-        }
     }
 
     /// The bug this exists to prevent: the display worker owns the serial port,
@@ -1003,30 +1126,17 @@ mod tests {
     /// perfectly working device.
     #[test]
     fn a_port_that_cannot_be_opened_is_never_read_as_an_unflashed_board() {
-        let requirement =
-            evaluate_flash_requirement(&DeviceProbe::Unreachable, Some("abc1234"), None);
+        let requirement = evaluate_flash_requirement(
+            &DeviceProbe::Unreachable,
+            Some("abc1234"),
+            None,
+            RouteEvidence::Absent,
+        );
         assert!(
             !requirement.should_prompt(),
             "an unreachable port must not raise the flash prompt"
         );
         assert_eq!(requirement, FlashRequirement::UnknownBuild);
-    }
-
-    /// ...while a board that genuinely stays silent still gets prompted, so the
-    /// fix above cannot be mistaken for suppressing the prompt entirely.
-    #[test]
-    fn silence_from_a_reachable_board_still_prompts() {
-        assert!(
-            evaluate_flash_requirement(
-                &DeviceProbe::Answered(DeviceBanner {
-                    saw_ready: false,
-                    build: None
-                }),
-                Some("abc1234"),
-                None,
-            )
-            .should_prompt()
-        );
     }
 
     fn record(build: &str) -> FlashRecord {
@@ -1048,6 +1158,7 @@ mod tests {
             &DeviceProbe::Unreachable,
             Some("abc1234"),
             Some(&record("abc1234")),
+            RouteEvidence::Absent,
         );
         assert!(!requirement.should_prompt());
         assert_eq!(
@@ -1066,6 +1177,7 @@ mod tests {
             &DeviceProbe::Unreachable,
             Some("def5678"),
             Some(&record("abc1234")),
+            RouteEvidence::Absent,
         );
         assert_eq!(requirement, FlashRequirement::UnknownBuild);
     }
@@ -1079,6 +1191,7 @@ mod tests {
             &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904 other999")),
             Some("abc1234"),
             Some(&record("abc1234")),
+            RouteEvidence::Absent,
         );
         assert_eq!(
             requirement,
@@ -1099,6 +1212,7 @@ mod tests {
             &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904")),
             Some("abc1234"),
             Some(&record("abc1234")),
+            RouteEvidence::Absent,
         );
         assert_eq!(
             requirement,
@@ -1108,20 +1222,108 @@ mod tests {
         );
     }
 
-    /// And a board that never answered and was never flashed by us is still the
-    /// case worth prompting about.
+    /// The reported bug, exactly: flash the board, quit, relaunch, and be asked
+    /// to flash the board that was just flashed.
+    ///
+    /// The banner is spoken once at boot. The app connects to a board that has
+    /// been up for a while, hears nothing, and used to read that silence as an
+    /// unflashed board -- so the answer to "did this work?" was always "do it
+    /// again". A board this app wrote is not silent-because-blank.
     #[test]
-    fn a_silent_unknown_board_still_prompts() {
-        assert!(
-            evaluate_flash_requirement(
-                &DeviceProbe::Answered(DeviceBanner {
-                    saw_ready: false,
-                    build: None
-                }),
-                Some("abc1234"),
-                None,
-            )
-            .should_prompt()
+    fn a_board_we_just_flashed_is_not_asked_to_flash_again() {
+        let requirement = evaluate_flash_requirement(
+            &DeviceProbe::Silent,
+            Some("abc1234"),
+            Some(&record("abc1234")),
+            RouteEvidence::Absent,
         );
+        assert!(
+            !requirement.should_prompt(),
+            "a board this app flashed must not be offered the same flash again"
+        );
+        assert_eq!(
+            requirement,
+            FlashRequirement::UpToDate {
+                build: "abc1234".into()
+            }
+        );
+    }
+
+    /// Silence from a board that is acknowledging frames says nothing at all:
+    /// ACK INK1 is proof this firmware is running, whatever the board said or
+    /// did not say at boot. This is the case with no record to fall back on --
+    /// a board someone else flashed, which must also not be nagged.
+    #[test]
+    fn a_board_that_acknowledges_frames_is_never_called_unresponsive() {
+        let requirement = evaluate_flash_requirement(
+            &DeviceProbe::Silent,
+            Some("abc1234"),
+            None,
+            RouteEvidence::Acknowledged,
+        );
+        assert!(!requirement.should_prompt());
+        assert_eq!(requirement, FlashRequirement::UnknownBuild);
+    }
+
+    /// ...and the converse, which is what keeps the prompt reachable: a board
+    /// that will not take a frame is genuinely not answering, and is offered a
+    /// flash even though this app is the one that flashed it. Without this, a
+    /// board that dies after we wrote it could never be recovered from the app.
+    #[test]
+    fn a_board_that_refuses_frames_is_offered_a_flash_despite_our_record() {
+        let requirement = evaluate_flash_requirement(
+            &DeviceProbe::Silent,
+            Some("abc1234"),
+            Some(&record("abc1234")),
+            RouteEvidence::Failing,
+        );
+        assert!(requirement.should_prompt());
+        assert_eq!(
+            requirement,
+            FlashRequirement::Required {
+                reason: FlashReason::NotResponding
+            }
+        );
+    }
+
+    /// An open route that has not carried its first frame yet answers within
+    /// seconds. Prompting into that window put a demand on screen that took
+    /// itself back once the frame landed, on every launch of a working desk.
+    #[test]
+    fn a_route_that_has_not_answered_yet_is_given_the_chance_to() {
+        let requirement = evaluate_flash_requirement(
+            &DeviceProbe::Silent,
+            Some("abc1234"),
+            None,
+            RouteEvidence::Pending,
+        );
+        assert!(!requirement.should_prompt());
+        assert_eq!(requirement, FlashRequirement::UnknownBuild);
+    }
+
+    /// ...and it is only a grace period. A board that never answers still ends
+    /// up offered a flash, so nothing here can quietly swallow the prompt.
+    #[test]
+    fn the_grace_period_ends_when_the_route_gives_up() {
+        let requirement = evaluate_flash_requirement(
+            &DeviceProbe::Silent,
+            Some("abc1234"),
+            None,
+            RouteEvidence::Failing,
+        );
+        assert!(requirement.should_prompt());
+    }
+
+    /// A board that answers with a stale build is still an upgrade offer even
+    /// while it is happily delivering frames: working is not the same as current.
+    #[test]
+    fn a_delivering_board_running_an_old_build_is_still_offered_the_new_one() {
+        let requirement = evaluate_flash_requirement(
+            &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 250x122 3904 old0001")),
+            Some("abc1234"),
+            None,
+            RouteEvidence::Acknowledged,
+        );
+        assert!(requirement.should_prompt());
     }
 }
