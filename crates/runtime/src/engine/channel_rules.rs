@@ -300,12 +300,19 @@ fn channel_signal(
         .as_ref()
         .and_then(|value| iso_timestamp(value.timestamp_millis()).ok());
 
+    // Set only by the kinds whose material is a measurement. The rest are
+    // authored events and already have a stable identity of their own.
+    let mut band = None;
     let (detail, action, severity): (String, String, Option<String>) = match kind {
-        ChannelKindDto::Weather => (
-            weather_signal_detail(item, channel, now_ms, unit_system),
-            "Forecast conditions cross the configured weather thresholds.".into(),
-            Some("Heads-up".into()),
-        ),
+        ChannelKindDto::Weather => {
+            let weather = weather_signal(item, channel, now_ms, unit_system);
+            band = weather.band;
+            (
+                weather.detail,
+                "Forecast conditions cross the configured weather thresholds.".into(),
+                Some("Heads-up".into()),
+            )
+        }
         ChannelKindDto::Official => (
             signal_text(
                 item.summary.as_deref(),
@@ -361,6 +368,15 @@ fn channel_signal(
         ),
         ChannelKindDto::Markets => {
             let quote = market_quote_view(item)?;
+            band = Some(format!(
+                "{}:{}",
+                if quote.change_percent < 0.0 {
+                    "down"
+                } else {
+                    "up"
+                },
+                move_band(quote.change_percent)
+            ));
             let currency = if quote.currency.is_empty() {
                 String::new()
             } else {
@@ -387,6 +403,7 @@ fn channel_signal(
         action: bounded_signal_text(&action, 240),
         severity,
         expires_at,
+        band,
     })
 }
 
@@ -705,19 +722,31 @@ fn weather_item_activation_score(
     }
 }
 
-fn weather_signal_detail(
+/// The weather signal's prose and its banded identity, derived together.
+///
+/// They are computed in one pass on purpose: a band that can disagree with the
+/// sentence it summarizes is worse than no band, because dedupe would then
+/// suppress a message whose text had genuinely changed.
+struct WeatherSignal {
+    detail: String,
+    band: Option<String>,
+}
+
+fn weather_signal(
     item: &CollectorItem,
     channel: &ChannelPreference,
     now_ms: i64,
     unit_system: UnitSystem,
-) -> String {
-    let rain = rain_activation_fact(item, channel, now_ms).map(|fact| {
+) -> WeatherSignal {
+    let rain_fact = rain_activation_fact(item, channel, now_ms);
+    let wind_fact = wind_activation_fact(item, channel, now_ms);
+    let rain = rain_fact.map(|fact| {
         format!(
             "Rain {:.0}% in {} min (threshold {:.0}%)",
             fact.probability, fact.lead_minutes, fact.threshold
         )
     });
-    let wind = wind_activation_fact(item, channel, now_ms).map(|fact| {
+    let wind = wind_fact.map(|fact| {
         let timing = if fact.lead_minutes == 0 {
             "now".into()
         } else {
@@ -732,7 +761,76 @@ fn weather_signal_detail(
         (Some(detail), None) | (None, Some(detail)) => detail,
         (None, None) => "A configured personal weather threshold was crossed.".into(),
     };
-    bounded_signal_text(&detail, 360)
+
+    // The rule is named in the band so a future amount-based rain rule can never
+    // be mistaken for a probability one that happened to land in the same bins.
+    let mut parts = Vec::new();
+    if let Some(fact) = rain_fact {
+        parts.push(format!(
+            "rain-probability:{}:{}",
+            lead_band(fact.lead_minutes),
+            probability_band(fact.probability)
+        ));
+    }
+    if let Some(fact) = wind_fact {
+        // Banded on the canonical mph the fact carries, not on the displayed
+        // value, so switching units never re-alerts.
+        parts.push(format!(
+            "wind-gust:{}:{}",
+            lead_band(fact.lead_minutes),
+            gust_band(fact.mph)
+        ));
+    }
+
+    WeatherSignal {
+        detail: bounded_signal_text(&detail, 360),
+        band: (!parts.is_empty()).then(|| parts.join("+")),
+    }
+}
+
+/// Lead-time bands. Crossing one changes what a person would do; moving inside
+/// one does not.
+fn lead_band(minutes: i64) -> &'static str {
+    match minutes {
+        ..=5 => "0-5",
+        6..=15 => "6-15",
+        16..=30 => "16-30",
+        31..=60 => "31-60",
+        _ => "60+",
+    }
+}
+
+fn probability_band(percent: f64) -> &'static str {
+    match percent.round() as i64 {
+        ..=39 => "p0-39",
+        40..=59 => "p40-59",
+        60..=79 => "p60-79",
+        80..=94 => "p80-94",
+        _ => "p95+",
+    }
+}
+
+/// Gust bands in mph. The top edge is 58 mph because that is the National
+/// Weather Service's severe threshold, not a round number.
+fn gust_band(mph: f64) -> &'static str {
+    match mph.round() as i64 {
+        ..=24 => "g0-24",
+        25..=39 => "g25-39",
+        40..=57 => "g40-57",
+        _ => "g58+",
+    }
+}
+
+/// Market bands, on absolute move. Direction is carried separately so a swing
+/// through zero is always news.
+fn move_band(change_percent: f64) -> &'static str {
+    match change_percent.abs() {
+        percent if percent < 1.0 => "0-1",
+        percent if percent < 2.0 => "1-2",
+        percent if percent < 5.0 => "2-5",
+        percent if percent < 10.0 => "5-10",
+        _ => "10+",
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

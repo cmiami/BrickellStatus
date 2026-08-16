@@ -209,6 +209,20 @@ pub struct ChannelSignalDto {
     pub severity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+    /// Coarse identity of *how much* and *how soon*, for channels whose signal
+    /// is a measurement rather than an authored alert.
+    ///
+    /// A forecast that reads 62% at 40 minutes and then 95% at 5 minutes is the
+    /// same sentence with different numbers, and both of the app's dedupe paths
+    /// got it wrong in opposite directions: notifications hashed the digits away
+    /// and never re-alerted, while the panel hashed the raw payload and
+    /// re-alerted on every refresh. Banding the numbers gives both one identity
+    /// that changes when the situation does and holds still when it does not.
+    ///
+    /// `None` for kinds whose material is an authored event; those already have
+    /// a stable identity of their own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub band: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

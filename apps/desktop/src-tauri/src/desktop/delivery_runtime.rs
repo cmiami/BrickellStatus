@@ -1014,10 +1014,17 @@ fn material_channel_state(channel: &ChannelSnapshot, snapshot: &AppSnapshot) -> 
             | ChannelKindDto::Earthquake => {
                 format!("active:{}", delivered_signal_material(channel))
             }
-            ChannelKindDto::Weather | ChannelKindDto::Markets => format!(
-                "active:{}",
-                normalize_numeric_measurements(&normalize_material_text(&channel.summary))
-            ),
+            // Banded identity: crossing a band is news, drifting inside one is
+            // not. The band comes from the runtime, where the numbers are still
+            // typed, rather than being recovered from prose here.
+            ChannelKindDto::Weather | ChannelKindDto::Markets => channel
+                .signal
+                .as_ref()
+                .and_then(|signal| signal.band.as_deref())
+                .map_or_else(
+                    || format!("active:{}", normalize_material_text(&channel.summary)),
+                    |band| format!("active:{band}"),
+                ),
             ChannelKindDto::System | ChannelKindDto::Bridge => {
                 format!("active:{}", normalize_material_text(&channel.summary))
             }
@@ -1033,23 +1040,6 @@ fn delivered_signal_material(channel: &ChannelSnapshot) -> String {
     }))
     .unwrap_or_else(|_| channel.material_key.as_bytes().to_vec());
     format!("{:x}", Sha256::digest(serialized))
-}
-
-fn normalize_numeric_measurements(value: &str) -> String {
-    let mut normalized = String::with_capacity(value.len());
-    let mut in_number = false;
-    for character in value.chars() {
-        if character.is_ascii_digit() || (in_number && matches!(character, '.' | ',')) {
-            if !in_number {
-                normalized.push('#');
-                in_number = true;
-            }
-        } else {
-            in_number = false;
-            normalized.push(character);
-        }
-    }
-    normalized
 }
 
 fn normalize_material_text(value: &str) -> String {

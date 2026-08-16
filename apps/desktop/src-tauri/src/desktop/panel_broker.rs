@@ -292,11 +292,20 @@ fn panel_eligible(channel: &ChannelSnapshot) -> bool {
 
 /// Identity of the thing being alerted about.
 ///
-/// `material_key` already changes when the underlying items change and stays
-/// stable across polls with identical content, which is exactly the property an
-/// alert key needs.
+/// Prefers the signal's band, which is the same string the notification path
+/// dedupes on — one identity for both, so the panel and a phone can never
+/// disagree about whether something is new.
+///
+/// `material_key` is the fallback for kinds that carry no band. It hashes the
+/// underlying items, which is right for an authored alert and wrong for a
+/// measurement: a forecast refresh that moves a number by a tenth produces a
+/// fresh key and would re-seize the panel on every poll.
 fn alert_key(channel: &ChannelSnapshot) -> String {
-    channel.material_key.clone()
+    channel
+        .signal
+        .as_ref()
+        .and_then(|signal| signal.band.as_deref())
+        .map_or_else(|| channel.material_key.clone(), str::to_owned)
 }
 
 /// The ordinary cadence: the home channel every `return_home_after + 1` slots,

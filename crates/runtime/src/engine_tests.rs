@@ -2444,3 +2444,51 @@ fn a_slow_source_is_not_stale_merely_for_keeping_its_own_schedule() {
         AvailabilityDto::Stale
     );
 }
+
+/// The band is the shared identity behind both dedupe paths, so its boundaries
+/// are behaviour rather than an implementation detail: this is the test that
+/// fails if "62% at 40 minutes" and "95% at 5 minutes" ever collapse together
+/// again, or if a refresh that moves a number by a point starts re-alerting.
+#[test]
+fn the_weather_band_moves_with_the_forecast_and_not_with_its_noise() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let band = |probability: f64, gust_kmh: f64, starts_in_minutes: i64| {
+        let mut item = weather_hourly_item(now_ms, probability, gust_kmh);
+        item.starts_at = Some(
+            chrono::DateTime::from_timestamp_millis(now_ms + starts_in_minutes * 60_000).unwrap(),
+        );
+        weather_signal(&item, &channel, now_ms, UnitSystem::Imperial).band
+    };
+
+    // A forecast refresh that nudges the probability is the same material.
+    assert_eq!(band(62.0, 10.0, 40), band(66.0, 10.0, 44));
+    // Nearer and likelier is not.
+    assert_ne!(band(62.0, 10.0, 40), band(95.0, 10.0, 5));
+    // Either one alone is enough.
+    assert_ne!(band(62.0, 10.0, 40), band(95.0, 10.0, 40));
+    assert_ne!(band(62.0, 10.0, 40), band(62.0, 10.0, 5));
+    // Below the activation threshold there is no band to dedupe on.
+    assert_eq!(band(10.0, 10.0, 40), None);
+    // The rule that produced it is named, so a future amount rule cannot be
+    // mistaken for this one.
+    assert!(
+        band(62.0, 10.0, 40)
+            .unwrap()
+            .starts_with("rain-probability:")
+    );
+}
+
+/// Units are a display concern. Banding on the canonical value keeps a
+/// preference change from looking like new weather.
+#[test]
+fn switching_unit_systems_does_not_change_the_weather_band() {
+    let now_ms = 1_786_741_200_000;
+    let mut channel = AppPreferences::default().profile.channels[1].clone();
+    channel.scope.insert("windGustMph".into(), json!(30.0));
+    let item = weather_hourly_item(now_ms, 90.0, 80.0);
+    assert_eq!(
+        weather_signal(&item, &channel, now_ms, UnitSystem::Imperial).band,
+        weather_signal(&item, &channel, now_ms, UnitSystem::Metric).band
+    );
+}

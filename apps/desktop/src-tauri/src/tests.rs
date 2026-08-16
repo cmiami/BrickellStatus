@@ -176,16 +176,50 @@ async fn whatsapp_test_copy_can_never_be_mistaken_for_a_live_alert() {
     assert!(!request.notice.action.contains("Divert now"));
 }
 
-#[test]
-fn numeric_measurement_churn_does_not_create_a_new_material_identity() {
-    assert_eq!(
-        normalize_numeric_measurements("Rain 61% in 84 min · gust 42.5 mph"),
-        "Rain #% in # min · gust # mph"
-    );
-    assert_ne!(
-        normalize_numeric_measurements("AAPL +5.2%"),
-        normalize_numeric_measurements("AAPL -5.2%")
-    );
+/// The old rule collapsed every digit to `#`, so "rain 62% in 40 min" and
+/// "rain 95% in 5 min" were the same material and the second was dropped.
+/// Escalating rain could never re-alert. Bands replace it: the numbers still
+/// have to move meaningfully, but meaningful movement now gets through.
+#[tokio::test]
+async fn escalating_weather_re_alerts_while_jitter_does_not() {
+    let store = Store::in_memory().await.unwrap();
+    let engine = RuntimeEngine::new(store, RuntimeConfig::default())
+        .await
+        .unwrap();
+    let mut snapshot = engine.get_snapshot().await.unwrap();
+    let index = snapshot
+        .channels
+        .iter()
+        .position(|channel| channel.kind == ChannelKindDto::Weather)
+        .unwrap();
+    snapshot.channels[index].active = true;
+    snapshot.channels[index].signal = Some(bridgestatus_runtime::ChannelSignalDto {
+        headline: "Rain".into(),
+        detail: "Rain 62% in 40 min".into(),
+        action: "Forecast conditions cross the configured weather thresholds.".into(),
+        severity: Some("Heads-up".into()),
+        expires_at: None,
+        band: None,
+    });
+
+    let identity = |snapshot: &AppSnapshot, band: &str| {
+        let mut snapshot = snapshot.clone();
+        snapshot.channels[index].signal.as_mut().unwrap().band = Some(band.into());
+        material_channel_state(&snapshot.channels[index], &snapshot)
+    };
+    let identity = |band: &str| identity(&snapshot, band);
+    let baseline = identity("rain-probability:31-60:p60-79");
+
+    // Same forecast, refreshed: the numbers wobble, the band does not.
+    assert_eq!(baseline, identity("rain-probability:31-60:p60-79"));
+    // Closer and likelier. Nearer alone is enough; so is likelier alone.
+    assert_ne!(baseline, identity("rain-probability:0-5:p95+"));
+    assert_ne!(baseline, identity("rain-probability:0-5:p60-79"));
+    assert_ne!(baseline, identity("rain-probability:31-60:p95+"));
+    // A different rule reaching the same bins is not the same material.
+    assert_ne!(baseline, identity("rain-amount:31-60:p60-79"));
+    // And a market swinging through zero is always news at equal magnitude.
+    assert_ne!(identity("up:2-5"), identity("down:2-5"));
 }
 
 #[tokio::test]
@@ -213,6 +247,7 @@ async fn sourced_signal_copy_reaches_message_native_and_epaper_surfaces() {
         detail: "Life-threatening flash flooding is occurring in downtown Miami.".into(),
         action: "Move to higher ground now.".into(),
         severity: Some("Extreme".into()),
+        band: None,
         expires_at: Some("2026-08-15T02:00:00Z".into()),
     });
 
@@ -287,6 +322,7 @@ async fn critical_quiet_bypass_uses_event_severity_not_interrupt_preset() {
         action: "Take shelter now.".into(),
         severity: Some("Severe".into()),
         expires_at: None,
+        band: None,
     });
 
     // Severe is Action, not Emergency, so quiet hours still hold it.
@@ -1373,9 +1409,7 @@ mod river_spans {
 }
 
 mod panel {
-    use super::super::{
-        PanelBroker, PanelSelection, prove_backoff, should_prove_now,
-    };
+    use super::super::{PanelBroker, PanelSelection, prove_backoff, should_prove_now};
     use super::*;
 
     async fn epaper_snapshot() -> (AppSnapshot, AppPreferences) {
