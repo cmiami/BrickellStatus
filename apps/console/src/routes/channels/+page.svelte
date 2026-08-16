@@ -42,14 +42,16 @@
     selected.destinations = enabled
       ? [...new Set([...selected.destinations, destination])]
       : selected.destinations.filter((item) => item !== destination);
+    void saveNow();
   }
 
-  function replaceSelected(channel: ChannelPreference) {
+  function replaceSelected(channel: ChannelPreference, commit = false) {
     if (!draft) return;
     const index = draft.profile.channels.findIndex((item) => item.id === channel.id);
     if (index < 0) return;
     draft.profile.channels[index] = channel;
     draft.profile.preset = 'custom';
+    if (commit) void saveNow();
   }
 
   function moveSelected(direction: -1 | 1) {
@@ -68,6 +70,20 @@
     if (!draft) return;
     await persistPreferences($state.snapshot(draft));
   }
+
+  // A switch is a decision, not a draft. Turning a channel on and finding it off
+  // after a restart is what happens when the commitment lives behind a separate
+  // Save press somewhere else on the page, so switches save themselves. Typed
+  // fields still wait for Save — nobody wants a write per keystroke.
+  async function saveNow() {
+    await save();
+  }
+
+  // Everything not covered by that: shown so the page can never look applied
+  // while it is only staged.
+  const unsaved = $derived(
+    !!draft && !!$preferences && JSON.stringify($state.snapshot(draft)) !== JSON.stringify($preferences)
+  );
 </script>
 
 <svelte:head><title>Channels · Tender’s Log</title></svelte:head>
@@ -84,8 +100,9 @@
     </div>
     <div class="heading-actions">
       <a class="secondary-action" href="/map"><MapPinned size={17} aria-hidden="true" /> Open map</a>
-      <button class="primary-action" onclick={save} disabled={!draft || $saving}>
-        <Save size={17} aria-hidden="true" /> {$saving ? 'Saving policy' : 'Save channel policy'}
+      <button class="primary-action" onclick={save} disabled={!draft || $saving || !unsaved}>
+        <Save size={17} aria-hidden="true" />
+        {#if $saving}Saving policy{:else if unsaved}Save channel policy{:else}Saved{/if}
       </button>
     </div>
   </header>
@@ -153,6 +170,7 @@
               onchange={(enabled) => {
                 selected.enabled = enabled;
                 draft!.profile.preset = 'custom';
+                void saveNow();
               }}
             />
           </div>

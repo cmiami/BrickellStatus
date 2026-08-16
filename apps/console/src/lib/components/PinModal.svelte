@@ -204,7 +204,7 @@
 
   .pin-error {
     margin: 0;
-    color: var(--alert);
+    color: var(--danger);
     font-size: var(--type-caption);
   }
 

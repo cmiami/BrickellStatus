@@ -201,6 +201,7 @@ async fn escalating_weather_re_alerts_while_jitter_does_not() {
         expires_at: None,
         band: None,
         imminence_minutes: None,
+        series: Vec::new(),
     });
 
     let identity = |snapshot: &AppSnapshot, band: &str| {
@@ -250,6 +251,7 @@ async fn sourced_signal_copy_reaches_message_native_and_epaper_surfaces() {
         severity: Some("Extreme".into()),
         band: None,
         imminence_minutes: None,
+        series: Vec::new(),
         expires_at: Some("2026-08-15T02:00:00Z".into()),
     });
 
@@ -326,6 +328,7 @@ async fn critical_quiet_bypass_uses_event_severity_not_interrupt_preset() {
         expires_at: None,
         band: None,
         imminence_minutes: None,
+        series: Vec::new(),
     });
 
     // Severe is Action, not Emergency, so quiet hours still hold it.

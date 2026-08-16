@@ -2678,6 +2678,7 @@ fn imminent_rain_outranks_a_distant_bridge_prediction_end_to_end() {
         expires_at: None,
         band: rain.band,
         imminence_minutes: rain.imminence_minutes,
+        series: Vec::new(),
     };
 
     let rain_score = channel_priority(
@@ -2722,4 +2723,110 @@ fn imminent_rain_outranks_a_distant_bridge_prediction_end_to_end() {
         open_bridge > rain_score,
         "a raised span ({open_bridge}) outranks every forecast ({rain_score})"
     );
+}
+
+/// Preferences are the reader's, not the session's. This opens a real file,
+/// enables a channel, drops the engine, and opens it again — the same thing the
+/// app does when it restarts.
+#[tokio::test]
+async fn enabling_a_channel_survives_a_restart() {
+    let file = std::env::temp_dir().join(format!(
+        "tenders-persist-{}-{:?}.db",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&file);
+
+    {
+        let store = Store::open(&file).await.unwrap();
+        let engine = RuntimeEngine::new(store, RuntimeConfig::default())
+            .await
+            .unwrap();
+        let mut preferences = engine.get_preferences().await;
+        let markets = preferences
+            .profile
+            .channels
+            .iter_mut()
+            .find(|channel| channel.kind == ChannelKindDto::Markets)
+            .unwrap();
+        assert!(!markets.enabled, "markets ships off");
+        markets.enabled = true;
+        engine.save_preferences(preferences).await.unwrap();
+    }
+
+    let store = Store::open(&file).await.unwrap();
+    let engine = RuntimeEngine::new(store, RuntimeConfig::default())
+        .await
+        .unwrap();
+    let reloaded = engine.get_preferences().await;
+    let markets = reloaded
+        .profile
+        .channels
+        .iter()
+        .find(|channel| channel.kind == ChannelKindDto::Markets)
+        .unwrap();
+    let enabled = markets.enabled;
+    let _ = std::fs::remove_file(&file);
+    assert!(enabled, "the channel must still be on after a restart");
+}
+
+/// The reader is told what is true about their stock, never which company the
+/// app asked. A source that has not answered yet is not a broken source, and
+/// naming one is something the reader can do nothing with.
+#[test]
+fn market_copy_never_names_the_feed_or_calls_a_slow_start_a_fault() {
+    let mut channel = AppPreferences::default().profile.channels[6].clone();
+    channel.enabled = true;
+
+    let (pending, active) = market_activation(&channel, &[], AvailabilityDto::Offline);
+    assert!(!active);
+    assert_eq!(pending, "Waiting for the first quote");
+
+    let (empty, _) = market_activation(&channel, &[], AvailabilityDto::Fresh);
+    assert_eq!(empty, "No quote available");
+
+    let quote = market_quote_item(6.5, None);
+    let (live, live_active) = market_activation(&channel, &[&quote], AvailabilityDto::Fresh);
+    assert!(live_active);
+    for copy in [&pending, &empty, &live] {
+        let lowered = copy.to_ascii_lowercase();
+        assert!(!lowered.contains("yahoo"), "{copy}");
+        assert!(!lowered.contains("chart"), "{copy}");
+    }
+}
+
+/// The chart reaches the surfaces that draw it. Without this the console and
+/// the panel both fall back to a number and the feature is invisible.
+#[test]
+fn a_market_signal_carries_the_session_shape() {
+    let now_ms: i64 = 1_786_741_200_000;
+    let mut channel = AppPreferences::default().profile.channels[6].clone();
+    channel.enabled = true;
+    let mut quote = market_quote_item(6.5, None);
+    quote
+        .attributes
+        .insert("series".into(), json!([511.0, 512.5, 511.5, 514.39]));
+
+    let signal = channel_signal(
+        ChannelKindDto::Markets,
+        &channel,
+        &[&quote],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .expect("an active market channel produces a signal");
+    assert_eq!(signal.series, vec![511.0, 512.5, 511.5, 514.39]);
+    // And a quote without one is simply undrawn rather than a broken card.
+    let bare = market_quote_item(6.5, None);
+    let plain = channel_signal(
+        ChannelKindDto::Markets,
+        &channel,
+        &[&bare],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert!(plain.series.is_empty());
 }

@@ -334,6 +334,7 @@ fn channel_signal(
     // authored events and already have a stable identity of their own.
     let mut band = None;
     let mut imminence_minutes = None;
+    let mut series = Vec::new();
     let (detail, action, severity): (String, String, Option<String>) = match kind {
         ChannelKindDto::Weather => {
             let weather = weather_signal(item, channel, now_ms, unit_system);
@@ -404,6 +405,12 @@ fn channel_signal(
         ),
         ChannelKindDto::Markets => {
             let quote = market_quote_view(item)?;
+            series = item
+                .attributes
+                .get("series")
+                .and_then(Value::as_array)
+                .map(|values| values.iter().filter_map(Value::as_f64).collect())
+                .unwrap_or_default();
             band = Some(format!(
                 "{}:{}",
                 if quote.change_percent < 0.0 {
@@ -441,6 +448,7 @@ fn channel_signal(
         expires_at,
         band,
         imminence_minutes,
+        series,
     })
 }
 
@@ -1913,10 +1921,10 @@ fn market_activation(
         return ("Add at least one market symbol".into(), false);
     }
     if availability == AvailabilityDto::Offline {
-        return (
-            "Yahoo chart unavailable · no usable quote received".into(),
-            false,
-        );
+        // Not a fault, and not a source to name: a channel enabled a moment ago
+        // has simply not been answered yet, and saying a provider is broken is
+        // both wrong and something the reader can do nothing with.
+        return ("Waiting for the first quote".into(), false);
     }
     if availability == AvailabilityDto::Stale {
         return (
@@ -1937,10 +1945,7 @@ fn market_activation(
         f64::total_cmp(&right.change_percent.abs(), &left.change_percent.abs())
     });
     if quotes.is_empty() {
-        return (
-            "Yahoo chart returned no complete price/previous-close pair".into(),
-            false,
-        );
+        return ("No quote available".into(), false);
     }
 
     let threshold = scope_f64(channel, "movePercent", 5.0);

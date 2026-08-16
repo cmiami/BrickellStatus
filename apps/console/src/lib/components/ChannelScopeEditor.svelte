@@ -6,6 +6,7 @@
   import NewsScopeEditor from './channel-scope/NewsScopeEditor.svelte';
   import OfficialScopeEditor from './channel-scope/OfficialScopeEditor.svelte';
   import WeatherScopeEditor from './channel-scope/WeatherScopeEditor.svelte';
+  import type { ChannelChange } from './channel-scope/scope';
   import type { AisSettings, AlertArea, ChannelPreference, UnitSystem } from '$lib/types';
 
   let {
@@ -20,7 +21,7 @@
     areas?: AlertArea[];
     ais: AisSettings;
     unitSystem: UnitSystem;
-    onchannelchange: (channel: ChannelPreference) => void;
+    onchannelchange: ChannelChange;
     onaischange: (ais: AisSettings) => void;
   } = $props();
 </script>

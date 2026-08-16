@@ -23,9 +23,10 @@ use image::{ImageReader, imageops::FilterType};
 use crate::MonoFrame;
 
 /// The figure's box on the panel, left as a constant so a caller cannot ask for
-/// a size the layout has no room for.
+/// a size the layout has no room for. Radar is one thing that goes in it; a
+/// price line is another.
 pub const RADAR_FIGURE_WIDTH: u16 = 96;
-/// Height of the radar figure in panel pixels.
+/// Height of the figure in panel pixels.
 pub const RADAR_FIGURE_HEIGHT: u16 = 42;
 
 /// A radar figure, ready to stamp into a frame. One byte per pixel, `true`
@@ -267,5 +268,160 @@ mod tests {
     fn a_response_that_is_not_an_image_is_an_error_rather_than_a_panic() {
         assert!(radar_figure_from_png(b"<html>404</html>").is_err());
         assert!(radar_figure_from_png(&vec![0u8; MAX_TILE_BYTES + 1]).is_err());
+    }
+}
+
+/// Draws a series as a line inside the standard figure box.
+///
+/// Scaled to its own range rather than to zero, for the same reason the console
+/// sparkline is: a stock that moved from 511 to 514 is a flat line against a
+/// zero axis and a legible one against its own day, and the day is the question
+/// being asked. Returns `None` when there is no shape to draw — one point is
+/// not a line, and a flat series is drawn as the flat line it is.
+pub fn series_figure(values: &[f64]) -> Option<RadarFigure> {
+    let usable = values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if usable.len() < 2 {
+        return None;
+    }
+    let low = usable.iter().copied().fold(f64::INFINITY, f64::min);
+    let high = usable.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    // A series with no range has no shape. Drawing it against a one-unit span
+    // would pin it to an edge and read as a crash or a moonshot; it belongs on
+    // the mid-line, which is what a day that went nowhere looks like.
+    let flat = (high - low).abs() < f64::EPSILON;
+    let span = if flat { 1.0 } else { high - low };
+
+    let width = usize::from(RADAR_FIGURE_WIDTH);
+    let height = usize::from(RADAR_FIGURE_HEIGHT);
+    let mut pixels = vec![false; width * height];
+    let row_for = |value: f64| -> usize {
+        let normalized = if flat {
+            0.5
+        } else {
+            ((value - low) / span).clamp(0.0, 1.0)
+        };
+        let row = (1.0 - normalized) * (height as f64 - 1.0);
+        (row.round() as usize).min(height - 1)
+    };
+
+    let mut previous: Option<usize> = None;
+    for column in 0..width {
+        // Nearest sample rather than interpolation: the series is already a
+        // downsample, and inventing intermediate prices would draw values that
+        // never traded.
+        let index = (column * (usable.len() - 1) + width / 2) / width.max(1);
+        let row = row_for(usable[index.min(usable.len() - 1)]);
+        // Join to the previous column so a steep move reads as one line rather
+        // than as two disconnected dots.
+        let (from, to) = match previous {
+            Some(previous_row) if previous_row <= row => (previous_row, row),
+            Some(previous_row) => (row, previous_row),
+            None => (row, row),
+        };
+        for filled in from..=to {
+            pixels[filled * width + column] = true;
+        }
+        previous = Some(row);
+    }
+    Some(RadarFigure { pixels })
+}
+
+#[cfg(test)]
+mod series_tests {
+    use super::*;
+
+    fn rows_with_ink(figure: &RadarFigure) -> Vec<usize> {
+        (0..usize::from(RADAR_FIGURE_HEIGHT))
+            .filter(|row| {
+                (0..usize::from(RADAR_FIGURE_WIDTH))
+                    .any(|column| figure.pixels[row * usize::from(RADAR_FIGURE_WIDTH) + column])
+            })
+            .collect()
+    }
+
+    /// The line has to go the way the numbers went. Getting this backwards
+    /// draws a rally as a sell-off.
+    #[test]
+    fn a_rising_series_ends_higher_on_the_panel_than_it_started() {
+        let figure = series_figure(&[10.0, 11.0, 12.0, 13.0, 14.0]).unwrap();
+        let width = usize::from(RADAR_FIGURE_WIDTH);
+        let first = (0..usize::from(RADAR_FIGURE_HEIGHT))
+            .find(|row| figure.pixels[row * width])
+            .unwrap();
+        let last = (0..usize::from(RADAR_FIGURE_HEIGHT))
+            .find(|row| figure.pixels[row * width + width - 1])
+            .unwrap();
+        // Row 0 is the top of the panel, so "higher" means a smaller row.
+        assert!(last < first, "ends at row {last}, started at {first}");
+    }
+
+    #[test]
+    fn a_falling_series_ends_lower() {
+        let figure = series_figure(&[14.0, 13.0, 12.0, 11.0, 10.0]).unwrap();
+        let width = usize::from(RADAR_FIGURE_WIDTH);
+        let first = (0..usize::from(RADAR_FIGURE_HEIGHT))
+            .find(|row| figure.pixels[row * width])
+            .unwrap();
+        let last = (0..usize::from(RADAR_FIGURE_HEIGHT))
+            .find(|row| figure.pixels[row * width + width - 1])
+            .unwrap();
+        assert!(last > first, "ends at row {last}, started at {first}");
+    }
+
+    /// Scaled to its own range: a three-dollar move on a five-hundred-dollar
+    /// stock is the whole story of the day and must not render as a flat line.
+    #[test]
+    fn a_small_move_on_a_large_price_still_reads_as_a_move() {
+        let figure = series_figure(&[511.0, 512.5, 511.5, 514.0]).unwrap();
+        assert!(
+            rows_with_ink(&figure).len() > usize::from(RADAR_FIGURE_HEIGHT) / 2,
+            "the line used {} of {RADAR_FIGURE_HEIGHT} rows",
+            rows_with_ink(&figure).len()
+        );
+    }
+
+    #[test]
+    fn a_flat_series_is_one_flat_line_rather_than_an_edge_or_a_panic() {
+        let figure = series_figure(&[7.0, 7.0, 7.0, 7.0]).unwrap();
+        let rows = rows_with_ink(&figure);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0] > 0 && rows[0] < usize::from(RADAR_FIGURE_HEIGHT) - 1);
+    }
+
+    /// One point is not a line, and neither is nothing.
+    #[test]
+    fn too_few_points_draw_nothing() {
+        assert!(series_figure(&[]).is_none());
+        assert!(series_figure(&[42.0]).is_none());
+        assert!(series_figure(&[f64::NAN, f64::INFINITY]).is_none());
+    }
+
+    #[test]
+    fn the_line_is_continuous_across_a_steep_move() {
+        // Every column carries ink, so a jump never breaks the line in two.
+        let figure = series_figure(&[1.0, 100.0, 1.0, 100.0]).unwrap();
+        let width = usize::from(RADAR_FIGURE_WIDTH);
+        for column in 0..width {
+            assert!(
+                (0..usize::from(RADAR_FIGURE_HEIGHT))
+                    .any(|row| figure.pixels[row * width + column]),
+                "column {column} is empty"
+            );
+        }
+    }
+
+    #[test]
+    fn the_figure_fits_the_same_box_radar_does() {
+        let figure = series_figure(&[1.0, 5.0, 2.0, 9.0]).unwrap();
+        let mut frame = MonoFrame::white();
+        figure.draw(&mut frame, 132, 30);
+        assert!(!frame.is_black(131, 50));
+        assert!(!frame.is_black(228, 50));
+        assert!(!frame.is_black(180, 29));
+        assert!(!frame.is_black(180, 72));
     }
 }

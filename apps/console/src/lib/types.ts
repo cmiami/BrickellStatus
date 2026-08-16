@@ -54,6 +54,8 @@ export interface ChannelSignal {
   expiresAt?: string;
   band?: string;
   imminenceMinutes?: number;
+  // Recent values behind the headline, oldest first — a shape to draw.
+  series?: number[];
 }
 
 // How this channel ranks against every other, computed once in the engine.

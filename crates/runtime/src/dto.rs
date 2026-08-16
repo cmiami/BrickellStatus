@@ -196,7 +196,10 @@ pub enum ChannelKindDto {
     System,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+// No `Eq`: the signal now carries a price series, and float equality is not an
+// equivalence relation. Nothing compares signals for identity anyway — that is
+// what `band` and `material_key` are for.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelSignalDto {
     /// Provider-authored event title, normalized and bounded for delivery.
@@ -231,6 +234,11 @@ pub struct ChannelSignalDto {
     /// being able to say when something matters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imminence_minutes: Option<u16>,
+    /// Recent values behind the headline, oldest first, in the signal's own
+    /// units — a shape to draw, not a record to read from. Surfaces plot it;
+    /// nothing computes with it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub series: Vec<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

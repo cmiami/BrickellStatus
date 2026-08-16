@@ -16,6 +16,11 @@ const YAHOO_QUOTE_ROOT: &str = "https://finance.yahoo.com/quote/";
 const MAX_SYMBOL_CHARS: usize = 32;
 const MAX_LABEL_CHARS: usize = 64;
 const MAX_USER_AGENT_CHARS: usize = 256;
+/// Points kept for the drawn line. Enough to show the session's shape at the
+/// sizes this is rendered at — a 250 px card and a 96 px panel figure — without
+/// carrying a full tick history through the snapshot on every poll.
+const SERIES_POINTS: usize = 32;
+
 const MAX_BODY_BYTES: usize = 512 * 1024;
 
 /// Trading session inferred from the provider's current trading-period bounds.
@@ -272,6 +277,13 @@ pub fn parse_yahoo_chart(
         detail: "chart.result[0].meta is missing".into(),
     })?;
 
+    let closes = result
+        .indicators
+        .as_ref()
+        .and_then(|indicators| indicators.quote.as_ref())
+        .and_then(|quotes| quotes.first())
+        .and_then(|quote| quote.close.as_deref());
+    let series = price_series(closes);
     let last_sample = last_series_sample(
         result.timestamp.as_deref(),
         result
@@ -343,6 +355,12 @@ pub fn parse_yahoo_chart(
             json!("regular market price versus previous close"),
         ),
     ]);
+    // The session's shape, not just its endpoints. A number tells you the stock
+    // moved; the line tells you whether it climbed all day or gave it all back
+    // after lunch, which is the part a glance actually reads.
+    if !series.is_empty() {
+        attributes.insert("series".into(), json!(series));
+    }
     insert_text(&mut attributes, "currency", meta.currency, 16);
     insert_text(
         &mut attributes,
@@ -428,6 +446,34 @@ fn valid_period(period: &TradingPeriod) -> Option<(i64, i64)> {
     let start = period.start?;
     let end = period.end?;
     (start <= end).then_some((start, end))
+}
+
+/// Closes across the session, oldest first, downsampled for drawing.
+///
+/// Gaps are dropped rather than interpolated: a halted or thin symbol has
+/// missing prints, and inventing values to keep the line smooth would draw a
+/// price that never traded. The result is a shape, not a record — anything that
+/// needs exact values reads `price` and `previous_close`.
+fn price_series(closes: Option<&[Option<f64>]>) -> Vec<f64> {
+    let values = closes
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|value| *value)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .collect::<Vec<_>>();
+    if values.len() <= SERIES_POINTS {
+        return values;
+    }
+    // Even stride across the whole session, always keeping the last print so
+    // the line ends where the quoted price does.
+    let stride = values.len() as f64 / SERIES_POINTS as f64;
+    let mut sampled = (0..SERIES_POINTS)
+        .map(|index| values[((index as f64 * stride) as usize).min(values.len() - 1)])
+        .collect::<Vec<_>>();
+    if let (Some(last), Some(final_value)) = (sampled.last_mut(), values.last()) {
+        *last = *final_value;
+    }
+    sampled
 }
 
 fn last_series_sample(
@@ -689,5 +735,52 @@ mod tests {
         let health = health_for_delay(cursor_delay(Some(&cursor)));
         assert_eq!(health.state, crate::HealthState::Degraded);
         assert!(health.message.as_deref().unwrap().contains("15 minute"));
+    }
+
+    /// The line is a shape, not a record. It has to end where the quote does,
+    /// stay inside the drawing budget, and never invent a price that did not
+    /// trade.
+    #[test]
+    fn the_price_series_is_downsampled_without_inventing_prices() {
+        let raw = (0..200)
+            .map(|index| Some(100.0 + f64::from(index)))
+            .collect::<Vec<_>>();
+        let series = price_series(Some(&raw));
+        assert_eq!(series.len(), SERIES_POINTS);
+        assert_eq!(series.first().copied(), Some(100.0));
+        // The last point is the last print, so the line ends at the quote.
+        assert_eq!(series.last().copied(), Some(299.0));
+        // Every drawn value is a value that actually appeared.
+        for value in &series {
+            assert!(raw.contains(&Some(*value)), "{value} was never traded");
+        }
+    }
+
+    /// A halted or thin symbol has missing prints. Interpolating them would
+    /// draw prices that never existed; dropping them draws a shorter line.
+    #[test]
+    fn gaps_are_dropped_rather_than_filled() {
+        let series = price_series(Some(&[Some(10.0), None, Some(12.0), None, Some(11.0)]));
+        assert_eq!(series, vec![10.0, 12.0, 11.0]);
+    }
+
+    #[test]
+    fn nonsense_samples_never_reach_the_line() {
+        let series = price_series(Some(&[
+            Some(10.0),
+            Some(f64::NAN),
+            Some(-4.0),
+            Some(0.0),
+            Some(f64::INFINITY),
+            Some(11.0),
+        ]));
+        assert_eq!(series, vec![10.0, 11.0]);
+        assert!(price_series(None).is_empty());
+    }
+
+    #[test]
+    fn a_short_session_is_kept_whole() {
+        let raw = [Some(1.0), Some(2.0), Some(3.0)];
+        assert_eq!(price_series(Some(&raw)), vec![1.0, 2.0, 3.0]);
     }
 }

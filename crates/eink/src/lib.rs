@@ -37,5 +37,6 @@ pub use protocol::{
 };
 pub use radar::{
     RADAR_FIGURE_HEIGHT, RADAR_FIGURE_WIDTH, RadarError, RadarFigure, radar_figure_from_png,
+    series_figure,
 };
 pub use render::{RenderConfig, RenderError, render_snapshot};

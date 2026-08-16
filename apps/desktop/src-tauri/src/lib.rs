@@ -28,7 +28,7 @@ use bridgestatus_eink::{
     ChannelAvailability, ChannelCard, ChannelKind, ChannelSource, ChannelUrgency, EtaRange,
     Evidence, Freshness, LiveSnapshot, MonoFrame, RadarFigure, RefreshMode, RenderConfig,
     SnapshotState, preview_png_bytes, radar_figure_from_png, render_channel_card,
-    render_channel_card_with_radar, render_snapshot,
+    render_channel_card_with_radar, render_snapshot, series_figure,
     transport::{
         BleConfig, BleTransport, TransportKind, TransportReceipt, UsbConfig, UsbTransport,
         discover_ble_devices, discover_espressif_devices,
@@ -1647,9 +1647,21 @@ async fn send_rotating_snapshot_to_display(
             }
         }
     } else {
-        // Radar corroborates a weather card and would be noise on any other.
-        let radar = radar.filter(|_| channel.kind == ChannelKindDto::Weather);
-        match render_channel_card_with_radar(&channel_card(channel, preferences, snapshot), radar) {
+        // One box, two things that can occupy it: radar corroborates a weather
+        // card, a price line is the market card's whole point, and neither
+        // belongs on any other kind.
+        let drawn = match channel.kind {
+            ChannelKindDto::Weather => radar.cloned(),
+            ChannelKindDto::Markets => channel
+                .signal
+                .as_ref()
+                .and_then(|signal| series_figure(&signal.series)),
+            _ => None,
+        };
+        match render_channel_card_with_radar(
+            &channel_card(channel, preferences, snapshot),
+            drawn.as_ref(),
+        ) {
             Ok(frame) => frame,
             Err(error) => {
                 return (

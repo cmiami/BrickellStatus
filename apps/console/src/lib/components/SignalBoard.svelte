@@ -8,6 +8,7 @@
     Waves
   } from '@lucide/svelte';
 
+  import Sparkline from './Sparkline.svelte';
   import type { ChannelSnapshot } from '$lib/types';
 
   let { channels }: { channels: ChannelSnapshot[] } = $props();
@@ -32,6 +33,11 @@
     if (kind === 'markets') return ChartNoAxesCombined;
     return BellRing;
   };
+
+  // A series that ends above where it began is rising. Read off the line
+  // itself rather than off the percentage, so the colour can never disagree
+  // with the shape drawn beside it.
+  const rising = (series: number[]) => series[series.length - 1] >= series[0];
 
   // The countdown is the reason this channel is where it is in the order, so
   // it is the thing set in type rather than buried in the detail line.
@@ -63,6 +69,13 @@
             {#if timing}<strong class="signal-countdown">{timing}</strong>{/if}
           </div>
           <p class="signal-headline">{channel.signal?.headline}</p>
+          {#if channel.signal?.series?.length}
+            <Sparkline
+              values={channel.signal.series}
+              rising={rising(channel.signal.series)}
+              label={`${channel.signal.headline} over the session`}
+            />
+          {/if}
           <p class="signal-detail">{channel.signal?.detail}</p>
         </article>
       {/each}
@@ -102,7 +115,7 @@
   }
 
   .signal-card[data-urgency='emergency'] {
-    border-inline-start-color: var(--alert);
+    border-inline-start-color: var(--danger);
   }
 
   .signal-kicker {
@@ -125,7 +138,7 @@
   }
 
   .signal-card[data-urgency='emergency'] .signal-countdown {
-    background: var(--alert);
+    background: var(--danger);
   }
 
   .signal-headline {

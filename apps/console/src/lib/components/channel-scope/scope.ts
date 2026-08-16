@@ -1,6 +1,9 @@
 import type { ChannelPreference } from '$lib/types';
 
-export type ChannelChange = (channel: ChannelPreference) => void;
+// `commit` marks a change the reader has finished making — flipping a switch,
+// picking from a menu — as opposed to one they are still typing. Switches save
+// themselves; typed fields wait, because nobody wants a write per keystroke.
+export type ChannelChange = (channel: ChannelPreference, commit?: boolean) => void;
 
 export function scopeText(channel: ChannelPreference, key: string, fallback = ''): string {
   const value = channel.scope[key];
@@ -26,9 +29,10 @@ export function setScope(
   channel: ChannelPreference,
   onchange: ChannelChange,
   key: string,
-  value: string | number | boolean | string[]
+  value: string | number | boolean | string[],
+  commit = typeof value === 'boolean'
 ): void {
-  onchange({ ...channel, scope: { ...channel.scope, [key]: value } });
+  onchange({ ...channel, scope: { ...channel.scope, [key]: value } }, commit);
 }
 
 export function toggleScopeList(
@@ -39,5 +43,11 @@ export function toggleScopeList(
   enabled: boolean
 ): void {
   const current = scopeList(channel, key);
-  setScope(channel, onchange, key, enabled ? [...new Set([...current, value])] : current.filter((item) => item !== value));
+  setScope(
+    channel,
+    onchange,
+    key,
+    enabled ? [...new Set([...current, value])] : current.filter((item) => item !== value),
+    true
+  );
 }
