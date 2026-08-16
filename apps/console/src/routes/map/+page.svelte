@@ -1,7 +1,6 @@
 <script lang="ts">
   import {
     ArrowLeft,
-    Check,
     Crosshair,
     LocateFixed,
     MapPinned,
@@ -10,11 +9,11 @@
     Plus,
     Save,
     Search,
-    Trash2,
-    X
+    Trash2
   } from '@lucide/svelte';
 
   import LocationMap from '$lib/components/LocationMap.svelte';
+  import PinModal from '$lib/components/PinModal.svelte';
   import SwitchField from '$lib/components/SwitchField.svelte';
   import { getDeviceLocation, getRadarLayer, searchLocations } from '$lib/api';
   import { notice, persistPreferences, preferences, saving, snapshot } from '$lib/state';
@@ -40,6 +39,8 @@
   let selectedAreaId = $state<string | null>(null);
   let selectedVesselId = $state<string | null>(null);
   let radar = $state<RadarLayer | null>(null);
+  let pinSaving = $state(false);
+  let pinError = $state<string | null>(null);
 
   // RainViewer publishes a new composite about every ten minutes; the backend
   // caches within that, so this interval costs nothing when nothing has changed.
@@ -212,32 +213,27 @@
   function discardCandidate() {
     candidate = null;
     candidateEditingId = null;
+    pinError = null;
   }
 
-  function commitCandidate() {
-    if (!draft || !candidate) return;
-    const label = candidate.label.trim();
-    if (!label) {
-      searchError = 'Give this area a name before adding it.';
-      return;
-    }
+  // Saving the pin saves the place. Dropping a pin and then hunting for a
+  // separate Save button elsewhere on the page is how a coordinate gets lost.
+  async function commitCandidate(named: AlertArea) {
+    if (!draft) return;
+    pinError = null;
 
     const duplicate = draft.areas.find(
       (area) =>
         area.id !== candidateEditingId &&
-        Math.abs(area.latitude - candidate!.latitude) < 0.0001 &&
-        Math.abs(area.longitude - candidate!.longitude) < 0.0001
+        Math.abs(area.latitude - named.latitude) < 0.0001 &&
+        Math.abs(area.longitude - named.longitude) < 0.0001
     );
     if (duplicate) {
-      searchError = `${duplicate.label} already covers this point.`;
+      pinError = `${duplicate.label} already covers this point.`;
       return;
     }
 
-    const committed: AlertArea = {
-      ...candidate,
-      id: candidateEditingId ?? areaId(),
-      label
-    };
+    const committed: AlertArea = { ...named, id: candidateEditingId ?? areaId() };
     if (candidateEditingId) {
       draft.areas = draft.areas.map((area) => (area.id === candidateEditingId ? committed : area));
     } else {
@@ -245,13 +241,16 @@
     }
     assignAreaToChannels(committed);
     selectedAreaId = committed.id;
+
+    pinSaving = true;
+    try {
+      await persistPreferences($state.snapshot(draft));
+    } finally {
+      pinSaving = false;
+    }
     candidate = null;
     candidateEditingId = null;
     searchError = null;
-    notice.set({
-      ok: true,
-      message: `${committed.label} is staged locally. Save map settings to start its enabled collectors.`
-    });
   }
 
   async function search() {
@@ -393,46 +392,10 @@
           </span>
         </button>
 
-        {#if candidate}
-          <section class="candidate-ticket" aria-labelledby="candidate-heading">
-            <div class="candidate-kicker"><Move size={16} aria-hidden="true" /> Pin ready to tune</div>
-            <h3 id="candidate-heading">{candidateEditingId ? 'Adjust saved area' : 'Prepare new area'}</h3>
-            <label class="field candidate-name">
-              <span>Area name</span>
-              <input bind:value={candidate.label} maxlength="100" placeholder="Home, office, marina…" />
-            </label>
-            <div class="candidate-coordinate">
-              <strong>{candidate.latitude.toFixed(5)}</strong>
-              <span>latitude</span>
-              <strong>{candidate.longitude.toFixed(5)}</strong>
-              <span>longitude</span>
-            </div>
-            <p class="candidate-timezone">{candidate.timeZone} · if you move the pin far beyond its region, confirm the zone under Advanced coordinates.</p>
-            <div class="candidate-toggles">
-              <label>
-                <input type="checkbox" bind:checked={candidate.weatherEnabled} />
-                <span><strong>Weather</strong><small>Rain, wind, routine forecast</small></span>
-              </label>
-              <label>
-                <input type="checkbox" bind:checked={candidate.officialAlertsEnabled} />
-                <span><strong>Official</strong><small>{candidate.countryCode === 'US' ? 'NWS point alerts' : 'Enable only where a provider supports it'}</small></span>
-              </label>
-              <label>
-                <input type="checkbox" bind:checked={candidate.tropicalContextEnabled} />
-                <span><strong>Tropical</strong><small>Storm context for this area</small></span>
-              </label>
-            </div>
-            <div class="candidate-actions">
-              <button class="commit-pin" onclick={commitCandidate}><Check size={16} aria-hidden="true" /> {candidateEditingId ? 'Apply pin' : 'Add area'}</button>
-              <button class="discard-pin" onclick={discardCandidate}><X size={16} aria-hidden="true" /> Cancel</button>
-            </div>
-          </section>
-        {:else}
-          <div class="finder-note">
-            <Crosshair size={19} strokeWidth={1.5} aria-hidden="true" />
-            <p><strong>Freehand works too.</strong> Click anywhere on the map to drop a draggable pin.</p>
-          </div>
-        {/if}
+        <div class="finder-note">
+          <Crosshair size={19} strokeWidth={1.5} aria-hidden="true" />
+          <p><strong>Freehand works too.</strong> Click anywhere on the map to drop a pin and name it.</p>
+        </div>
 
         {#if searchError}
           <p class="finder-error" role="alert">{searchError}</p>
@@ -451,6 +414,17 @@
           </div>
         </aside>
       </aside>
+
+      {#if candidate}
+        <PinModal
+          area={candidate}
+          editing={candidateEditingId !== null}
+          saving={pinSaving}
+          error={pinError}
+          onsave={commitCandidate}
+          oncancel={discardCandidate}
+        />
+      {/if}
 
       <LocationMap
         points={mapPoints}
@@ -601,8 +575,6 @@
 
   .back-link,
   .save-action,
-  .candidate-kicker,
-  .candidate-actions button,
   .row-actions button {
     display: inline-flex;
     align-items: center;
@@ -652,7 +624,6 @@
 
   .area-finder > header,
   .area-finder > .search-results,
-  .area-finder > .candidate-ticket,
   .area-finder > .finder-note,
   .area-finder > .finder-error,
   .area-finder > .attribution,
@@ -811,128 +782,6 @@
     color: inherit;
     font-size: var(--type-micro);
     opacity: 0.76;
-  }
-
-  .candidate-ticket {
-    color: var(--graphite);
-    background: var(--frost);
-    border-top: 6px solid var(--amber);
-    padding: 17px;
-  }
-
-  .candidate-kicker {
-    gap: 6px;
-    color: var(--amber-ink);
-    font-family: var(--font-instrument);
-    font-size: var(--type-micro);
-    font-weight: 700;
-    letter-spacing: 0.07em;
-    text-transform: uppercase;
-  }
-
-  .candidate-ticket h3 {
-    margin: 6px 0 16px;
-    color: var(--marine);
-    font-size: var(--type-title);
-    text-transform: uppercase;
-  }
-
-  .candidate-name input {
-    background: var(--white);
-  }
-
-  .candidate-coordinate {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 2px 9px;
-    margin-top: 12px;
-    padding-block: 10px;
-    border-block: 1px solid var(--rule);
-  }
-
-  .candidate-coordinate strong {
-    font-family: var(--font-instrument);
-    font-size: var(--type-label);
-  }
-
-  .candidate-coordinate span {
-    color: var(--muted);
-    font-size: var(--type-micro);
-    text-transform: uppercase;
-  }
-
-  .candidate-timezone {
-    margin: 8px 0 0;
-    color: var(--muted);
-    font-size: var(--type-micro);
-    line-height: 1.4;
-  }
-
-  .candidate-toggles {
-    display: grid;
-    margin-top: 9px;
-  }
-
-  .candidate-toggles label {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 9px;
-    padding-block: 8px;
-    border-bottom: 1px solid var(--rule);
-  }
-
-  .candidate-toggles input {
-    width: 17px;
-    height: 17px;
-    margin: 1px 0 0;
-    accent-color: var(--marine);
-  }
-
-  .candidate-toggles label > span {
-    display: grid;
-    gap: 2px;
-  }
-
-  .candidate-toggles strong {
-    font-family: var(--font-instrument);
-    font-size: var(--type-label);
-    text-transform: uppercase;
-  }
-
-  .candidate-toggles small {
-    color: var(--muted);
-    font-size: var(--type-micro);
-    line-height: 1.35;
-  }
-
-  .candidate-actions {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    gap: 8px;
-    margin-top: 15px;
-  }
-
-  .candidate-actions button {
-    justify-content: center;
-    gap: 6px;
-    min-height: 39px;
-    font-family: var(--font-instrument);
-    font-size: var(--type-label);
-    font-weight: 700;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    cursor: pointer;
-  }
-
-  .commit-pin {
-    color: var(--white);
-    background: var(--marine);
-  }
-
-  .discard-pin {
-    color: var(--muted);
-    background: transparent;
-    border: 1px solid var(--rule-strong);
   }
 
   .finder-note {

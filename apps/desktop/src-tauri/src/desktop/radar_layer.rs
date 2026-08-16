@@ -195,8 +195,31 @@ fn radar_layer_from_items(items: &[CollectorItem], now_ms: i64) -> Option<RadarL
     })
 }
 
+/// Whether the reader wants radar at all.
+///
+/// One switch for both surfaces. The map's own toggle hides the layer for this
+/// session; this decides whether it is offered, and whether the panel spends a
+/// fetch on it.
+fn radar_enabled(preferences: &AppPreferences) -> bool {
+    preferences
+        .profile
+        .channels
+        .iter()
+        .find(|channel| channel.kind == ChannelKindDto::Weather)
+        .is_none_or(|channel| {
+            channel
+                .scope
+                .get("radarEnabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+        })
+}
+
 #[tauri::command]
 async fn get_radar_layer(state: State<'_, DesktopState>) -> Result<Option<RadarLayer>, String> {
+    if !radar_enabled(&state.engine.get_preferences().await) {
+        return Ok(None);
+    }
     Ok(state
         .radar
         .layer(
@@ -217,6 +240,9 @@ async fn panel_radar_figure(
     preferences: &AppPreferences,
     channel_id: &str,
 ) -> Option<RadarFigure> {
+    if !radar_enabled(preferences) {
+        return None;
+    }
     snapshot
         .channels
         .iter()

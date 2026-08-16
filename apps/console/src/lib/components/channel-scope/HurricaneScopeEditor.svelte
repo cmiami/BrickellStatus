@@ -1,9 +1,9 @@
 <script lang="ts">
-  import SwitchField from '$lib/components/SwitchField.svelte';
   import type { ChannelPreference } from '$lib/types';
-  import { scopeBool, setScope, type ChannelChange } from './scope';
+  import type { ChannelChange } from './scope';
 
-  let { channel, onchannelchange }: { channel: ChannelPreference; onchannelchange: ChannelChange } = $props();
+  // Retained so the dispatcher's props stay uniform across every editor.
+  let { channel }: { channel: ChannelPreference; onchannelchange: ChannelChange } = $props();
 </script>
 
 <div class="hurricane-scope">
@@ -27,21 +27,14 @@
     </div>
   </section>
 
-  <section class:enabled={scopeBool(channel, 'allAtlanticSystems', false)} class="activation-rule">
-    <div>
-      <p class="registration-label">Activation</p>
-      <strong>{scopeBool(channel, 'allAtlanticSystems', false) ? 'Every active Atlantic cyclone' : 'Context only'}</strong>
-      <span>{scopeBool(channel, 'allAtlanticSystems', false)
-        ? 'Any active Atlantic cyclone may activate this channel.'
-        : 'Official products remain visible without taking over the display.'}</span>
-    </div>
-    <SwitchField
-      checked={scopeBool(channel, 'allAtlanticSystems', false)}
-      label="Activate for every Atlantic cyclone"
-      description="Basin-wide status, not a local threat calculation."
-      onchange={(enabled) => setScope(channel, onchannelchange, 'allAtlanticSystems', enabled)}
-    />
-  </section>
+  <!-- The switch that used to live here read "activate for every Atlantic
+       cyclone", defaulted off, and was the only way this channel could ever
+       activate — so it never did. Proximity to a saved place decides now, and
+       there is nothing left to configure. -->
+  <p class="activation-note">
+    A cyclone activates this channel when it comes within range of a place you saved with tropical
+    context switched on. Storms elsewhere in the basin stay off the display.
+  </p>
 
   <p class="scope-note">NWS remains the authority for location-specific warnings.</p>
 </div>
@@ -52,8 +45,17 @@
     gap: 14px;
   }
 
-  .source-register,
-  .activation-rule {
+  .activation-note {
+    margin: 0;
+    padding: 16px;
+    color: var(--ink);
+    font-size: var(--type-caption);
+    line-height: 1.55;
+    background: var(--paper);
+    border: 1px solid var(--rule-strong);
+  }
+
+  .source-register {
     background: var(--paper);
     border: 1px solid var(--rule-strong);
   }
@@ -70,10 +72,6 @@
 
   .source-register h4,
   .source-register p,
-  .activation-rule p {
-    margin: 0;
-  }
-
   .source-register h4 {
     margin-top: 4px;
     font-size: var(--type-section);
@@ -107,35 +105,11 @@
   }
 
   .source-rows strong,
-  .activation-rule strong {
-    font-family: var(--font-instrument);
-    font-size: var(--type-title);
-    text-transform: uppercase;
-  }
-
   .source-rows span,
-  .activation-rule span,
   .scope-note {
     color: var(--muted);
     font-size: var(--type-caption);
     line-height: 1.45;
-  }
-
-  .activation-rule {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(260px, 0.8fr);
-    align-items: center;
-    gap: 22px;
-    padding: 16px;
-  }
-
-  .activation-rule.enabled {
-    background: var(--amber-sheet);
-  }
-
-  .activation-rule > div {
-    display: grid;
-    gap: 5px;
   }
 
   .scope-note {
@@ -144,10 +118,6 @@
 
   @media (max-width: 720px) {
     .source-rows,
-    .activation-rule {
-      grid-template-columns: 1fr;
-    }
-
     .source-rows > div {
       border-inline-end: 0;
       border-bottom: 1px solid var(--rule);

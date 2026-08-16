@@ -45,11 +45,6 @@
     });
   }
 
-  function distanceInput(event: Event) {
-    const input = event.currentTarget as HTMLInputElement;
-    const meters = unitSystem === 'metric' ? input.valueAsNumber : input.valueAsNumber / 3.280_84;
-    set('radiusMeters', Number.isFinite(meters) ? Number(meters.toFixed(2)) : 250);
-  }
 </script>
 
 <div class="bridge-scope">
@@ -91,7 +86,7 @@
       onpick={setCoordinates}
     />
     <details>
-      <summary>Advanced coordinates and discovery radius</summary>
+      <summary>Advanced coordinates</summary>
       <div class="coordinate-fields">
         <label class="field">
           <span>Latitude</span>
@@ -100,19 +95,6 @@
         <label class="field">
           <span>Longitude</span>
           <input type="number" step="0.00001" min="-180" max="180" value={scopeNumber(channel, 'longitude', -80.19005)} oninput={(event) => set('longitude', event.currentTarget.valueAsNumber)} />
-        </label>
-        <label class="field">
-          <span>Discovery radius</span>
-          <input
-            type="number"
-            min={unitSystem === 'metric' ? 50 : 164}
-            max={unitSystem === 'metric' ? 2000 : 6562}
-            value={unitSystem === 'metric'
-              ? scopeNumber(channel, 'radiusMeters', 250)
-              : Math.round(scopeNumber(channel, 'radiusMeters', 250) * 3.280_84)}
-            oninput={distanceInput}
-          />
-          <small class="field-note">{unitSystem === 'metric' ? 'Meters' : 'Feet'} around the bridge.</small>
         </label>
       </div>
     </details>

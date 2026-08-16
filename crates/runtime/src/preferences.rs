@@ -124,6 +124,7 @@ pub fn default_channel_preferences() -> Vec<ChannelPreference> {
                 ("areaIds".into(), json!(["area.miami"])),
                 ("rainAlertEnabled".into(), json!(true)),
                 ("windAlertEnabled".into(), json!(true)),
+                ("radarEnabled".into(), json!(true)),
                 ("rainProbabilityThreshold".into(), json!(60)),
                 ("rainLeadMinutes".into(), json!(90)),
                 ("windGustMph".into(), json!(40)),
@@ -166,7 +167,6 @@ pub fn default_channel_preferences() -> Vec<ChannelPreference> {
             scope: BTreeMap::from([
                 ("place".into(), json!("Miami, FL")),
                 ("areaIds".into(), json!(["area.miami"])),
-                ("allAtlanticSystems".into(), json!(false)),
             ]),
         },
         ChannelPreference {
@@ -530,7 +530,7 @@ fn validate_earthquake_scope(channel: &ChannelPreference) -> Result<(), Preferen
 }
 
 fn validate_weather_scope(channel: &ChannelPreference) -> Result<(), PreferencesError> {
-    for key in ["rainAlertEnabled", "windAlertEnabled"] {
+    for key in ["rainAlertEnabled", "windAlertEnabled", "radarEnabled"] {
         if let Some(value) = channel.scope.get(key)
             && !value.is_boolean()
         {
@@ -539,6 +539,10 @@ fn validate_weather_scope(channel: &ChannelPreference) -> Result<(), Preferences
     }
     bounded_number(channel, "rainProbabilityThreshold", 1.0, 100.0)?;
     bounded_number(channel, "rainLeadMinutes", 0.0, 1_440.0)?;
+    // No UI, but still validated: an override written by hand into preferences
+    // must not be able to arm the rain rule on drizzle or silence it entirely.
+    bounded_number(channel, "rainAmountMm", 0.01, 50.0)?;
+    bounded_number(channel, "rainWindowMinutes", 5.0, 180.0)?;
     bounded_number(channel, "windGustMph", 10.0, 160.0)?;
     Ok(())
 }

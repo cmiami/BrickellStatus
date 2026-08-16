@@ -21,11 +21,6 @@
     onchannelchange({ ...channel, scope: { ...channel.scope, [key]: value } });
   }
 
-  function number(key: string, fallback: number): number {
-    const value = channel.scope[key];
-    return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
-  }
-
   function addSymbol() {
     const symbol = symbolDraft.trim().toUpperCase();
     if (!symbol) {
@@ -70,37 +65,6 @@
     </div>
     <span>{symbols.length} / 16</span>
   </header>
-
-  <div class="market-controls">
-    <label class="field">
-      <span>Material move</span>
-      <span class="threshold-input">
-        <input
-          type="number"
-          min="0.1"
-          max="100"
-          step="0.1"
-          value={number('movePercent', 5)}
-          oninput={(event) => set('movePercent', event.currentTarget.valueAsNumber)}
-        />
-        <b>%</b>
-      </span>
-      <small class="field-note">Absolute change from the previous close.</small>
-    </label>
-    <label class="field">
-      <span>Refresh cadence</span>
-      <select
-        value={String(number('pollSeconds', 300))}
-        onchange={(event) => set('pollSeconds', Number(event.currentTarget.value))}
-      >
-        <option value="120">Every 2 minutes</option>
-        <option value="300">Every 5 minutes</option>
-        <option value="600">Every 10 minutes</option>
-        <option value="1800">Every 30 minutes</option>
-      </select>
-      <small class="field-note">Manual refresh can still request a quote immediately.</small>
-    </label>
-  </div>
 
   <div class="symbol-entry">
     <label>
@@ -182,32 +146,6 @@
     font-size: var(--type-label);
     font-weight: 700;
     letter-spacing: 0.06em;
-  }
-
-  .market-controls {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 14px;
-    padding: 18px 16px 0;
-  }
-
-  .threshold-input {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 42px;
-  }
-
-  .threshold-input input {
-    border-inline-end: 0;
-  }
-
-  .threshold-input b {
-    display: grid;
-    place-items: center;
-    color: var(--white);
-    background: var(--marine);
-    border: 1px solid var(--graphite);
-    font-family: var(--font-instrument);
-    font-size: var(--type-title);
   }
 
   .symbol-entry {
@@ -307,7 +245,6 @@
   }
 
   @media (max-width: 680px) {
-    .market-controls,
     .symbol-entry {
       grid-template-columns: 1fr;
     }

@@ -89,6 +89,12 @@ const DEFAULT_RAIN_AMOUNT_MM: f64 = 0.05;
 const DEFAULT_RAIN_WINDOW_MINUTES: f64 = 30.0;
 /// One 15-minute bin, in milliseconds.
 const MINUTELY_BIN_MS: i64 = 15 * 60 * 1_000;
+/// How near a tropical cyclone has to be before it is this reader's problem.
+///
+/// Tropical-storm-force wind fields rarely reach beyond about 500 km, so 700
+/// leaves roughly a day of warning at typical forward speeds without turning
+/// every storm in the basin into a notification.
+const DEFAULT_HURRICANE_RADIUS_KM: f64 = 700.0;
 
 fn channel_imminence_minutes(
     kind: ChannelKindDto,
@@ -568,9 +574,7 @@ fn channel_material_item_matches(
         ChannelKindDto::Bridge => item.kind == ItemKind::Bridge,
         ChannelKindDto::Weather => weather_item_activation_score(item, channel, now_ms).is_some(),
         ChannelKindDto::Official => official_alert_matches_scope(item, channel, now_ms),
-        ChannelKindDto::Hurricane => {
-            scope_boolean(channel, "allAtlanticSystems", false) && atlantic_cyclone(item)
-        }
+        ChannelKindDto::Hurricane => atlantic_cyclone(item) && cyclone_is_local(item, channel),
         ChannelKindDto::News => news_item_matches_scope(item, channel, now_ms),
         ChannelKindDto::Earthquake => earthquake_matches_scope(item, channel, now_ms),
         ChannelKindDto::Markets => market_quote_view(item).is_some_and(|quote| {
@@ -578,6 +582,57 @@ fn channel_material_item_matches(
         }),
         ChannelKindDto::System => false,
     }
+}
+
+/// Whether a cyclone is close enough to any of this channel's saved places to
+/// be worth showing.
+///
+/// This replaces a switch that read "all Atlantic systems", defaulted off, and
+/// therefore made the channel unable to activate at all — the honest admission
+/// at the time was that local impact had not been implemented. Distance is a
+/// crude proxy for impact and is named as one: it says the storm is near, not
+/// that it will hit.
+///
+/// Fails closed. A storm with no position, or a channel with no saved place,
+/// does not activate — an unplaceable storm is not evidence of a nearby one.
+fn cyclone_is_local(item: &CollectorItem, channel: &ChannelPreference) -> bool {
+    let (Some(latitude), Some(longitude)) = (
+        item.location.as_ref().and_then(|location| location.latitude),
+        item.location
+            .as_ref()
+            .and_then(|location| location.longitude),
+    ) else {
+        return false;
+    };
+    let radius_km = scope_f64(channel, "hurricaneRadiusKm", DEFAULT_HURRICANE_RADIUS_KM);
+    if !radius_km.is_finite() || radius_km <= 0.0 {
+        return false;
+    }
+    item.attributes
+        .get("area_points")
+        .and_then(Value::as_array)
+        .is_some_and(|points| {
+            points.iter().any(|point| {
+                let (Some(area_latitude), Some(area_longitude)) = (
+                    point.get("lat").and_then(Value::as_f64),
+                    point.get("lon").and_then(Value::as_f64),
+                ) else {
+                    return false;
+                };
+                great_circle_km(latitude, longitude, area_latitude, area_longitude) <= radius_km
+            })
+        })
+}
+
+/// Great-circle distance in kilometres.
+fn great_circle_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    const EARTH_RADIUS_KM: f64 = 6_371.0;
+    let (lat1, lat2) = (lat1.to_radians(), lat2.to_radians());
+    let delta_lat = lat2 - lat1;
+    let delta_lon = (lon2 - lon1).to_radians();
+    let a = (delta_lat / 2.0).sin().powi(2)
+        + lat1.cos() * lat2.cos() * (delta_lon / 2.0).sin().powi(2);
+    2.0 * EARTH_RADIUS_KM * a.sqrt().clamp(0.0, 1.0).asin()
 }
 
 fn news_item_is_breaking(item: &CollectorItem) -> bool {
@@ -1541,21 +1596,24 @@ fn channel_summary(
             }
         }
         ChannelKindDto::Hurricane => {
-            let storms = items.iter().filter(|item| atlantic_cyclone(item)).count();
-            if storms == 0 {
-                (
+            let storms = items
+                .iter()
+                .filter(|item| atlantic_cyclone(item))
+                .collect::<Vec<_>>();
+            let near = storms
+                .iter()
+                .filter(|item| cyclone_is_local(item, channel))
+                .count();
+            match (storms.len(), near) {
+                (0, _) => (
                     "No active Atlantic cyclone in NHC CurrentStorms".into(),
                     false,
-                )
-            } else if !scope_boolean(channel, "allAtlanticSystems", false) {
-                (
-                    format!(
-                        "{storms} active Atlantic system(s) · activation suppressed because local impact is not implemented"
-                    ),
+                ),
+                (total, 0) => (
+                    format!("{total} active Atlantic system(s) · none within range of a saved place"),
                     false,
-                )
-            } else {
-                (format!("{storms} active Atlantic cyclone(s)"), true)
+                ),
+                (_, near) => (format!("{near} Atlantic cyclone(s) within range"), true),
             }
         }
         ChannelKindDto::News => {

@@ -513,7 +513,13 @@ fn news_item(id: &str, title: &str, now_ms: i64) -> CollectorItem {
     }
 }
 
+/// A storm in the Bahamas, roughly 400 km from Miami and so inside the range
+/// that decides whether this channel activates.
 fn tropical_item(id: &str) -> CollectorItem {
+    tropical_item_at(id, 24.0, -76.0)
+}
+
+fn tropical_item_at(id: &str, latitude: f64, longitude: f64) -> CollectorItem {
     CollectorItem {
         id: format!("nhc:{id}"),
         kind: ItemKind::TropicalCyclone,
@@ -522,12 +528,17 @@ fn tropical_item(id: &str) -> CollectorItem {
         observed_at: Some(chrono_now_for_fixture()),
         starts_at: None,
         ends_at: None,
-        location: Some(Location::point(21.4, -71.2)),
+        location: Some(Location::point(latitude, longitude)),
         source: SourceLink {
             name: "National Hurricane Center".into(),
             url: Some(Url::parse("https://www.nhc.noaa.gov/cyclones/").unwrap()),
         },
-        attributes: BTreeMap::new(),
+        // The area context collector attaches these to every tropical item; the
+        // locality rule reads them rather than the whole preference set.
+        attributes: BTreeMap::from([(
+            "area_points".into(),
+            json!([{"lat": 25.7699, "lon": -80.19005}]),
+        )]),
     }
 }
 
@@ -1781,10 +1792,10 @@ fn news_item_age_uses_the_entry_timestamp_and_fails_closed() {
 }
 
 #[test]
-fn tropical_scope_is_fixed_to_atlantic_and_has_one_enforced_activation_gate() {
+fn a_cyclone_activates_only_when_it_comes_within_range_of_a_saved_place() {
     let now_ms = 1_786_741_200_000;
     let preferences = AppPreferences::default();
-    let mut channel = preferences.profile.channels[3].clone();
+    let channel = preferences.profile.channels[3].clone();
     let atlantic = tropical_item("al092026");
     let pacific = tropical_item("ep052026");
     let coverage = ChannelCoverage {
@@ -1795,9 +1806,6 @@ fn tropical_scope_is_fixed_to_atlantic_and_has_one_enforced_activation_gate() {
         fresh_sources: 1,
     };
 
-    channel
-        .scope
-        .insert("allAtlanticSystems".into(), json!(true));
     let (pacific_summary, pacific_active) = channel_summary(
         ChannelKindDto::Hurricane,
         &channel,
@@ -1811,26 +1819,27 @@ fn tropical_scope_is_fixed_to_atlantic_and_has_one_enforced_activation_gate() {
     assert!(!pacific_active);
     assert!(pacific_summary.contains("No active Atlantic cyclone"));
 
-    channel
-        .scope
-        .insert("allAtlanticSystems".into(), json!(false));
-    let (guarded_summary, guarded_active) = channel_summary(
+    // A storm in the basin but nowhere near a saved place is context, not an
+    // alert. This replaces a switch that read "every Atlantic cyclone" and
+    // defaulted off, which is why the channel could never activate at all.
+    let distant = tropical_item_at("al032026", 15.0, -45.0);
+    let (distant_summary, distant_active) = channel_summary(
         ChannelKindDto::Hurricane,
         &channel,
-        &[&atlantic],
+        &[&distant],
         &clear_decision(),
         &coverage,
         now_ms,
         &preferences.areas,
         UnitSystem::Imperial,
     );
-    assert!(!guarded_active);
-    assert!(guarded_summary.contains("local impact is not implemented"));
+    assert!(!distant_active);
+    assert!(
+        distant_summary.contains("none within range"),
+        "{distant_summary}"
+    );
 
-    channel
-        .scope
-        .insert("allAtlanticSystems".into(), json!(true));
-    let (all_summary, all_active) = channel_summary(
+    let (near_summary, near_active) = channel_summary(
         ChannelKindDto::Hurricane,
         &channel,
         &[&atlantic],
@@ -1840,8 +1849,26 @@ fn tropical_scope_is_fixed_to_atlantic_and_has_one_enforced_activation_gate() {
         &preferences.areas,
         UnitSystem::Imperial,
     );
-    assert!(all_active);
-    assert!(all_summary.contains("1 active Atlantic cyclone"));
+    assert!(near_active);
+    assert!(near_summary.contains("within range"), "{near_summary}");
+
+    // A storm with no position cannot be placed, and an unplaceable storm is
+    // not evidence of a nearby one.
+    let mut unplaced = tropical_item("al042026");
+    unplaced.location = None;
+    assert!(
+        !channel_summary(
+            ChannelKindDto::Hurricane,
+            &channel,
+            &[&unplaced],
+            &clear_decision(),
+            &coverage,
+            now_ms,
+            &preferences.areas,
+            UnitSystem::Imperial,
+        )
+        .1
+    );
 }
 
 #[test]
@@ -1869,15 +1896,12 @@ fn material_key_changes_for_same_count_alert_replacements() {
         key(ChannelKindDto::News, news_channel, &news_b)
     );
 
-    let mut tropical_channel = preferences.profile.channels[3].clone();
-    tropical_channel
-        .scope
-        .insert("allAtlanticSystems".into(), json!(true));
+    let tropical_channel = &preferences.profile.channels[3];
     let storm_a = tropical_item("al012026");
     let storm_b = tropical_item("al022026");
     assert_ne!(
-        key(ChannelKindDto::Hurricane, &tropical_channel, &storm_a),
-        key(ChannelKindDto::Hurricane, &tropical_channel, &storm_b)
+        key(ChannelKindDto::Hurricane, tropical_channel, &storm_a),
+        key(ChannelKindDto::Hurricane, tropical_channel, &storm_b)
     );
 
     let mut earthquake_channel = preferences.profile.channels[5].clone();

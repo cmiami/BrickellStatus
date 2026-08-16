@@ -547,11 +547,22 @@ impl Collector for AreaContextCollector {
             .iter()
             .map(|area| area.label.as_str())
             .collect::<Vec<_>>();
+        // Coordinates travel with the item, not just names. A rule that has to
+        // answer "is this storm near me" cannot do it from a list of labels,
+        // and threading the whole preference set into every matcher to find out
+        // would be a much wider seam than this.
+        let area_points = self
+            .areas
+            .iter()
+            .map(|area| json!({"lat": area.latitude, "lon": area.longitude}))
+            .collect::<Vec<_>>();
         for item in &mut batch.items {
             item.id = format!("area:{}:{}", self.context_key, item.id);
             item.attributes.insert("area_ids".into(), json!(area_ids));
             item.attributes
                 .insert("area_labels".into(), json!(area_labels));
+            item.attributes
+                .insert("area_points".into(), json!(area_points));
             if let [area] = self.areas.as_slice() {
                 item.attributes.insert("area_id".into(), json!(area.id));
                 item.attributes

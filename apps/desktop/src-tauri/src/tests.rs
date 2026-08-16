@@ -1605,7 +1605,8 @@ mod panel {
 mod radar {
     use bridgestatus_collectors::parse_rainviewer_index;
 
-    use super::super::{panel_tile_url, radar_layer_from_items};
+    use super::super::{panel_tile_url, radar_enabled, radar_layer_from_items};
+    use super::*;
 
     const OBSERVED: i64 = 1_786_844_400;
 
@@ -1651,6 +1652,30 @@ mod radar {
         // A coordinate that cannot be formatted into a request never becomes one.
         assert!(panel_tile_url(&layer, f64::NAN, -80.19).is_none());
         assert!(panel_tile_url(&layer, 25.77, f64::INFINITY).is_none());
+    }
+
+    /// One switch governs both surfaces. The map's own toggle only hides the
+    /// layer for a session; this decides whether radar is offered at all, and
+    /// whether the panel spends a fetch on it.
+    #[tokio::test]
+    async fn turning_radar_off_stops_it_reaching_either_surface() {
+        let store = Store::in_memory().await.unwrap();
+        let engine = RuntimeEngine::new(store, RuntimeConfig::default())
+            .await
+            .unwrap();
+        let mut preferences = engine.get_preferences().await;
+        assert!(radar_enabled(&preferences), "radar ships on");
+
+        let weather = preferences
+            .profile
+            .channels
+            .iter_mut()
+            .find(|channel| channel.kind == ChannelKindDto::Weather)
+            .unwrap();
+        weather
+            .scope
+            .insert("radarEnabled".into(), serde_json::json!(false));
+        assert!(!radar_enabled(&preferences));
     }
 
     #[test]

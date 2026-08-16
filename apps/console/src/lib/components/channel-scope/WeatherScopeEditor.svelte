@@ -24,35 +24,30 @@
 <div class="weather-scope">
   <AreaCoverage {channel} {areas} {onchannelchange} />
   <div class="rulebook">
-    <section class:disabled={!scopeBool(channel, 'rainAlertEnabled', true)}>
-      <SwitchField
-        checked={scopeBool(channel, 'rainAlertEnabled', true)}
-        label="Rain heads-up"
-        description="Evaluate forecast rain only while this rule is enabled."
-        onchange={(enabled) => set('rainAlertEnabled', enabled)}
-      />
-      <div class="rule-fields">
-        <label class="field">
-          <span>Probability</span>
-          <input type="number" min="1" max="100" value={scopeNumber(channel, 'rainProbabilityThreshold', 60)} disabled={!scopeBool(channel, 'rainAlertEnabled', true)} oninput={(event) => set('rainProbabilityThreshold', event.currentTarget.valueAsNumber)} />
-          <small class="field-note">Percent required.</small>
-        </label>
-        <label class="field">
-          <span>Lead window</span>
-          <input type="number" min="0" max="1440" value={scopeNumber(channel, 'rainLeadMinutes', 90)} disabled={!scopeBool(channel, 'rainAlertEnabled', true)} oninput={(event) => set('rainLeadMinutes', event.currentTarget.valueAsNumber)} />
-          <small class="field-note">Minutes ahead.</small>
-        </label>
-      </div>
-    </section>
-    <section class:disabled={!scopeBool(channel, 'windAlertEnabled', true)}>
+    <!-- Rain has no threshold to set. It reads the forecast’s 15-minute
+         precipitation amounts and says when rain starts, which is an answer;
+         a probability slider only ever asked the reader to guess. -->
+    <SwitchField
+      checked={scopeBool(channel, 'rainAlertEnabled', true)}
+      label="Rain alerts"
+      description="Warn when rain is about to start, with the minutes until it does."
+      onchange={(enabled) => set('rainAlertEnabled', enabled)}
+    />
+    <SwitchField
+      checked={scopeBool(channel, 'radarEnabled', true)}
+      label="Radar"
+      description="Show the radar composite on the map and beside rain on the display."
+      onchange={(enabled) => set('radarEnabled', enabled)}
+    />
+    <div class="wind-rule">
       <SwitchField
         checked={scopeBool(channel, 'windAlertEnabled', true)}
-        label="Wind-gust heads-up"
-        description="Evaluate forecast gusts only while this rule is enabled."
+        label="Wind alerts"
+        description="Warn on forecast gusts above your own threshold."
         onchange={(enabled) => set('windAlertEnabled', enabled)}
       />
       <label class="field gust-field">
-        <span>Gust threshold</span>
+        <span>Above</span>
         <input
           type="number"
           min={unitSystem === 'metric' ? 16 : 10}
@@ -61,11 +56,11 @@
           disabled={!scopeBool(channel, 'windAlertEnabled', true)}
           oninput={windInput}
         />
-        <small class="field-note">{unitSystem === 'metric' ? 'Kilometers per hour.' : 'Miles per hour.'}</small>
+        <small class="field-note">{unitSystem === 'metric' ? 'km/h' : 'mph'}</small>
       </label>
-    </section>
+    </div>
   </div>
-  <p class="scope-note">Open-Meteo supplies forecasts. NWS warnings remain a separate official channel.</p>
+  <p class="scope-note">Forecasts come from Open-Meteo and radar from RainViewer. Official warnings are a separate channel.</p>
 </div>
 
 <style>
@@ -76,30 +71,22 @@
   }
 
   .rulebook {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .rulebook section {
-    display: grid;
-    align-content: start;
-    gap: 14px;
     padding: 16px;
     background: var(--paper);
     border: 1px solid var(--rule-strong);
   }
 
-  .rulebook section.disabled {
-    opacity: 0.58;
-  }
-
-  .rule-fields {
+  .wind-rule {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
+    grid-template-columns: 1fr auto;
+    gap: 16px;
+    align-items: end;
   }
 
   .gust-field {
-    max-width: 260px;
+    display: grid;
+    gap: 4px;
+    width: 130px;
   }
 
   .scope-note {
@@ -110,9 +97,9 @@
   }
 
   @media (max-width: 720px) {
-    .rulebook,
-    .rule-fields {
+    .wind-rule {
       grid-template-columns: 1fr;
+      align-items: start;
     }
   }
 </style>
