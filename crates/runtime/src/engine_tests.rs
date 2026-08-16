@@ -2778,9 +2778,11 @@ fn market_copy_never_names_the_feed_or_calls_a_slow_start_a_fault() {
     let mut channel = AppPreferences::default().profile.channels[6].clone();
     channel.enabled = true;
 
+    // A source failing every poll must not read as one that merely started a
+    // moment ago; the reader has to be able to tell those apart.
     let (pending, active) = market_activation(&channel, &[], AvailabilityDto::Offline);
     assert!(!active);
-    assert_eq!(pending, "Waiting for the first quote");
+    assert_eq!(pending, "Quotes unavailable");
 
     let (empty, _) = market_activation(&channel, &[], AvailabilityDto::Fresh);
     assert_eq!(empty, "No quote available");

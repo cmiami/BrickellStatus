@@ -583,6 +583,10 @@ fn chart_url(symbol: &str) -> Result<Url, CollectorError> {
     let mut url = Url::parse(YAHOO_CHART_ROOT).expect("constant Yahoo Chart URL is valid");
     url.path_segments_mut()
         .map_err(|()| CollectorError::Configuration("Yahoo Chart URL cannot hold a path".into()))?
+        // A URL ending in "/" already carries a final empty segment, so pushing
+        // onto it produces ".../chart//AMD" and a 404 from every request the app
+        // has ever made. Drop the empty one first.
+        .pop_if_empty()
         .push(symbol);
     url.query_pairs_mut()
         .append_pair("range", "1d")
@@ -595,6 +599,7 @@ fn quote_url(symbol: &str) -> Result<Url, CollectorError> {
     let mut url = Url::parse(YAHOO_QUOTE_ROOT).expect("constant Yahoo quote URL is valid");
     url.path_segments_mut()
         .map_err(|()| CollectorError::Configuration("Yahoo quote URL cannot hold a path".into()))?
+        .pop_if_empty()
         .push(symbol);
     Ok(url)
 }
@@ -782,5 +787,38 @@ mod tests {
     fn a_short_session_is_kept_whole() {
         let raw = [Some(1.0), Some(2.0), Some(3.0)];
         assert_eq!(price_series(Some(&raw)), vec![1.0, 2.0, 3.0]);
+    }
+
+    /// The exact URL, not just its query. A trailing slash on the base made
+    /// `push` append after the empty final segment, so every request the app
+    /// ever sent went to ".../chart//AMD" and came back 404. The old test only
+    /// checked the query pairs, which were fine.
+    #[test]
+    fn the_chart_url_has_no_empty_path_segment() {
+        assert_eq!(
+            chart_url("AMD").unwrap().as_str(),
+            "https://query2.finance.yahoo.com/v8/finance/chart/AMD\
+             ?range=1d&interval=5m&includePrePost=true"
+        );
+        assert!(!chart_url("AMD").unwrap().path().contains("//"));
+        assert_eq!(
+            chart_url("BRK-B").unwrap().path(),
+            "/v8/finance/chart/BRK-B"
+        );
+        // Index symbols land in one segment. Yahoo accepts the caret raw or
+        // percent-encoded; what it will not accept is an empty segment.
+        assert_eq!(
+            chart_url("^GSPC").unwrap().path(),
+            "/v8/finance/chart/^GSPC"
+        );
+    }
+
+    #[test]
+    fn the_quote_url_has_no_empty_path_segment() {
+        assert_eq!(
+            quote_url("AMD").unwrap().as_str(),
+            "https://finance.yahoo.com/quote/AMD"
+        );
+        assert!(!quote_url("AMD").unwrap().path().contains("//"));
     }
 }

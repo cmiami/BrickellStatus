@@ -1921,10 +1921,12 @@ fn market_activation(
         return ("Add at least one market symbol".into(), false);
     }
     if availability == AvailabilityDto::Offline {
-        // Not a fault, and not a source to name: a channel enabled a moment ago
-        // has simply not been answered yet, and saying a provider is broken is
-        // both wrong and something the reader can do nothing with.
-        return ("Waiting for the first quote".into(), false);
+        // Honest about the outcome without naming the provider. "Waiting for
+        // the first quote" was tried here and was worse: it reads as benign, so
+        // a market source failing every single poll looked like a channel that
+        // had merely started a moment ago. The coverage suffix appended by the
+        // caller supplies the detail.
+        return ("Quotes unavailable".into(), false);
     }
     if availability == AvailabilityDto::Stale {
         return (
