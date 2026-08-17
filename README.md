@@ -58,11 +58,15 @@ telemetry. Secrets stay in the OS keychain and are never written to preferences.
 
 > **Proof-of-concept, August 2026.** FL511 bridge history is accumulating and the
 > prediction weights are calibrated against only a few hours of it, so treat the
-> confidence numbers as early. AISStream accepts the subscription but returns no
-> vessel detail ([upstream issue](https://github.com/aisstream/aisstream/issues/30)),
-> so vessel-position evidence is effectively unavailable. The South Miami Avenue
-> bascule sits between Brickell and SW 2 Ave and FL511 does not publish it, which
-> leaves a permanent blind spot immediately upstream of the target.
+> confidence numbers as early. AISStream is delivering vessel detail again (the
+> [upstream issue](https://github.com/aisstream/aisstream/issues/30) remains open,
+> so treat availability as provider-intermittent); the collector now tracks the
+> Miami River in channel coordinates along a surveyed corridor and records every
+> bridge-line crossing into a per-vessel opening ledger — see
+> [`docs/AIS_DISCOVERY.md`](docs/AIS_DISCOVERY.md) for the live discovery session
+> behind that design. The South Miami Avenue bascule sits between Brickell and
+> SW 2 Ave and FL511 does not publish it, which leaves a permanent blind spot
+> immediately upstream of the target.
 
 ## Running from source
 
