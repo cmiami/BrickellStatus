@@ -321,7 +321,7 @@ fn ais_collector_item_normalizes_to_real_predictor_evidence() {
     let item = ais_bridge_item();
 
     assert_eq!(
-        bridge_fact(&item),
+        bridge_fact(&item, &BTreeMap::new()),
         Some(BridgeObservation::AisTrack {
             mmsi: Some("367719770".into()),
             vessel_name: Some("RIVER RUNNER".into()),
@@ -330,6 +330,40 @@ fn ais_collector_item_normalizes_to_real_predictor_evidence() {
             eta: Some(EtaRangeMinutes::new(6, 10)),
             opening_propensity: None,
         })
+    );
+}
+
+#[test]
+fn ledger_propensity_and_sailing_prior_reach_the_ais_observation() {
+    let item = ais_bridge_item();
+
+    // A hull the ledger has watched scores as itself.
+    let propensities = BTreeMap::from([("367719770".to_string(), 6_667_u16)]);
+    let Some(BridgeObservation::AisTrack {
+        opening_propensity, ..
+    }) = bridge_fact(&item, &propensities)
+    else {
+        panic!("expected an AIS track");
+    };
+    assert_eq!(
+        opening_propensity,
+        Some(Confidence::from_basis_points(6_667))
+    );
+
+    // A sailing rig the ledger has never seen is still a near-certain opener.
+    let mut sailing = ais_bridge_item();
+    sailing
+        .attributes
+        .insert("vessel_class".into(), json!("sailing"));
+    let Some(BridgeObservation::AisTrack {
+        opening_propensity, ..
+    }) = bridge_fact(&sailing, &BTreeMap::new())
+    else {
+        panic!("expected an AIS track");
+    };
+    assert_eq!(
+        opening_propensity,
+        Some(Confidence::from_basis_points(9_000))
     );
 }
 

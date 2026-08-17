@@ -20,8 +20,8 @@ use crate::{
     whatsapp_consent_is_current,
 };
 use bridgestatus_collectors::{
-    AIS_VESSEL_TRACKS_CURSOR_KEY, CollectContext, Collector, CollectorBatch, CollectorCursor,
-    CollectorError, CollectorItem, HealthState, ItemKind,
+    AIS_CROSSINGS_CURSOR_KEY, AIS_VESSEL_TRACKS_CURSOR_KEY, AisCrossing, CollectContext, Collector,
+    CollectorBatch, CollectorCursor, CollectorError, CollectorItem, HealthState, ItemKind,
 };
 use bridgestatus_model::{
     Availability, AvailabilityStatus, BridgeControllerState, BridgeObservation, ChannelId,
@@ -37,7 +37,7 @@ use jiff::{Timestamp, tz::TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tenders_storage::{StorageError, Store};
+use tenders_storage::{AisCrossingObservation, StorageError, Store};
 use thiserror::Error;
 use tokio::{
     sync::{Mutex, RwLock},
@@ -333,6 +333,11 @@ struct PersistedRuntimeState {
     previous_prediction: Option<BridgePrediction>,
     #[serde(skip)]
     active_sources: BTreeMap<String, String>,
+    /// Learned per-MMSI opening propensity in confidence basis points,
+    /// refreshed from the durable vessel ledger each cycle. Bounded by the
+    /// ledger query, not by this map.
+    #[serde(default)]
+    ais_propensities: BTreeMap<String, u16>,
 }
 
 /// Two or more bridges reporting `unknown` in the same pass is the signature of
@@ -740,6 +745,11 @@ impl RuntimeEngine {
             }
         }
         next_state.last_cycle_ms = Some(now_ms);
+        // Bank this cycle's bridge-line crossings and refresh the learned
+        // per-vessel propensities before the evidence is weighed, so a hull
+        // the ledger already knows scores as itself rather than as a stranger.
+        self.record_ais_activity(&next_state, now_ms).await?;
+        next_state.ais_propensities = self.load_ais_propensities().await?;
         let (current_evidence, _) = bridge_evidence(&next_state, &preferences, now_ms)?;
         let prediction = self.predictor.evaluate(
             TimestampMillis(now_ms),
@@ -813,6 +823,71 @@ impl RuntimeEngine {
     pub fn cancel(&self) {
         self.factory.cancel();
         self.shutdown.cancel();
+    }
+
+    /// Durably records the cycle's observed bridge-line crossings and settles
+    /// pending ones against the recorded bridge intervals. Crossings key on
+    /// `(mmsi, crossed_at)`, so re-reading a cursor after a failed cycle
+    /// re-records nothing.
+    async fn record_ais_activity(
+        &self,
+        state: &PersistedRuntimeState,
+        now_ms: i64,
+    ) -> Result<(), RuntimeError> {
+        let mut crossings: Vec<AisCrossing> = Vec::new();
+        for source_id in state
+            .active_sources
+            .keys()
+            .filter(|source_id| source_id.starts_with("aisstream."))
+        {
+            if let Some(source) = state.sources.get(source_id)
+                && let Some(encoded) = source.cursor.metadata.get(AIS_CROSSINGS_CURSOR_KEY)
+                && let Ok(mut decoded) = serde_json::from_str::<Vec<AisCrossing>>(encoded)
+            {
+                crossings.append(&mut decoded);
+            }
+        }
+        if !crossings.is_empty() {
+            let mut transaction = self.store.begin_transaction().await?;
+            for crossing in &crossings {
+                transaction
+                    .record_ais_crossing(AisCrossingObservation {
+                        mmsi: &crossing.mmsi,
+                        vessel_name: crossing.vessel_name.as_deref(),
+                        vessel_class: crossing.vessel_class.as_deref(),
+                        length_meters: crossing.length_meters,
+                        draught_meters: crossing.draught_meters,
+                        direction: &crossing.direction,
+                        crossed_at_ms: crossing.crossed_at.timestamp_millis(),
+                        speed_knots: crossing.speed_knots,
+                        session_id: &self.session_id,
+                    })
+                    .await?;
+            }
+            transaction.commit().await?;
+        }
+        self.store.resolve_ais_transits(now_ms).await?;
+        Ok(())
+    }
+
+    /// The vessel ledger as confidence basis points per MMSI.
+    async fn load_ais_propensities(&self) -> Result<BTreeMap<String, u16>, RuntimeError> {
+        Ok(self
+            .store
+            .list_ais_ledger(500)
+            .await?
+            .into_iter()
+            .filter(|entry| entry.transits_opened + entry.transits_fits_under > 0)
+            .map(|entry| {
+                // Beta(1,1)-smoothed share of observed crossings that needed
+                // the span raised: one opener reads ~0.67, never 1.0 — only
+                // repetition earns certainty.
+                let opened = entry.transits_opened as f64;
+                let total = (entry.transits_opened + entry.transits_fits_under) as f64;
+                let score = (opened + 1.0) / (total + 2.0);
+                (entry.mmsi, (score * 10_000.0).round() as u16)
+            })
+            .collect())
     }
 
     async fn persist_refresh(
@@ -1378,13 +1453,14 @@ fn normalized_bridge_observation(
     source_id: &str,
     received_ms: i64,
     availability: Availability,
+    propensities: &BTreeMap<String, u16>,
 ) -> Option<Observation> {
     let observed_ms = item
         .observed_at
         .as_ref()
         .or(item.starts_at.as_ref())
         .map_or(received_ms, |time| time.timestamp_millis());
-    let data = bridge_fact(item)?;
+    let data = bridge_fact(item, propensities)?;
     Some(Observation {
         id: ObservationId(format!("{source_id}:{}", item.id)),
         channel_id: ChannelId(channel_id.into()),
@@ -1400,7 +1476,10 @@ fn normalized_bridge_observation(
     })
 }
 
-fn bridge_fact(item: &CollectorItem) -> Option<BridgeObservation> {
+fn bridge_fact(
+    item: &CollectorItem,
+    propensities: &BTreeMap<String, u16>,
+) -> Option<BridgeObservation> {
     if item.kind != ItemKind::Bridge {
         return None;
     }
@@ -1438,12 +1517,25 @@ fn bridge_fact(item: &CollectorItem) -> Option<BridgeObservation> {
                 (None, None) => None,
                 _ => return None,
             };
+            let mmsi = item
+                .attributes
+                .get("mmsi")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            // The ledger has watched this hull before; failing that, a
+            // sailing rig is a near-certain opener on sight — the mast is the
+            // reason the bascule exists.
+            let opening_propensity = mmsi
+                .as_deref()
+                .and_then(|mmsi| propensities.get(mmsi))
+                .copied()
+                .map(Confidence::from_basis_points)
+                .or_else(|| {
+                    (item.attributes.get("vessel_class").and_then(Value::as_str) == Some("sailing"))
+                        .then(|| Confidence::from_basis_points(9_000))
+                });
             Some(BridgeObservation::AisTrack {
-                mmsi: item
-                    .attributes
-                    .get("mmsi")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned),
+                mmsi,
                 vessel_name: item
                     .attributes
                     .get("vessel_name")
@@ -1452,7 +1544,7 @@ fn bridge_fact(item: &CollectorItem) -> Option<BridgeObservation> {
                 movement,
                 route_intersects: item.attributes.get("route_intersects")?.as_bool()?,
                 eta,
-                opening_propensity: None,
+                opening_propensity,
             })
         }
         _ => None,
@@ -1564,6 +1656,7 @@ fn bridge_evidence(
                     source_id,
                     observed_ms,
                     model_availability.clone(),
+                    &state.ais_propensities,
                 )
             };
             let normalized = observation.map(|observation| {

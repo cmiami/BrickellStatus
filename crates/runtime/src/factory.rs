@@ -266,7 +266,7 @@ impl CollectorFactory for CredentialFreeCollectorFactory {
 
                 if preferences.ais.enabled && self.aisstream_key_configured()? {
                     let id = format!("aisstream.{}", channel.id);
-                    let subscription = AisStreamSubscription::around_bridge(
+                    let subscription = AisStreamSubscription::for_bridge(
                         bridge_label,
                         latitude,
                         longitude,

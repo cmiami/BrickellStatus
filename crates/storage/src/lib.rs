@@ -174,6 +174,31 @@ pub struct PruneReport {
     pub incidents: u64,
 }
 
+/// One observed AIS bridge-line crossing, ready to become ledger history.
+#[derive(Clone, Copy, Debug)]
+pub struct AisCrossingObservation<'a> {
+    pub mmsi: &'a str,
+    pub vessel_name: Option<&'a str>,
+    pub vessel_class: Option<&'a str>,
+    pub length_meters: Option<f64>,
+    pub draught_meters: Option<f64>,
+    /// "upriver" or "downriver".
+    pub direction: &'a str,
+    pub crossed_at_ms: i64,
+    pub speed_knots: f64,
+    pub session_id: &'a str,
+}
+
+/// A vessel's learned opening record.
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct AisLedgerEntry {
+    pub mmsi: String,
+    pub name: Option<String>,
+    pub vessel_class: Option<String>,
+    pub transits_opened: i64,
+    pub transits_fits_under: i64,
+}
+
 impl StoreTransaction<'_> {
     /// Upserts one JSON setting as part of this transaction.
     pub async fn set_json<T: Serialize>(
@@ -236,6 +261,66 @@ impl StoreTransaction<'_> {
         .bind(estimated_bridge_at_ms)
         .bind(estimated_offset_minutes)
         .bind(observed_at_ms)
+        .bind(session_id)
+        .execute(&mut *self.inner)
+        .await?;
+        Ok(())
+    }
+
+    /// Records one bridge-line crossing and keeps the vessel's ledger row
+    /// current. The crossing is inserted un-resolved; whether the span was up
+    /// for it is judged later, once FL511's interval around that moment has
+    /// settled.
+    pub async fn record_ais_crossing(
+        &mut self,
+        observation: AisCrossingObservation<'_>,
+    ) -> Result<(), StorageError> {
+        let AisCrossingObservation {
+            mmsi,
+            vessel_name,
+            vessel_class,
+            length_meters,
+            draught_meters,
+            direction,
+            crossed_at_ms,
+            speed_knots,
+            session_id,
+        } = observation;
+        sqlx::query(
+            r#"
+            INSERT INTO ais_vessel_ledger(
+                mmsi, name, vessel_class, length_meters, draught_meters,
+                first_seen_ms, last_seen_ms
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+            ON CONFLICT(mmsi) DO UPDATE SET
+                name = COALESCE(excluded.name, name),
+                vessel_class = COALESCE(excluded.vessel_class, vessel_class),
+                length_meters = COALESCE(excluded.length_meters, length_meters),
+                draught_meters = COALESCE(excluded.draught_meters, draught_meters),
+                last_seen_ms = MAX(last_seen_ms, excluded.last_seen_ms)
+            "#,
+        )
+        .bind(mmsi)
+        .bind(vessel_name)
+        .bind(vessel_class)
+        .bind(length_meters)
+        .bind(draught_meters)
+        .bind(crossed_at_ms)
+        .execute(&mut *self.inner)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO ais_transits(
+                mmsi, crossed_at_ms, direction, speed_knots, session_id
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+        )
+        .bind(mmsi)
+        .bind(crossed_at_ms)
+        .bind(direction)
+        .bind(speed_knots)
         .bind(session_id)
         .execute(&mut *self.inner)
         .await?;
@@ -496,6 +581,105 @@ impl Store {
             "#,
         )
         .bind(i64::from(limit.clamp(1, 500)))
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Judges pending bridge-line crossings against the recorded target
+    /// intervals and folds settled outcomes into the vessel ledger.
+    ///
+    /// A crossing inside a recorded `up` interval means the span was raised
+    /// for (or around) the passage; a crossing with the span verifiably down
+    /// for a minute before through two minutes after is a fits-under. A
+    /// crossing that still matches neither after 45 minutes falls into an
+    /// FL511 gap and is closed as `unknown`, which never trains the ledger.
+    pub async fn resolve_ais_transits(&self, now_ms: i64) -> Result<u64, StorageError> {
+        const SETTLE_MS: i64 = 3 * 60 * 1_000;
+        const GIVE_UP_MS: i64 = 45 * 60 * 1_000;
+        let mut transaction = self.pool.begin().await?;
+        let mut resolved = 0_u64;
+
+        let opened = sqlx::query_as::<_, (String,)>(
+            r#"
+            UPDATE ais_transits
+            SET outcome = 'opened', resolved_at_ms = ?2
+            WHERE outcome IS NULL AND crossed_at_ms <= ?2 - ?1
+              AND EXISTS (
+                SELECT 1 FROM bridge_state_intervals b
+                WHERE b.relation = 'target' AND b.state = 'up'
+                  AND b.started_at_ms <= ais_transits.crossed_at_ms
+                  AND COALESCE(b.ended_at_ms, ?2) >= ais_transits.crossed_at_ms
+              )
+            RETURNING mmsi
+            "#,
+        )
+        .bind(SETTLE_MS)
+        .bind(now_ms)
+        .fetch_all(&mut *transaction)
+        .await?;
+        for (mmsi,) in opened {
+            resolved += 1;
+            sqlx::query(
+                "UPDATE ais_vessel_ledger SET transits_opened = transits_opened + 1 WHERE mmsi = ?1",
+            )
+            .bind(&mmsi)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        let fits_under = sqlx::query_as::<_, (String,)>(
+            r#"
+            UPDATE ais_transits
+            SET outcome = 'fits_under', resolved_at_ms = ?2
+            WHERE outcome IS NULL AND crossed_at_ms <= ?2 - ?1
+              AND EXISTS (
+                SELECT 1 FROM bridge_state_intervals b
+                WHERE b.relation = 'target' AND b.state = 'down'
+                  AND b.started_at_ms <= ais_transits.crossed_at_ms - 60000
+                  AND COALESCE(b.ended_at_ms, ?2) >= ais_transits.crossed_at_ms + 120000
+              )
+            RETURNING mmsi
+            "#,
+        )
+        .bind(SETTLE_MS)
+        .bind(now_ms)
+        .fetch_all(&mut *transaction)
+        .await?;
+        for (mmsi,) in fits_under {
+            resolved += 1;
+            sqlx::query(
+                "UPDATE ais_vessel_ledger SET transits_fits_under = transits_fits_under + 1 WHERE mmsi = ?1",
+            )
+            .bind(&mmsi)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        sqlx::query(
+            r#"
+            UPDATE ais_transits
+            SET outcome = 'unknown', resolved_at_ms = ?2
+            WHERE outcome IS NULL AND crossed_at_ms <= ?2 - ?1
+            "#,
+        )
+        .bind(GIVE_UP_MS)
+        .bind(now_ms)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(resolved)
+    }
+
+    /// The learned per-vessel opening record, most recently seen first.
+    pub async fn list_ais_ledger(&self, limit: u32) -> Result<Vec<AisLedgerEntry>, StorageError> {
+        Ok(sqlx::query_as::<_, AisLedgerEntry>(
+            r#"
+            SELECT mmsi, name, vessel_class, transits_opened, transits_fits_under
+            FROM ais_vessel_ledger
+            ORDER BY last_seen_ms DESC
+            LIMIT ?1
+            "#,
+        )
+        .bind(i64::from(limit.clamp(1, 2_000)))
         .fetch_all(&self.pool)
         .await?)
     }
@@ -1179,6 +1363,101 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn ais_crossings_resolve_against_bridge_intervals_and_train_the_ledger() {
+        let store = Store::in_memory().await.unwrap();
+        let base = 1_800_000_000_000_i64;
+
+        // The target span: down, then a ten-minute opening, then down again.
+        let mut transaction = store.begin_transaction().await.unwrap();
+        for (state, at) in [
+            ("down", base),
+            ("up", base + 600_000),
+            ("down", base + 1_200_000),
+        ] {
+            transaction
+                .record_bridge_state(BridgeObservation {
+                    source_id: "fl511.bridge",
+                    bridge_key: "brickell",
+                    bridge_name: "Brickell Avenue Bridge",
+                    relation: "target",
+                    state,
+                    observed_at_ms: at,
+                    session_id: "test",
+                })
+                .await
+                .unwrap();
+        }
+        // One crossing during the up interval, one squarely inside a down
+        // interval, one too fresh to settle, and one from before the record
+        // began — a genuine gap.
+        for (mmsi, crossed_at) in [
+            ("111000111", base + 900_000),
+            ("222000222", base + 240_000),
+            ("333000333", base + 1_500_000),
+            ("444000444", base - 300_000),
+        ] {
+            transaction
+                .record_ais_crossing(AisCrossingObservation {
+                    mmsi,
+                    vessel_name: Some("TEST VESSEL"),
+                    vessel_class: Some("tug"),
+                    length_meters: Some(30.0),
+                    draught_meters: None,
+                    direction: "downriver",
+                    crossed_at_ms: crossed_at,
+                    speed_knots: 4.5,
+                    session_id: "test",
+                })
+                .await
+                .unwrap();
+        }
+        transaction.commit().await.unwrap();
+
+        // Resolve shortly after the second crossing settles; the third is too
+        // recent and the still-open final down interval covers the second.
+        let resolved = store.resolve_ais_transits(base + 1_320_000).await.unwrap();
+        assert_eq!(resolved, 2);
+        let ledger = store.list_ais_ledger(100).await.unwrap();
+        let entry = |mmsi: &str| {
+            ledger
+                .iter()
+                .find(|entry| entry.mmsi == mmsi)
+                .expect("ledger row")
+                .clone()
+        };
+        assert_eq!(entry("111000111").transits_opened, 1);
+        assert_eq!(entry("111000111").transits_fits_under, 0);
+        assert_eq!(entry("222000222").transits_fits_under, 1);
+        assert_eq!(entry("333000333").transits_opened, 0);
+        assert_eq!(entry("333000333").transits_fits_under, 0);
+
+        // The discovery seed rows ride in with the schema.
+        assert_eq!(entry("367705810").transits_opened, 1);
+        assert_eq!(entry("338215012").transits_fits_under, 1);
+
+        // Far later: the fresh crossing settles as fits-under (the final down
+        // interval is still live around it), while the pre-record crossing
+        // matches no interval and closes as unknown, training nothing.
+        store
+            .resolve_ais_transits(base + 1_500_000 + 46 * 60_000)
+            .await
+            .unwrap();
+        let ledger = store.list_ais_ledger(100).await.unwrap();
+        let entry = |mmsi: &str| ledger.iter().find(|entry| entry.mmsi == mmsi).unwrap();
+        assert_eq!(entry("333000333").transits_fits_under, 1);
+        assert_eq!(
+            entry("444000444").transits_opened + entry("444000444").transits_fits_under,
+            0
+        );
+        let unresolved: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM ais_transits WHERE outcome IS NULL")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(unresolved.0, 0);
+    }
 
     #[tokio::test]
     async fn existing_database_opens_and_settings_round_trip() {
