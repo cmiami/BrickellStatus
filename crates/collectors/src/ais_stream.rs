@@ -32,23 +32,59 @@ use zeroize::Zeroize;
 
 use crate::{
     CollectContext, Collector, CollectorBatch, CollectorCursor, CollectorError, CollectorHealth,
-    CollectorItem, HealthState, ItemKind, Location, SourceLink, geo::haversine_meters,
+    CollectorItem, HealthState, ItemKind, Location, SourceLink,
+    geo::haversine_meters,
+    river::{self, RiverBranch},
 };
 
 const AISSTREAM_ENDPOINT: &str = "wss://stream.aisstream.io/v0/stream";
 const AISSTREAM_SOURCE_URL: &str = "https://aisstream.io/documentation.html";
 const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 128 * 1024;
 const MAX_TRACKED_VESSELS: usize = 512;
-const MAX_EXPOSED_TRACKS: usize = 1;
+const MAX_EXPOSED_TRACKS: usize = 3;
 const MAX_HISTORY_TRACKS: usize = 64;
 const MAX_HISTORY_POINTS_PER_VESSEL: usize = 121;
 const HISTORY_SAMPLE_SECONDS: i64 = 30;
 const MAX_REPORT_FUTURE_SKEW_SECONDS: i64 = 30;
 const MIN_API_KEY_CHARS: usize = 8;
 const MAX_API_KEY_CHARS: usize = 512;
+const MAX_PENDING_CROSSINGS: usize = 32;
+/// The Miami River is maintained to roughly 4.6 m; a hull drawing this much
+/// water cannot enter it, whatever its course claims.
+const RIVER_MAX_DRAUGHT_METERS: f64 = 4.5;
+/// A vessel whose fixes stay inside this displacement for the moored window
+/// is tied up, whatever its NavigationalStatus claims.
+const MOORED_DISPLACEMENT_METERS: f64 = 50.0;
+const MOORED_WINDOW_SECONDS: i64 = 10 * 60;
 
 /// Cursor metadata containing bounded, non-secret vessel courses for the map.
 pub const AIS_VESSEL_TRACKS_CURSOR_KEY: &str = "vessel_tracks";
+/// Cursor metadata carrying bridge-line crossings observed since the previous
+/// collect, for durable transit/ledger recording by the runtime.
+pub const AIS_CROSSINGS_CURSOR_KEY: &str = "ais_crossings";
+
+/// One vessel passing the Brickell bridge line, in either direction.
+///
+/// Crossings are the raw material of the per-vessel opening ledger: the
+/// runtime joins them against recorded bridge state to learn which hulls
+/// force an opening and which fit under.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AisCrossing {
+    pub mmsi: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vessel_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vessel_class: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub length_meters: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draught_meters: Option<f64>,
+    /// "upriver" or "downriver".
+    pub direction: String,
+    pub crossed_at: DateTime<Utc>,
+    pub speed_knots: f64,
+}
 
 struct SecretInner(String);
 
@@ -99,9 +135,40 @@ pub struct AisStreamSubscription {
     bridge_longitude: f64,
     radius_kilometers: f64,
     bounding_boxes: Vec<[[f64; 2]; 2]>,
+    /// Whether vessel reasoning runs in Miami River channel coordinates.
+    corridor: bool,
 }
 
 impl AisStreamSubscription {
+    /// Chooses the right geometry for a bridge target: the Brickell Avenue
+    /// Bridge gets the surveyed Miami River corridor (river tiles plus the two
+    /// marked entrance channels); any other target keeps the generic square.
+    pub fn for_bridge(
+        bridge_label: impl Into<String>,
+        bridge_latitude: f64,
+        bridge_longitude: f64,
+        radius_kilometers: f64,
+    ) -> Result<Self, CollectorError> {
+        if river::is_brickell_target(bridge_latitude, bridge_longitude) {
+            let mut subscription = Self::around_bridge(
+                bridge_label,
+                bridge_latitude,
+                bridge_longitude,
+                radius_kilometers,
+            )?;
+            subscription.bounding_boxes = river::corridor_bounding_boxes();
+            subscription.corridor = true;
+            Ok(subscription)
+        } else {
+            Self::around_bridge(
+                bridge_label,
+                bridge_latitude,
+                bridge_longitude,
+                radius_kilometers,
+            )
+        }
+    }
+
     /// Builds a square subscription around a bridge point. Radius is bounded to
     /// avoid accidentally subscribing to a city, country, or the entire world.
     pub fn around_bridge(
@@ -146,6 +213,7 @@ impl AisStreamSubscription {
             bridge_longitude,
             radius_kilometers,
             bounding_boxes: vec![[[south, west], [north, east]]],
+            corridor: false,
         })
     }
 
@@ -292,7 +360,7 @@ impl Collector for AisStreamCollector {
     async fn collect(&self, context: &CollectContext) -> Result<CollectorBatch, CollectorError> {
         self.ensure_started(context.cursor.as_ref()).await;
         let now = Utc::now();
-        let state = self.state.read().await;
+        let mut state = self.state.write().await;
         if state.health != HealthState::Healthy {
             return Err(CollectorError::Request(
                 state
@@ -302,6 +370,8 @@ impl Collector for AisStreamCollector {
                     .into(),
             ));
         }
+        let crossings = state.crossings.drain(..).collect::<Vec<_>>();
+        let state = tokio::sync::RwLockWriteGuard::downgrade(state);
         let cutoff = now
             - TimeDelta::from_std(self.config.track_retention)
                 .unwrap_or_else(|_| TimeDelta::seconds(60));
@@ -317,6 +387,10 @@ impl Collector for AisStreamCollector {
                 .then_with(|| left.mmsi.cmp(&right.mmsi))
         });
         let fresh_vessel_count = tracks.len();
+        let approaching_count = tracks
+            .iter()
+            .filter(|track| track_priority(track).0 == 0)
+            .count();
         let retention = TimeDelta::from_std(self.config.track_retention)
             .unwrap_or_else(|_| TimeDelta::seconds(60));
         let fresh_vessel_expirations = tracks
@@ -327,12 +401,30 @@ impl Collector for AisStreamCollector {
             .iter()
             .map(|track| track.observed_at.timestamp_millis())
             .max();
-        let items = tracks
+        let mut items: Vec<CollectorItem> = tracks
             .into_iter()
             .take(MAX_EXPOSED_TRACKS)
             .map(|track| track.item.clone())
             .collect();
+        // The lead approaching vessel announces the rest of the queue, so a
+        // convoy or a stack of waiting yachts reads as one story.
+        if approaching_count > 1
+            && let Some(lead) = items.first_mut()
+        {
+            let queued = approaching_count - 1;
+            lead.attributes.insert("queued_count".into(), json!(queued));
+            if let Some(summary) = lead.summary.as_mut() {
+                summary.push_str(&format!(" · +{queued} queued"));
+            }
+        }
         let mut cursor = CollectorCursor::default();
+        if !crossings.is_empty()
+            && let Ok(encoded) = serde_json::to_string(&crossings)
+        {
+            cursor
+                .metadata
+                .insert(AIS_CROSSINGS_CURSOR_KEY.into(), encoded);
+        }
         cursor
             .metadata
             .insert("fresh_vessel_count".into(), fresh_vessel_count.to_string());
@@ -374,6 +466,8 @@ struct StreamState {
     failure: Option<StreamFailure>,
     tracks: BTreeMap<u32, VesselTrack>,
     histories: BTreeMap<u32, VesselHistory>,
+    statics: BTreeMap<u32, VesselStatic>,
+    crossings: VecDeque<AisCrossing>,
 }
 
 impl Default for StreamState {
@@ -383,7 +477,44 @@ impl Default for StreamState {
             failure: Some(StreamFailure::Starting),
             tracks: BTreeMap::new(),
             histories: BTreeMap::new(),
+            statics: BTreeMap::new(),
+            crossings: VecDeque::new(),
         }
+    }
+}
+
+/// Identity and hull facts accumulated from static AIS messages.
+#[derive(Clone, Debug, Default)]
+struct VesselStatic {
+    name: Option<String>,
+    ship_type: Option<u16>,
+    length_meters: Option<f64>,
+    draught_meters: Option<f64>,
+    updated_at: Option<DateTime<Utc>>,
+}
+
+impl VesselStatic {
+    /// Friendly class word for surfaces; AIS ship-type first digit families.
+    fn class_word(&self) -> Option<&'static str> {
+        let word = match self.ship_type? {
+            30 => "fishing",
+            31 | 32 => "tug + tow",
+            36 => "sailing",
+            37 => "pleasure craft",
+            50 => "pilot",
+            52 => "tug",
+            60..=69 => "passenger",
+            70..=79 => "cargo",
+            80..=89 => "tanker",
+            _ => return Some("vessel"),
+        };
+        Some(word)
+    }
+
+    /// Hulls this deep cannot enter the river at all.
+    fn river_capable(&self) -> bool {
+        self.draught_meters
+            .is_none_or(|draught| draught < RIVER_MAX_DRAUGHT_METERS)
     }
 }
 
@@ -399,7 +530,11 @@ struct VesselTrack {
 #[derive(Clone, Copy)]
 struct TrackPoint {
     observed_at: DateTime<Utc>,
+    /// Channel distance to the bridge in corridor mode, straight-line
+    /// distance otherwise: the quantity whose shrinkage means "closing".
     distance_meters: f64,
+    /// Signed channel coordinate, corridor mode only.
+    s_meters: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -455,7 +590,9 @@ fn track_priority(track: &VesselTrack) -> (u8, u16) {
         .get("route_intersects")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let posture = track.item.attributes.get("posture").and_then(Value::as_str);
     let rank = match (movement, intersects) {
+        _ if matches!(posture, Some("moored" | "off_channel" | "deep_draft")) => 5,
         (Some("approaching"), true) => 0,
         (Some("approaching"), false) => 1,
         (Some("stationary"), _) => 2,
@@ -560,6 +697,8 @@ async fn run_connection(
             "PositionReport",
             "StandardClassBPositionReport",
             "ExtendedClassBPositionReport",
+            "ShipStaticData",
+            "StaticDataReport",
         ],
     };
     let Ok(payload) = serde_json::to_string(&subscription) else {
@@ -636,14 +775,210 @@ async fn handle_payload(
         return Err(ConnectionExit::Rejected);
     }
     let now = Utc::now();
-    let mut state = state.write().await;
-    if let Some(track) = normalize_value(&root, now, config, &state.tracks) {
+    let mut guard = state.write().await;
+    let state = &mut *guard;
+    if let Some((mmsi, update)) = normalize_static(&root, now) {
+        apply_static(&mut state.statics, mmsi, update, now);
+        return Ok(());
+    }
+    if let Some(track) = normalize_value(
+        &root,
+        now,
+        config,
+        &state.tracks,
+        &state.statics,
+        &state.histories,
+    ) {
+        record_crossing(
+            &mut state.crossings,
+            state.tracks.get(&track.mmsi),
+            &track,
+            state.statics.get(&track.mmsi),
+        );
         update_history(&mut state.histories, &track, now, config.history_retention);
         state.tracks.insert(track.mmsi, track);
         prune_tracks(&mut state.tracks, now, config.track_retention);
         prune_histories(&mut state.histories, now, config.history_retention);
     }
     Ok(())
+}
+
+/// Extracts identity/hull facts from the two static AIS message kinds.
+fn normalize_static(root: &Value, received_at: DateTime<Utc>) -> Option<(u32, VesselStatic)> {
+    let message_type = root.get("MessageType")?.as_str()?;
+    if !matches!(message_type, "ShipStaticData" | "StaticDataReport") {
+        return None;
+    }
+    let report = root.get("Message")?.get(message_type)?;
+    let mmsi = report
+        .get("UserID")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            root.get("MetaData")
+                .and_then(|metadata| metadata.get("MMSI"))
+                .and_then(Value::as_u64)
+        })
+        .and_then(|value| u32::try_from(value).ok())?;
+    if !(100_000_000..=999_999_999).contains(&mmsi) {
+        return None;
+    }
+    let mut update = VesselStatic {
+        updated_at: Some(received_at),
+        ..VesselStatic::default()
+    };
+    if message_type == "ShipStaticData" {
+        update.name = report
+            .get("Name")
+            .and_then(Value::as_str)
+            .and_then(sanitize_vessel_name);
+        update.ship_type = report
+            .get("Type")
+            .and_then(Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok());
+        update.length_meters = dimension_length(report.get("Dimension"));
+        update.draught_meters = report
+            .get("MaximumStaticDraught")
+            .and_then(finite_number)
+            .filter(|draught| (0.0..=30.0).contains(draught));
+    } else {
+        let part_a = report.get("ReportA");
+        if part_a
+            .and_then(|part| part.get("Valid"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            update.name = part_a
+                .and_then(|part| part.get("Name"))
+                .and_then(Value::as_str)
+                .and_then(sanitize_vessel_name);
+        }
+        let part_b = report.get("ReportB");
+        if part_b
+            .and_then(|part| part.get("Valid"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            update.ship_type = part_b
+                .and_then(|part| part.get("ShipType"))
+                .and_then(Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok());
+            update.length_meters = dimension_length(part_b.and_then(|part| part.get("Dimension")));
+        }
+    }
+    (update.name.is_some()
+        || update.ship_type.is_some()
+        || update.length_meters.is_some()
+        || update.draught_meters.is_some())
+    .then_some((mmsi, update))
+}
+
+fn dimension_length(dimension: Option<&Value>) -> Option<f64> {
+    let dimension = dimension?;
+    let bow = dimension.get("A").and_then(finite_number)?;
+    let stern = dimension.get("B").and_then(finite_number)?;
+    let length = bow + stern;
+    ((1.0..=500.0).contains(&length)).then_some(length)
+}
+
+fn apply_static(
+    statics: &mut BTreeMap<u32, VesselStatic>,
+    mmsi: u32,
+    update: VesselStatic,
+    now: DateTime<Utc>,
+) {
+    let entry = statics.entry(mmsi).or_default();
+    if update.name.is_some() {
+        entry.name = update.name;
+    }
+    if update.ship_type.is_some() {
+        entry.ship_type = update.ship_type;
+    }
+    if update.length_meters.is_some() {
+        entry.length_meters = update.length_meters;
+    }
+    if update.draught_meters.is_some() {
+        entry.draught_meters = update.draught_meters;
+    }
+    entry.updated_at = Some(now);
+    while statics.len() > MAX_TRACKED_VESSELS {
+        let Some(oldest) = statics
+            .iter()
+            .min_by_key(|(_, value)| value.updated_at)
+            .map(|(key, _)| *key)
+        else {
+            break;
+        };
+        statics.remove(&oldest);
+    }
+}
+
+/// Detects the previous→current fix straddling the bridge line.
+fn record_crossing(
+    crossings: &mut VecDeque<AisCrossing>,
+    previous: Option<&VesselTrack>,
+    current: &VesselTrack,
+    vessel_static: Option<&VesselStatic>,
+) {
+    let Some(previous) = previous else { return };
+    let (Some(before), Some(after)) = (previous.point.s_meters, current.point.s_meters) else {
+        return;
+    };
+    // Both fixes must sit near the span; a sign flip across a long gap is a
+    // teleporting receiver, not a passage.
+    if before.signum() == after.signum()
+        || before.abs() > 600.0
+        || after.abs() > 600.0
+        || current
+            .point
+            .observed_at
+            .signed_duration_since(previous.point.observed_at)
+            > TimeDelta::minutes(12)
+    {
+        return;
+    }
+    let span = (after - before).abs();
+    let fraction = if span > 1.0 { before.abs() / span } else { 0.5 };
+    let elapsed = current
+        .point
+        .observed_at
+        .signed_duration_since(previous.point.observed_at);
+    let crossed_at = previous.point.observed_at
+        + TimeDelta::milliseconds((elapsed.num_milliseconds() as f64 * fraction) as i64);
+    let speed_knots = current
+        .item
+        .attributes
+        .get("sog_knots")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    crossings.push_back(AisCrossing {
+        mmsi: current.mmsi.to_string(),
+        vessel_name: vessel_static
+            .and_then(|value| value.name.clone())
+            .or_else(|| {
+                current
+                    .item
+                    .attributes
+                    .get("vessel_name")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            }),
+        vessel_class: vessel_static
+            .and_then(VesselStatic::class_word)
+            .map(ToOwned::to_owned),
+        length_meters: vessel_static.and_then(|value| value.length_meters),
+        draught_meters: vessel_static.and_then(|value| value.draught_meters),
+        direction: if after > before {
+            "upriver"
+        } else {
+            "downriver"
+        }
+        .into(),
+        crossed_at,
+        speed_knots,
+    });
+    while crossings.len() > MAX_PENDING_CROSSINGS {
+        let _ = crossings.pop_front();
+    }
 }
 
 #[derive(Serialize)]
@@ -663,7 +998,26 @@ fn normalize_message(
     existing: &BTreeMap<u32, VesselTrack>,
 ) -> Option<VesselTrack> {
     let root: Value = serde_json::from_slice(body).ok()?;
-    normalize_value(&root, received_at, config, existing)
+    normalize_value(
+        &root,
+        received_at,
+        config,
+        existing,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    )
+}
+
+/// How one fix relates to the bridge, in whichever geometry applies.
+struct FixClassification {
+    distance_meters: f64,
+    s_signed: Option<f64>,
+    movement: Movement,
+    posture: Option<&'static str>,
+    route_intersects: bool,
+    eta: Option<(u16, u16)>,
+    branch: Option<&'static str>,
+    offset_meters: Option<f64>,
 }
 
 fn normalize_value(
@@ -671,6 +1025,8 @@ fn normalize_value(
     received_at: DateTime<Utc>,
     config: &AisStreamConfig,
     existing: &BTreeMap<u32, VesselTrack>,
+    statics: &BTreeMap<u32, VesselStatic>,
+    histories: &BTreeMap<u32, VesselHistory>,
 ) -> Option<VesselTrack> {
     if root.get("error").is_some() {
         return None;
@@ -718,62 +1074,47 @@ fn normalize_value(
         return None;
     }
 
-    let distance_meters = haversine_meters(
-        latitude,
-        longitude,
-        config.subscription.bridge_latitude,
-        config.subscription.bridge_longitude,
-    );
-    if !distance_meters.is_finite()
-        || distance_meters > config.subscription.radius_kilometers * 1_000.0 * 1.5
-    {
-        return None;
-    }
-    let bearing = initial_bearing_degrees(
-        latitude,
-        longitude,
-        config.subscription.bridge_latitude,
-        config.subscription.bridge_longitude,
-    );
-    let course_delta = angular_difference_degrees(cog_degrees, bearing);
-    let projected_miss_meters = distance_meters * course_delta.to_radians().sin().abs();
-    let course_projects_to_bridge = course_delta <= 75.0 && projected_miss_meters <= 750.0;
-
+    let vessel_static = statics.get(&mmsi);
     let previous = existing.get(&mmsi).map(|track| track.point);
-    let closing_speed = previous.and_then(|point| {
-        let elapsed = source_time.signed_duration_since(point.observed_at);
-        let seconds = elapsed.num_milliseconds() as f64 / 1_000.0;
-        (2.0..=180.0)
-            .contains(&seconds)
-            .then_some((point.distance_meters - distance_meters) / seconds)
-    });
-    let movement = if sog_knots <= 0.5 {
-        Movement::Stationary
-    } else if closing_speed.is_some_and(|speed| speed > 0.25) {
-        Movement::Approaching
-    } else if closing_speed.is_some_and(|speed| speed < -0.25) {
-        Movement::Diverging
-    } else if course_projects_to_bridge {
-        Movement::Approaching
-    } else if course_delta >= 110.0 {
-        Movement::Diverging
+    let classification = if config.subscription.corridor {
+        classify_corridor_fix(
+            latitude,
+            longitude,
+            sog_knots,
+            cog_degrees,
+            source_time,
+            previous,
+            vessel_static,
+            histories.get(&mmsi),
+        )
     } else {
-        Movement::Unknown
+        classify_square_fix(
+            latitude,
+            longitude,
+            sog_knots,
+            cog_degrees,
+            source_time,
+            previous,
+            config,
+        )?
     };
-    let route_intersects = movement == Movement::Approaching
-        && (course_projects_to_bridge || (distance_meters <= 500.0 && course_delta <= 100.0));
-    let eta = estimate_eta(
+    let FixClassification {
         distance_meters,
-        sog_knots,
-        course_delta,
-        closing_speed,
+        s_signed,
+        movement,
+        posture,
         route_intersects,
-    );
+        eta,
+        branch,
+        offset_meters,
+    } = classification;
 
     let vessel_name = metadata
         .get("ShipName")
         .and_then(Value::as_str)
-        .and_then(sanitize_vessel_name);
+        .and_then(sanitize_vessel_name)
+        .or_else(|| vessel_static.and_then(|value| value.name.clone()));
+    let vessel_class = vessel_static.and_then(VesselStatic::class_word);
     let title = vessel_name.as_ref().map_or_else(
         || format!("Vessel {mmsi}"),
         |name| format!("{name} · {mmsi}"),
@@ -787,8 +1128,9 @@ fn normalize_value(
         || "ETA unavailable".into(),
         |(earliest, latest)| format!("ETA {earliest}–{latest} min"),
     );
+    let class_text = vessel_class.map_or_else(String::new, |word| format!("{word} · "));
     let summary = format!(
-        "{distance_text} from {} · {} · {eta_text}",
+        "{distance_text} from {} · {class_text}{} · {eta_text}",
         config.subscription.bridge_label,
         movement.as_str()
     );
@@ -802,18 +1144,36 @@ fn normalize_value(
         ("distance_meters".into(), json!(distance_meters.round())),
         ("sog_knots".into(), json!(sog_knots)),
         ("cog_degrees".into(), json!(cog_degrees)),
-        (
-            "projected_miss_meters".into(),
-            json!(projected_miss_meters.round()),
-        ),
         ("provider".into(), json!("aisstream")),
     ]);
     if let Some(name) = &vessel_name {
         attributes.insert("vessel_name".into(), json!(name));
     }
+    if let Some(word) = vessel_class {
+        attributes.insert("vessel_class".into(), json!(word));
+    }
+    if let Some(length) = vessel_static.and_then(|value| value.length_meters) {
+        attributes.insert("length_meters".into(), json!(length.round()));
+    }
+    if let Some(draught) = vessel_static.and_then(|value| value.draught_meters) {
+        attributes.insert("draught_meters".into(), json!(draught));
+    }
+    if let Some(posture) = posture {
+        attributes.insert("posture".into(), json!(posture));
+    }
+    if let Some(branch) = branch {
+        attributes.insert("branch".into(), json!(branch));
+    }
+    if let Some(s_signed) = s_signed {
+        attributes.insert("s_meters".into(), json!(s_signed.round()));
+    }
+    if let Some(offset) = offset_meters {
+        attributes.insert("offset_meters".into(), json!(offset.round()));
+    }
     if let Some((earliest, latest)) = eta {
         attributes.insert("eta_min_minutes".into(), json!(earliest));
         attributes.insert("eta_max_minutes".into(), json!(latest));
+        attributes.insert("rung".into(), json!(warning_rung(earliest)));
     }
 
     Some(VesselTrack {
@@ -823,6 +1183,7 @@ fn normalize_value(
         point: TrackPoint {
             observed_at: source_time,
             distance_meters,
+            s_meters: s_signed,
         },
         item: CollectorItem {
             id: format!("aisstream:{mmsi}"),
@@ -846,6 +1207,221 @@ fn normalize_value(
     })
 }
 
+/// The original square-radius classification, kept for non-Brickell bridges.
+fn classify_square_fix(
+    latitude: f64,
+    longitude: f64,
+    sog_knots: f64,
+    cog_degrees: f64,
+    source_time: DateTime<Utc>,
+    previous: Option<TrackPoint>,
+    config: &AisStreamConfig,
+) -> Option<FixClassification> {
+    let distance_meters = haversine_meters(
+        latitude,
+        longitude,
+        config.subscription.bridge_latitude,
+        config.subscription.bridge_longitude,
+    );
+    if !distance_meters.is_finite()
+        || distance_meters > config.subscription.radius_kilometers * 1_000.0 * 1.5
+    {
+        return None;
+    }
+    let bearing = crate::geo::initial_bearing_degrees(
+        latitude,
+        longitude,
+        config.subscription.bridge_latitude,
+        config.subscription.bridge_longitude,
+    );
+    let course_delta = crate::geo::angular_difference_degrees(cog_degrees, bearing);
+    let projected_miss_meters = distance_meters * course_delta.to_radians().sin().abs();
+    let course_projects_to_bridge = course_delta <= 75.0 && projected_miss_meters <= 750.0;
+    let closing_speed = closing_speed_meters_per_second(previous, distance_meters, source_time);
+    let movement = if sog_knots <= 0.5 {
+        Movement::Stationary
+    } else if closing_speed.is_some_and(|speed| speed > 0.25) {
+        Movement::Approaching
+    } else if closing_speed.is_some_and(|speed| speed < -0.25) {
+        Movement::Diverging
+    } else if course_projects_to_bridge {
+        Movement::Approaching
+    } else if course_delta >= 110.0 {
+        Movement::Diverging
+    } else {
+        Movement::Unknown
+    };
+    let route_intersects = movement == Movement::Approaching
+        && (course_projects_to_bridge || (distance_meters <= 500.0 && course_delta <= 100.0));
+    let eta = estimate_eta(
+        distance_meters,
+        sog_knots,
+        course_delta,
+        closing_speed,
+        route_intersects,
+    );
+    Some(FixClassification {
+        distance_meters,
+        s_signed: None,
+        movement,
+        posture: None,
+        route_intersects,
+        eta,
+        branch: None,
+        offset_meters: None,
+    })
+}
+
+/// Channel-coordinate classification for the Miami River corridor.
+///
+/// Everything follows from `(s, offset)`: corridor membership from the
+/// offset, closing from `|s|` shrinking between fixes, direction from the
+/// channel's own bridgeward bearing rather than the straight-line bearing a
+/// bending river invalidates.
+#[allow(clippy::too_many_arguments)]
+fn classify_corridor_fix(
+    latitude: f64,
+    longitude: f64,
+    sog_knots: f64,
+    cog_degrees: f64,
+    source_time: DateTime<Utc>,
+    previous: Option<TrackPoint>,
+    vessel_static: Option<&VesselStatic>,
+    history: Option<&VesselHistory>,
+) -> FixClassification {
+    let fix = river::project(latitude, longitude);
+    let distance_meters = fix.channel_distance_meters();
+    let in_corridor = fix.in_corridor();
+    let river_capable = vessel_static.is_none_or(VesselStatic::river_capable);
+    let closing_speed = closing_speed_meters_per_second(previous, distance_meters, source_time);
+    let course_delta =
+        crate::geo::angular_difference_degrees(cog_degrees, fix.bridgeward_bearing_degrees);
+    let moored = sog_knots <= 0.5 && held_station(history, latitude, longitude, source_time);
+
+    let movement = if sog_knots <= 0.5 {
+        Movement::Stationary
+    } else if !in_corridor {
+        Movement::Unknown
+    } else if closing_speed.is_some_and(|speed| speed > 0.25) {
+        Movement::Approaching
+    } else if closing_speed.is_some_and(|speed| speed < -0.25) {
+        Movement::Diverging
+    } else if course_delta <= 60.0 {
+        Movement::Approaching
+    } else if course_delta >= 120.0 {
+        Movement::Diverging
+    } else {
+        Movement::Unknown
+    };
+
+    let posture = Some(if !river_capable {
+        "deep_draft"
+    } else if moored {
+        "moored"
+    } else if !in_corridor {
+        "off_channel"
+    } else if sog_knots <= 0.5 {
+        if distance_meters <= 500.0 {
+            "waiting"
+        } else {
+            "holding"
+        }
+    } else {
+        "underway"
+    });
+
+    // On the river trunk every continuing course crosses the span; on an
+    // approach channel, commitment builds as the vessel nears the mouth, and
+    // a sailing rig is river-intent on any channel (the mast is why the
+    // bridge exists).
+    let committed = match fix.branch {
+        RiverBranch::River => true,
+        RiverBranch::NorthApproach | RiverBranch::SouthApproach => {
+            distance_meters <= 1_600.0
+                || vessel_static.and_then(|value| value.ship_type) == Some(36)
+        }
+    };
+    let route_intersects =
+        movement == Movement::Approaching && in_corridor && river_capable && committed;
+    let eta = estimate_eta(
+        distance_meters,
+        sog_knots,
+        course_delta,
+        closing_speed,
+        route_intersects,
+    );
+
+    FixClassification {
+        distance_meters,
+        s_signed: Some(fix.s_meters),
+        movement,
+        posture,
+        route_intersects,
+        eta,
+        branch: Some(fix.branch.as_str()),
+        offset_meters: Some(fix.offset_meters),
+    }
+}
+
+fn closing_speed_meters_per_second(
+    previous: Option<TrackPoint>,
+    distance_meters: f64,
+    source_time: DateTime<Utc>,
+) -> Option<f64> {
+    previous.and_then(|point| {
+        let elapsed = source_time.signed_duration_since(point.observed_at);
+        let seconds = elapsed.num_milliseconds() as f64 / 1_000.0;
+        // Class B transponders can go many minutes between received fixes;
+        // a six-minute-old baseline still says which way the gap is moving.
+        (2.0..=360.0)
+            .contains(&seconds)
+            .then_some((point.distance_meters - distance_meters) / seconds)
+    })
+}
+
+/// Behavioral moored test: the vessel has held one spot for the whole window.
+///
+/// NavigationalStatus is decorative in practice — tugs underway at five knots
+/// broadcast "moored" — so mooring is judged from the track itself. A vessel
+/// that only *recently* stopped (a yacht holding at the span for the opening)
+/// has moving history inside the window and correctly stays un-moored.
+fn held_station(
+    history: Option<&VesselHistory>,
+    latitude: f64,
+    longitude: f64,
+    source_time: DateTime<Utc>,
+) -> bool {
+    let Some(history) = history else { return false };
+    let window_start = source_time - TimeDelta::seconds(MOORED_WINDOW_SECONDS);
+    if !history
+        .points
+        .front()
+        .is_some_and(|oldest| oldest.observed_at <= window_start)
+    {
+        return false;
+    }
+    history.points.iter().all(|point| {
+        point.observed_at < window_start
+            || haversine_meters(point.latitude, point.longitude, latitude, longitude)
+                <= MOORED_DISPLACEMENT_METERS
+    })
+}
+
+/// Countdown rung for display surfaces, from the earliest supported ETA.
+fn warning_rung(earliest_minutes: u16) -> &'static str {
+    match earliest_minutes {
+        0..=2 => "imminent",
+        3 => "T-3",
+        4 => "T-4",
+        5 => "T-5",
+        6..=10 => "T-10",
+        11..=15 => "T-15",
+        16..=20 => "T-20",
+        21..=30 => "T-30",
+        _ => "T-30+",
+    }
+}
+
 fn estimate_eta(
     distance_meters: f64,
     sog_knots: f64,
@@ -864,7 +1440,9 @@ fn estimate_eta(
         return None;
     }
     let minutes = distance_meters / meters_per_second / 60.0;
-    if !minutes.is_finite() || !(0.25..=60.0).contains(&minutes) {
+    // The corridor reaches ~46 minutes upriver and ~35 out the entrance
+    // channels; anything slower is drift, not an approach.
+    if !minutes.is_finite() || !(0.25..=75.0).contains(&minutes) {
         return None;
     }
     let earliest = (minutes * 0.75).floor().max(1.0) as u16;
@@ -1066,33 +1644,23 @@ fn valid_coordinate(latitude: f64, longitude: f64) -> bool {
         && (-180.0..=180.0).contains(&longitude)
 }
 
-fn initial_bearing_degrees(
-    latitude: f64,
-    longitude: f64,
-    target_latitude: f64,
-    target_longitude: f64,
-) -> f64 {
-    let source_latitude = latitude.to_radians();
-    let target_latitude = target_latitude.to_radians();
-    let longitude_delta = (target_longitude - longitude).to_radians();
-    let y = longitude_delta.sin() * target_latitude.cos();
-    let x = source_latitude.cos() * target_latitude.sin()
-        - source_latitude.sin() * target_latitude.cos() * longitude_delta.cos();
-    y.atan2(x).to_degrees().rem_euclid(360.0)
-}
-
-fn angular_difference_degrees(left: f64, right: f64) -> f64 {
-    let difference = (left - right).abs().rem_euclid(360.0);
-    difference.min(360.0 - difference)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const RECEIVED: &str = "2026-08-14T16:20:10Z";
 
+    /// Production geometry: the Brickell target resolves to the corridor.
     fn config() -> AisStreamConfig {
+        AisStreamConfig::new(
+            AisStreamApiKey::new("fixture-secret-key").expect("valid fixture key"),
+            AisStreamSubscription::for_bridge("Brickell Avenue Bridge", 25.7699, -80.19005, 12.0)
+                .expect("valid fixture subscription"),
+        )
+    }
+
+    /// The generic square geometry any non-Brickell bridge still gets.
+    fn square_config() -> AisStreamConfig {
         AisStreamConfig::new(
             AisStreamApiKey::new("fixture-secret-key").expect("valid fixture key"),
             AisStreamSubscription::around_bridge(
@@ -1116,11 +1684,23 @@ mod tests {
         let key = AisStreamApiKey::new("do-not-print-this-key").expect("valid key");
         assert_eq!(format!("{key:?}"), "AisStreamApiKey([REDACTED])");
         assert!(
-            !format!("{:?}", AisStreamConfig::new(key, config().subscription)).contains("do-not")
+            !format!(
+                "{:?}",
+                AisStreamConfig::new(key, square_config().subscription)
+            )
+            .contains("do-not")
         );
-        let subscription = &config().subscription;
-        assert_eq!(subscription.bounding_boxes().len(), 1);
-        assert!((subscription.radius_kilometers() - 12.0).abs() < f64::EPSILON);
+        let square = &square_config().subscription;
+        assert_eq!(square.bounding_boxes().len(), 1);
+        assert!((square.radius_kilometers() - 12.0).abs() < f64::EPSILON);
+
+        // The Brickell target swaps in the surveyed corridor tiles while any
+        // other bridge keeps the square.
+        let corridor = &config().subscription;
+        assert!(corridor.bounding_boxes().len() >= 5);
+        let elsewhere =
+            AisStreamSubscription::for_bridge("Las Olas", 26.119, -80.119, 12.0).expect("valid");
+        assert_eq!(elsewhere.bounding_boxes().len(), 1);
     }
 
     #[test]
@@ -1144,6 +1724,166 @@ mod tests {
                 .is_some_and(|value| value > 100.0)
         );
         assert!(track.item.attributes["eta_min_minutes"].as_u64().is_some());
+        assert_eq!(track.item.attributes["branch"], json!("river"));
+        assert_eq!(track.item.attributes["posture"], json!("underway"));
+        assert!(
+            track.item.attributes["s_meters"]
+                .as_f64()
+                .is_some_and(|s| s > 1_500.0 && s < 2_200.0)
+        );
+        assert!(
+            track.item.attributes["rung"]
+                .as_str()
+                .is_some_and(|rung| rung.starts_with("T-"))
+        );
+    }
+
+    #[test]
+    fn bridge_line_crossing_is_detected_and_queued() {
+        let received = RECEIVED.parse::<DateTime<Utc>>().expect("fixture time");
+        // Just upriver of the span, heading down.
+        let before_body = String::from_utf8(fixture("2026-08-14T16:19:00Z"))
+            .expect("utf8")
+            .replace("-80.2040", "-80.1925")
+            .replace("25.7762", "25.76944");
+        let before = normalize_message(
+            before_body.as_bytes(),
+            received,
+            &config(),
+            &BTreeMap::new(),
+        )
+        .expect("upriver fix");
+        assert!(
+            before.point.s_meters.is_some_and(|s| s > 0.0),
+            "s={:?}",
+            before.point.s_meters
+        );
+
+        // One minute later, between the span and the mouth.
+        let after_body = String::from_utf8(fixture("2026-08-14T16:20:00Z"))
+            .expect("utf8")
+            .replace("-80.2040", "-80.1878")
+            .replace("25.7762", "25.77038");
+        let existing = BTreeMap::from([(before.mmsi, before.clone())]);
+        let after = normalize_message(after_body.as_bytes(), received, &config(), &existing)
+            .expect("seaward fix");
+        assert!(after.point.s_meters.is_some_and(|s| s < 0.0));
+
+        let mut crossings = VecDeque::new();
+        record_crossing(&mut crossings, Some(&before), &after, None);
+        let crossing = crossings.pop_front().expect("crossing recorded");
+        assert_eq!(crossing.direction, "downriver");
+        assert_eq!(crossing.mmsi, "367719770");
+        assert!(crossing.crossed_at >= before.point.observed_at);
+        assert!(crossing.crossed_at <= after.point.observed_at);
+        assert!(crossings.is_empty());
+    }
+
+    #[test]
+    fn long_held_station_reads_moored_and_recent_stop_reads_waiting() {
+        let received = RECEIVED.parse::<DateTime<Utc>>().expect("fixture time");
+        let source_time = "2026-08-14T16:20:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("fixture time");
+        let point = |minutes_ago: i64| VesselHistoryPoint {
+            latitude: 25.7762,
+            longitude: -80.2040,
+            observed_at: source_time - TimeDelta::minutes(minutes_ago),
+        };
+        let history = |minutes: &[i64]| VesselHistory {
+            mmsi: "367719770".into(),
+            vessel_name: None,
+            movement: "stationary".into(),
+            route_intersects: false,
+            speed_knots: 0.0,
+            course_degrees: 129.0,
+            observed_at: source_time,
+            points: minutes.iter().copied().map(point).collect(),
+        };
+
+        let stopped = String::from_utf8(fixture("2026-08-14T16:20:00Z"))
+            .expect("utf8")
+            .replace("\"Sog\": 5.4", "\"Sog\": 0.0");
+        let root: Value = serde_json::from_slice(stopped.as_bytes()).expect("json");
+
+        // Pinned to the same berth for the full window: moored, suppressed.
+        let histories = BTreeMap::from([(367719770, history(&[12, 8, 4, 1]))]);
+        let track = normalize_value(
+            &root,
+            received,
+            &config(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &histories,
+        )
+        .expect("moored track");
+        assert_eq!(track.item.attributes["posture"], json!("moored"));
+        assert_eq!(track.item.attributes["movement"], json!("stationary"));
+
+        // Only recently stopped mid-river: not moored, still a live story.
+        let histories = BTreeMap::from([(367719770, history(&[4, 1]))]);
+        let track = normalize_value(
+            &root,
+            received,
+            &config(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &histories,
+        )
+        .expect("stopped track");
+        assert_eq!(track.item.attributes["posture"], json!("holding"));
+    }
+
+    #[test]
+    fn static_data_enriches_class_and_deep_draught_excludes_the_river() {
+        let received = RECEIVED.parse::<DateTime<Utc>>().expect("fixture time");
+        let static_body = json!({
+            "MessageType": "ShipStaticData",
+            "MetaData": { "MMSI": 367719770 },
+            "Message": { "ShipStaticData": {
+                "UserID": 367719770,
+                "Name": "RIVER RUNNER",
+                "Type": 52,
+                "Dimension": { "A": 20.0, "B": 8.0, "C": 4.0, "D": 4.0 },
+                "MaximumStaticDraught": 3.1
+            }}
+        });
+        let (mmsi, update) = normalize_static(&static_body, received).expect("static parsed");
+        assert_eq!(mmsi, 367719770);
+        let mut statics = BTreeMap::new();
+        apply_static(&mut statics, mmsi, update, received);
+        assert_eq!(statics[&mmsi].class_word(), Some("tug"));
+        assert_eq!(statics[&mmsi].length_meters, Some(28.0));
+
+        let root: Value =
+            serde_json::from_slice(&fixture("2026-08-14T16:20:00Z")).expect("json fixture");
+        let track = normalize_value(
+            &root,
+            received,
+            &config(),
+            &BTreeMap::new(),
+            &statics,
+            &BTreeMap::new(),
+        )
+        .expect("enriched track");
+        assert_eq!(track.item.attributes["vessel_class"], json!("tug"));
+        assert_eq!(track.item.attributes["length_meters"], json!(28.0));
+        assert_eq!(track.item.attributes["route_intersects"], json!(true));
+
+        // The same hull drawing eight meters cannot enter the river at all.
+        statics.get_mut(&mmsi).expect("entry").draught_meters = Some(8.0);
+        let track = normalize_value(
+            &root,
+            received,
+            &config(),
+            &BTreeMap::new(),
+            &statics,
+            &BTreeMap::new(),
+        )
+        .expect("deep track");
+        assert_eq!(track.item.attributes["posture"], json!("deep_draft"));
+        assert_eq!(track.item.attributes["route_intersects"], json!(false));
+        assert!(!track.item.attributes.contains_key("eta_min_minutes"));
     }
 
     #[test]
@@ -1157,9 +1897,12 @@ mod tests {
         )
         .expect("first report");
         let mut existing = BTreeMap::from([(first.mmsi, first)]);
+        // Same course words, but the hull has moved ~300 channel meters
+        // upriver between fixes: observed channel motion wins over COG.
         let body = String::from_utf8(fixture("2026-08-14T16:20:00Z"))
             .expect("utf8 fixture")
-            .replace("-80.1788", "-80.1760");
+            .replace("-80.2040", "-80.2062")
+            .replace("25.7762", "25.7779");
         let second = normalize_message(body.as_bytes(), received, &config(), &existing)
             .expect("second report");
         assert_eq!(second.item.attributes["movement"], json!("diverging"));
@@ -1185,7 +1928,7 @@ mod tests {
 
         let unavailable_course = String::from_utf8(fixture("2026-08-14T16:20:00Z"))
             .expect("utf8")
-            .replace("\"Cog\": 274.0", "\"Cog\": 360.0");
+            .replace("\"Cog\": 129.0", "\"Cog\": 360.0");
         assert!(
             normalize_message(
                 unavailable_course.as_bytes(),

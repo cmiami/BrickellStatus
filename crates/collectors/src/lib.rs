@@ -17,14 +17,16 @@ mod nhc;
 mod nws;
 mod open_meteo;
 mod rainviewer;
+#[cfg(feature = "native")]
+mod river;
 mod syndication;
 mod usgs;
 mod yahoo_chart;
 
 #[cfg(feature = "native")]
 pub use ais_stream::{
-    AIS_VESSEL_TRACKS_CURSOR_KEY, AisStreamApiKey, AisStreamCollector, AisStreamConfig,
-    AisStreamSubscription,
+    AIS_CROSSINGS_CURSOR_KEY, AIS_VESSEL_TRACKS_CURSOR_KEY, AisCrossing, AisStreamApiKey,
+    AisStreamCollector, AisStreamConfig, AisStreamSubscription,
 };
 pub use bbpilots::{
     BbPilotsCollector, BbPilotsConfig, BbpMovement, BbpParseError, BbpSchedule, MovementAction,
