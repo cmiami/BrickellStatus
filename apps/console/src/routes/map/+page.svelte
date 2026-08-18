@@ -325,7 +325,7 @@
 </script>
 
 <svelte:head>
-  <title>Map · Tender’s Log</title>
+  <title>Map · BrickellStatus</title>
   <meta name="description" content="Inspect saved coverage, the bridge target, and live AIS vessel courses on one map." />
 </svelte:head>
 

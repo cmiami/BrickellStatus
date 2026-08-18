@@ -1,4 +1,4 @@
-//! Durable storage for Tender's Log.
+//! Durable storage for BrickellStatus.
 //!
 //! SQLite persists runtime settings and retry-safe outbound work.
 

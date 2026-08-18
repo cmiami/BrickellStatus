@@ -11,7 +11,7 @@ FORM: Distilled from the Live Time Rail composition — channel roster, signal b
 </script>
 
 <svelte:head>
-  <title>Live · Tender’s Log</title>
+  <title>Live · BrickellStatus</title>
   <meta
     name="description"
     content="Current bridge prediction, supporting evidence, channel health, and delivery state."

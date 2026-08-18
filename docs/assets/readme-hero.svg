@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title description">
-  <title id="title">PuenteGonorrea — Tender's Log personal signal console</title>
+  <title id="title">BrickellStatus — BrickellStatus personal signal console</title>
   <desc id="description">Marine-blue project poster with an AISStream-powered Brickell bridge warning, evidence timeline, WhatsApp, and a Heltec E213 e-paper display.</desc>
 
   <rect width="1600" height="900" fill="#0F2A44"/>
@@ -11,7 +11,7 @@
   </g>
 
   <g font-family="Arial Narrow, Helvetica Neue, Arial, sans-serif">
-    <text x="72" y="105" fill="#CBD8E2" font-size="22" font-weight="700" letter-spacing="4">TENDER’S LOG / PERSONAL SIGNAL CONSOLE / MIAMI</text>
+    <text x="72" y="105" fill="#CBD8E2" font-size="22" font-weight="700" letter-spacing="4">BRICKELLSTATUS / PERSONAL SIGNAL CONSOLE / MIAMI</text>
     <rect x="72" y="132" width="270" height="34" fill="#F2A900"/>
     <text x="88" y="155" fill="#111418" font-size="17" font-weight="800" letter-spacing="2.5">ADVANCE WARNING SYSTEM</text>
 
@@ -27,7 +27,7 @@
       <rect width="602" height="374" rx="5" fill="#20262B"/>
       <rect x="14" y="14" width="574" height="346" rx="2" fill="#F9F9F5"/>
       <path d="M14 73h574M14 311h574" stroke="#050505" stroke-width="3"/>
-      <text x="34" y="53" fill="#050505" font-size="24" font-weight="800" letter-spacing="2">TENDER’S LOG</text>
+      <text x="34" y="53" fill="#050505" font-size="24" font-weight="800" letter-spacing="2">BRICKELLSTATUS</text>
       <text x="435" y="53" fill="#050505" font-size="18" font-weight="700" letter-spacing="2">BRICKELL · 09</text>
 
       <text x="34" y="117" fill="#050505" font-size="17" font-weight="700" letter-spacing="2">ROAD DECISION</text>

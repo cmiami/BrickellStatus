@@ -28,7 +28,7 @@ impl SyndicationConfig {
             url,
             source_name: None,
             max_items: 50,
-            user_agent: "PuenteGonorrea/0.1 (+https://github.com/cmiami/PuenteGonorrea)".into(),
+            user_agent: "BrickellStatus/0.1 (+https://github.com/cmiami/BrickellStatus)".into(),
             fetch_limits: FetchLimits::default(),
         }
     }

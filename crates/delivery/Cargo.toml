@@ -1,9 +1,9 @@
 [package]
-name = "bridgestatus-delivery"
+name = "brickellstatus-delivery"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
-description = "Transactional delivery adapters for Tender's Log"
+description = "Transactional delivery adapters for BrickellStatus"
 
 [dependencies]
 async-trait.workspace = true

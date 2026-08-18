@@ -26,7 +26,7 @@
 </script>
 
 <svelte:head>
-  <title>Outputs · Tender’s Log</title>
+  <title>Outputs · BrickellStatus</title>
   <meta name="description" content="Configure the e-paper display, AIS vessel evidence, desktop notices, and WhatsApp delivery." />
 </svelte:head>
 

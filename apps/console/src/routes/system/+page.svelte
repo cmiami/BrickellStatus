@@ -75,7 +75,7 @@
 </script>
 
 <svelte:head>
-  <title>System · Tender’s Log</title>
+  <title>System · BrickellStatus</title>
   <meta name="description" content="Inspect collector freshness and runtime health." />
 </svelte:head>
 
@@ -184,7 +184,7 @@
             </div>
             <div>
               <ShieldCheck size={22} strokeWidth={1.5} aria-hidden="true" />
-              <span><strong>Tender’s Log engine</strong><small>Policy and collector runtime</small></span>
+              <span><strong>BrickellStatus engine</strong><small>Policy and collector runtime</small></span>
               <em>{$snapshot.system.engineVersion}</em>
             </div>
           </div>

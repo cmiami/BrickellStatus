@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use bridgestatus_eink::{
+use brickellstatus_eink::{
     ChannelAvailability, ChannelCard, ChannelKind, ChannelSource, ChannelUrgency, MonoFrame,
     PanelModel, RADAR_FIGURE_HEIGHT, RADAR_FIGURE_WIDTH, RadarFigure, radar_figure_from_png,
     render_channel_card_with_radar, series_figure,

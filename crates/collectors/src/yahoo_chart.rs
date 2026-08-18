@@ -675,7 +675,7 @@ mod tests {
         let config = YahooChartConfig::new(
             "AMD",
             "AMD",
-            "PuenteGonorrea fixture (+https://example.invalid)",
+            "BrickellStatus fixture (+https://example.invalid)",
         )
         .unwrap();
         let collector =

@@ -20,26 +20,26 @@ use crate::{
     SystemStatusDto, UnitSystem, UrgencyDto, VesselTrackSnapshot, WhatsAppRecipientConsent,
     validate_preferences, whatsapp_consent_is_current,
 };
-use bridgestatus_collectors::{
+use brickellstatus_collectors::{
     AIS_CROSSINGS_CURSOR_KEY, AIS_VESSEL_TRACKS_CURSOR_KEY, AisCrossing, BRIDGE_LATITUDE,
     BRIDGE_LONGITUDE, CollectContext, Collector, CollectorBatch, CollectorCursor, CollectorError,
     CollectorItem, HealthState, ItemKind, corridor_geometry, project,
 };
-use bridgestatus_model::{
+use brickellstatus_model::{
     Availability, AvailabilityStatus, BridgeControllerState, BridgeObservation, ChannelId,
     Confidence, EtaRangeMinutes, Observation, ObservationId, OutboundProgressStage, SourceId,
     TimestampMillis, VesselMovement,
 };
-use bridgestatus_policy::{
+use brickellstatus_policy::{
     BrickellSchedule, BridgeEvidence, BridgePrediction, BridgePredictor, ContributionDisposition,
     EvidenceKind, PredictionError,
 };
+use brickellstatus_storage::{AisCrossingObservation, AisTrackFix, StorageError, Store};
 use futures::{StreamExt, stream};
 use jiff::{Timestamp, tz::TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tenders_storage::{AisCrossingObservation, AisTrackFix, StorageError, Store};
 use thiserror::Error;
 use tokio::{
     sync::{Mutex, RwLock},
@@ -69,7 +69,7 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            user_agent: "PuenteGonorrea/0.1 (+https://github.com/cmiami/PuenteGonorrea)".into(),
+            user_agent: "BrickellStatus/0.1 (+https://github.com/cmiami/BrickellStatus)".into(),
             // The tick is the scheduler's granularity, not any source's rate.
             // It is set by the fastest consumer -- FL511 bridge status at 15s --
             // and every collector declares its own floor in the factory, so a
@@ -1023,7 +1023,7 @@ impl RuntimeEngine {
                     continue;
                 }
                 transaction
-                    .record_bridge_state(tenders_storage::BridgeObservation {
+                    .record_bridge_state(brickellstatus_storage::BridgeObservation {
                         source_id,
                         bridge_key,
                         bridge_name: &item.title,
@@ -1061,7 +1061,7 @@ impl RuntimeEngine {
                     continue;
                 };
                 transaction
-                    .record_river_transit(tenders_storage::RiverTransitObservation {
+                    .record_river_transit(brickellstatus_storage::RiverTransitObservation {
                         source_id,
                         movement_key: &item.id,
                         vessel: attribute("vessel").unwrap_or(item.title.as_str()),
@@ -2036,17 +2036,17 @@ fn availability_dto(value: AvailabilityStatus) -> AvailabilityDto {
     }
 }
 
-fn bridge_state_dto(value: bridgestatus_model::BridgeState) -> BridgeStateDto {
+fn bridge_state_dto(value: brickellstatus_model::BridgeState) -> BridgeStateDto {
     match value {
-        bridgestatus_model::BridgeState::Clear => BridgeStateDto::Clear,
-        bridgestatus_model::BridgeState::Watch => BridgeStateDto::Possible,
-        bridgestatus_model::BridgeState::Likely => BridgeStateDto::Likely,
-        bridgestatus_model::BridgeState::Open => BridgeStateDto::Open,
+        brickellstatus_model::BridgeState::Clear => BridgeStateDto::Clear,
+        brickellstatus_model::BridgeState::Watch => BridgeStateDto::Possible,
+        brickellstatus_model::BridgeState::Likely => BridgeStateDto::Likely,
+        brickellstatus_model::BridgeState::Open => BridgeStateDto::Open,
     }
 }
 
 fn bridge_interval_dto(
-    interval: tenders_storage::BridgeStateInterval,
+    interval: brickellstatus_storage::BridgeStateInterval,
 ) -> Result<BridgeStateIntervalDto, RuntimeError> {
     let relation = match interval.relation.as_str() {
         "target" => BridgeRelationDto::Target,

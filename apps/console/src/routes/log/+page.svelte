@@ -94,14 +94,14 @@
     const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = `tenders-log-${new Date().toISOString().slice(0, 10)}.json`;
+    anchor.download = `brickellstatus-${new Date().toISOString().slice(0, 10)}.json`;
     anchor.click();
     URL.revokeObjectURL(url);
   }
 </script>
 
 <svelte:head>
-  <title>Log · Tender’s Log</title>
+  <title>Log · BrickellStatus</title>
   <meta name="description" content="Inspect recorded bridge openings and durable outbound delivery outcomes." />
 </svelte:head>
 

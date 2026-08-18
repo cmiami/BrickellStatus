@@ -71,7 +71,7 @@ mod tests {
     #[test]
     fn exact_preview_round_trips_dimensions() {
         let path = std::env::temp_dir().join(format!(
-            "bridgestatus-eink-{:?}.png",
+            "brickellstatus-eink-{:?}.png",
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()

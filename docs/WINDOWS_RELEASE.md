@@ -1,8 +1,8 @@
 # Windows packaging and releases
 
-Tender's Log ships one **unsigned** Windows artifact:
+BrickellStatus ships one **unsigned** Windows artifact:
 
-- `Tenders-Log_<version>_windows-x64-setup.exe`, an NSIS installer for x64
+- `BrickellStatus_<version>_windows-x64-setup.exe`, an NSIS installer for x64
   Windows 10/11.
 
 The project holds no Authenticode certificate and submits nothing to
@@ -41,7 +41,7 @@ process default at startup) precisely so no C/CMake dependency stands between
 macOS and a Windows target. `cargo tree -i aws-lc-sys` must stay empty.
 
 Apostrophe note: Tauri's NSIS shortcut helpers single-quote their COM
-parameters, and the `'` in "Tender's Log.lnk" terminates that quote early
+parameters, and the `'` in "BrickellStatus.lnk" terminates that quote early
 (`macro "NSISCOMCALL" requires 4 parameter(s), passed 7`). The build script
 interposes a `makensis` shim that re-quotes the generated `utils.nsh` with
 NSIS backticks before compiling. If a Tauri CLI upgrade fixes the template,
@@ -61,7 +61,7 @@ npm --prefix apps/console run size:win
 building, then produces:
 
 ```text
-target/x86_64-pc-windows-msvc/release/bundle/nsis/Tender's Log_<version>_x64-setup.exe
+target/x86_64-pc-windows-msvc/release/bundle/nsis/BrickellStatus_<version>_x64-setup.exe
 ```
 
 and prints the installer's byte size and SHA-256. Re-verify that hash inside
@@ -94,12 +94,12 @@ Run this against the exact installer the release will ship, inside an x64
 Windows 11 VM.
 
 1. **Integrity** — copy the setup exe in via a shared folder;
-   `certutil -hashfile "Tenders-Log_<version>_windows-x64-setup.exe" SHA256`
+   `certutil -hashfile "BrickellStatus_<version>_windows-x64-setup.exe" SHA256`
    matches the hash the build printed.
 2. **SmartScreen** — "Windows protected your PC" → **More info** → **Run
    anyway**. Never disable SmartScreen globally.
 3. **Install** — per-user, no UAC prompt; app in
-   `%LOCALAPPDATA%\Programs\Tender's Log`; Start Menu and Apps-list uninstall
+   `%LOCALAPPDATA%\Programs\BrickellStatus`; Start Menu and Apps-list uninstall
    entries present.
 4. **WebView2** — the app launches on stock Windows 11. Optionally, in a VM
    snapshot, uninstall the WebView2 Runtime and confirm the installer's
@@ -107,10 +107,10 @@ Windows 11 VM.
 5. **Window and tray** — closing the window hides it and the runtime keeps
    working; tray left-click opens the menu with live status lines;
    double-clicking the tray icon opens the window; the tooltip carries
-   "Tender's Log · status · detail"; the icon is legible on the dark taskbar;
+   "BrickellStatus · status · detail"; the icon is legible on the dark taskbar;
    **Quit** exits; relaunching while running focuses the existing instance.
 6. **Notifications** — trigger a notice; a toast appears attributed to
-   Tender's Log. Toasts need the Start Menu shortcut, so never QA them from a
+   BrickellStatus. Toasts need the Start Menu shortcut, so never QA them from a
    bare unpacked exe.
 7. **External links** — map attribution and release links open the default
    browser, including URLs containing `&`.
@@ -130,7 +130,7 @@ Windows 11 VM.
     expose an LE radio to Windows, so an empty `btleplug` scan inside the VM
     proves nothing. Pass a USB Bluetooth dongle through so Windows owns a real
     radio, or record BLE as "verified on physical hardware only".
-12. **Secrets** — save a WhatsApp token; `%APPDATA%\com.cmiami.puentegonorrea\
+12. **Secrets** — save a WhatsApp token; `%APPDATA%\com.cmiami.brickellstatus\
     credentials.json` contains a `dpapiCiphertext` envelope, not plaintext,
     and the token survives an app restart.
 13. **Uninstall** — app and shortcuts removed; per-user app data under
@@ -143,7 +143,7 @@ The Windows leg lives in
 macOS DMGs and runs under the same triggers and version-tag verification. It
 cross-compiles on a **macOS** runner — the same toolchain as the local build —
 enforces the size budget, and attaches
-`Tenders-Log_<version>_windows-x64-setup.exe` to the GitHub release. Only the
+`BrickellStatus_<version>_windows-x64-setup.exe` to the GitHub release. Only the
 installer becomes a release asset; the SHA-256 and size report remain as
 internal workflow artifacts. A manual `workflow_dispatch` run uploads workflow
 artifacts without creating a release.

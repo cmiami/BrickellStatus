@@ -10,12 +10,12 @@
 //! to look at them side by side.
 //!
 //! ```sh
-//! cargo run -p bridgestatus-eink --example render_panel_states -- <directory>
+//! cargo run -p brickellstatus-eink --example render_panel_states -- <directory>
 //! ```
 
 use std::path::PathBuf;
 
-use bridgestatus_eink::{
+use brickellstatus_eink::{
     ChannelAvailability, ChannelCard, ChannelKind, ChannelSource, ChannelUrgency, EtaRange,
     Evidence, Freshness, LiveSnapshot, MonoFrame, PanelModel, RenderConfig, SnapshotState,
     SpanStatus, render_channel_card, render_snapshot,

@@ -61,7 +61,7 @@
 
 <header class="top-bar">
   <div class="title-lockup">
-    <a href="/">Tender’s Log</a>
+    <a href="/">BrickellStatus</a>
     <span>Personal signal console</span>
   </div>
 

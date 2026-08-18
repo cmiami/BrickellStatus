@@ -151,7 +151,7 @@ const finalDmg = join(
   dmgDirectory,
   `${productName}_${version}_${architectureSuffix(target)}.dmg`
 );
-const temporaryDirectory = mkdtempSync(join(tmpdir(), 'tenders-log-dmg-'));
+const temporaryDirectory = mkdtempSync(join(tmpdir(), 'brickellstatus-dmg-'));
 const sourceDirectory = join(temporaryDirectory, 'source');
 const writableDmg = join(temporaryDirectory, 'writable.dmg');
 let attachedDevice;

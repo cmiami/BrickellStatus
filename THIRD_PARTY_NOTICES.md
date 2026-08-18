@@ -1,6 +1,6 @@
 # Third-party notices
 
-PuenteGonorrea is distributed under the **MIT** license, but that choice does
+BrickellStatus is distributed under the **MIT** license, but that choice does
 not replace the licenses or attribution requirements of third-party software,
 fonts, icons, services, or data. `LICENSE-APACHE` remains in the repository as
 the canonical Apache-2.0 text for bundled dependencies, not as a license for
@@ -13,7 +13,7 @@ that accompany their bundled dependencies.
 
 ## Bundled interface software and assets
 
-| Component | Use in Tender's Log | License and notice |
+| Component | Use in BrickellStatus | License and notice |
 |---|---|---|
 | [MapLibre GL JS](https://github.com/maplibre/maplibre-gl-js) | Interactive global location map renderer | BSD-3-Clause. Copyright © MapLibre contributors. The distribution includes portions under compatible licenses; retain the complete [upstream license file](https://github.com/maplibre/maplibre-gl-js/blob/main/LICENSE.txt). |
 | [Barlow Condensed](https://github.com/jpt/barlow) | Condensed display and instrument labels, packaged through Fontsource | SIL Open Font License 1.1. Copyright © 2017 The Barlow Project Authors. See the upstream [`OFL.txt`](https://github.com/jpt/barlow/blob/master/OFL.txt). |

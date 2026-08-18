@@ -1,13 +1,13 @@
 //! Refreshes the real collectors, renders the live application snapshot, and
 //! sends it to an attached Espressif E213 over USB.
 
-use bridgestatus_eink::{
+use brickellstatus_desktop_lib::render_live_bridge_frame;
+use brickellstatus_eink::{
     RefreshMode,
     transport::{UsbConfig, UsbTransport, send_frame},
 };
-use bridgestatus_runtime::{RuntimeConfig, RuntimeEngine};
-use puente_gonorrea_desktop_lib::render_live_bridge_frame;
-use tenders_storage::Store;
+use brickellstatus_runtime::{RuntimeConfig, RuntimeEngine};
+use brickellstatus_storage::Store;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -1,9 +1,9 @@
 # macOS packaging and releases
 
-Tender's Log currently ships two **unsigned** disk images:
+BrickellStatus currently ships two **unsigned** disk images:
 
-- `Tenders-Log_<version>_macos-arm64.dmg` for Apple Silicon Macs;
-- `Tenders-Log_<version>_macos-x86_64.dmg` for Intel Macs.
+- `BrickellStatus_<version>_macos-arm64.dmg` for Apple Silicon Macs;
+- `BrickellStatus_<version>_macos-x86_64.dmg` for Intel Macs.
 
 Only the disk images are attached to a GitHub release; size reports and
 checksums remain as internal workflow artifacts.
@@ -42,7 +42,7 @@ Passing `-- --target <rust-target>` places it under
 `tauri:build:mac` first asks Tauri for the native `.app`, then creates the
 install image with macOS's built-in `hdiutil`. The image always contains the
 app, an **Applications** shortcut, and the proper volume/app icon. A bounded
-20-second Finder pass adds the custom Tender's Log background and icon
+20-second Finder pass adds the custom BrickellStatus background and icon
 positions when Finder automation is available. If it is unavailable (common
 on headless CI runners), packaging removes the unused background and emits a
 plain install image instead. It never waits indefinitely for Finder: the
@@ -57,14 +57,14 @@ npm --prefix apps/console run tauri:build -- --no-bundle --no-sign --ci
 
 `assets:mac` is offline after `npm ci`: it uses the installed Tauri CLI plus
 macOS's built-in `sips` tool to regenerate `.icns`, PNG icons, and the DMG
-background from the checked-in Tender's Log SVG sources.
+background from the checked-in BrickellStatus SVG sources.
 
 Every production Tauri build also runs `licenses:bundle`. It reads the locked
 Rust graph for both macOS architectures and the installed locked npm graph,
 then writes a deduplicated legal-text inventory into the application at:
 
 ```text
-Tender's Log.app/Contents/Resources/licenses/
+BrickellStatus.app/Contents/Resources/licenses/
 ```
 
 That directory contains `THIRD_PARTY_NOTICES.md`, both project license texts,
@@ -90,16 +90,16 @@ Because the app is not signed or notarized, macOS Gatekeeper may block the
 first ordinary double-click. Do not disable Gatekeeper and do not strip the
 quarantine attribute globally.
 
-1. Open the DMG and drag **Tender's Log** to **Applications**.
+1. Open the DMG and drag **BrickellStatus** to **Applications**.
 2. In Finder, open **Applications**.
-3. Control-click or right-click **Tender's Log**, then choose **Open**.
+3. Control-click or right-click **BrickellStatus**, then choose **Open**.
 4. Confirm **Open** in the macOS dialog.
 
 After that explicit first launch, the app opens normally for that user.
 
 Closing the main window hides it; it does not stop collection, prediction,
-delivery, or E213 rotation. Use the Tender's Log menu-bar item to see the
-current USB/BLE state and choose **Open Tender's Log** or **Quit Tender's
+delivery, or E213 rotation. Use the BrickellStatus menu-bar item to see the
+current USB/BLE state and choose **Open BrickellStatus** or **Quit Tender's
 Log**. Only the explicit Quit action stops the background runtime.
 
 The Windows installer has its own document mirroring this one:

@@ -379,7 +379,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "bridgestatus-collectors"
+name = "brickellstatus-collectors"
 version = "0.1.23"
 dependencies = [
  "async-trait",
@@ -402,7 +402,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "bridgestatus-delivery"
+name = "brickellstatus-delivery"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -418,7 +418,41 @@ dependencies = [
 ]
 
 [[package]]
-name = "bridgestatus-eink"
+name = "brickellstatus-desktop"
+version = "0.1.23"
+dependencies = [
+ "base64 0.22.1",
+ "brickellstatus-collectors",
+ "brickellstatus-delivery",
+ "brickellstatus-eink",
+ "brickellstatus-projection",
+ "brickellstatus-runtime",
+ "brickellstatus-storage",
+ "dotenvy",
+ "espflash",
+ "jiff",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serialport",
+ "sha2 0.10.9",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-notification",
+ "tauri-plugin-opener",
+ "tauri-plugin-single-instance",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "windows-sys 0.61.2",
+ "zeroize",
+]
+
+[[package]]
+name = "brickellstatus-eink"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -437,7 +471,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "bridgestatus-model"
+name = "brickellstatus-hub"
+version = "0.1.23"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "brickellstatus-model"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -445,10 +489,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "bridgestatus-policy"
+name = "brickellstatus-policy"
 version = "0.1.0"
 dependencies = [
- "bridgestatus-model",
+ "brickellstatus-model",
  "jiff",
  "serde",
  "serde_json",
@@ -456,23 +500,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "bridgestatus-projection"
+name = "brickellstatus-projection"
 version = "0.1.23"
 dependencies = [
- "bridgestatus-eink",
- "bridgestatus-runtime",
+ "brickellstatus-eink",
+ "brickellstatus-runtime",
  "jiff",
  "serde_json",
 ]
 
 [[package]]
-name = "bridgestatus-runtime"
+name = "brickellstatus-runtime"
 version = "0.1.23"
 dependencies = [
  "async-trait",
- "bridgestatus-collectors",
- "bridgestatus-model",
- "bridgestatus-policy",
+ "brickellstatus-collectors",
+ "brickellstatus-model",
+ "brickellstatus-policy",
+ "brickellstatus-storage",
  "chrono",
  "futures",
  "jiff",
@@ -482,12 +527,25 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
- "tenders-storage",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "tracing",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "brickellstatus-storage"
+version = "0.1.23"
+dependencies = [
+ "libsqlite3-sys",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
  "uuid",
 ]
 
@@ -3818,50 +3876,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "puente-gonorrea-desktop"
-version = "0.1.23"
-dependencies = [
- "base64 0.22.1",
- "bridgestatus-collectors",
- "bridgestatus-delivery",
- "bridgestatus-eink",
- "bridgestatus-projection",
- "bridgestatus-runtime",
- "dotenvy",
- "espflash",
- "jiff",
- "rustls",
- "serde",
- "serde_json",
- "serialport",
- "sha2 0.10.9",
- "tauri",
- "tauri-build",
- "tauri-plugin-notification",
- "tauri-plugin-opener",
- "tauri-plugin-single-instance",
- "tenders-storage",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
- "windows-sys 0.61.2",
- "zeroize",
-]
-
-[[package]]
-name = "puente-gonorrea-hub"
-version = "0.1.23"
-dependencies = [
- "anyhow",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5478,20 +5492,6 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "tenders-storage"
-version = "0.1.23"
-dependencies = [
- "libsqlite3-sys",
- "serde",
- "serde_json",
- "sqlx",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
 ]
 
 [[package]]

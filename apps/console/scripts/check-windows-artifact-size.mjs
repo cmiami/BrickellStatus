@@ -34,7 +34,7 @@ function mib(bytes) {
   return (bytes / (1024 * 1024)).toFixed(2);
 }
 
-const executable = join(releaseDirectory, 'puente-gonorrea-desktop.exe');
+const executable = join(releaseDirectory, 'brickellstatus-desktop.exe');
 if (!existsSync(executable)) {
   throw new Error(`Built Windows executable is missing: ${executable}`);
 }

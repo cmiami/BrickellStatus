@@ -4,6 +4,6 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
-    tracing::info!("PuenteGonorrea hub scaffold ready; no listener is enabled by default");
+    tracing::info!("BrickellStatus hub scaffold ready; no listener is enabled by default");
     Ok(())
 }

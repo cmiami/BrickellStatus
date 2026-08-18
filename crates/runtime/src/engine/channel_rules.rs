@@ -127,12 +127,12 @@ fn channel_priority(
     let urgency = channel_urgency(kind, signal, decision);
     let imminence_minutes = channel_imminence_minutes(kind, signal, decision);
     let confirmed = matches!(kind, ChannelKindDto::Bridge) && decision.state == BridgeStateDto::Open;
-    let score = bridgestatus_policy::priority_score(bridgestatus_policy::PriorityInput {
+    let score = brickellstatus_policy::priority_score(brickellstatus_policy::PriorityInput {
         urgency: match urgency {
-            UrgencyDto::Routine => bridgestatus_policy::Urgency::Routine,
-            UrgencyDto::HeadsUp => bridgestatus_policy::Urgency::HeadsUp,
-            UrgencyDto::Action => bridgestatus_policy::Urgency::Action,
-            UrgencyDto::Emergency => bridgestatus_policy::Urgency::Emergency,
+            UrgencyDto::Routine => brickellstatus_policy::Urgency::Routine,
+            UrgencyDto::HeadsUp => brickellstatus_policy::Urgency::HeadsUp,
+            UrgencyDto::Action => brickellstatus_policy::Urgency::Action,
+            UrgencyDto::Emergency => brickellstatus_policy::Urgency::Emergency,
         },
         imminence_minutes,
         confirmed,

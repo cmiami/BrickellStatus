@@ -27,7 +27,7 @@
 </script>
 
 <aside class="app-nav" aria-label="Primary">
-  <a class="brand-mark" href="/" aria-label="Tender's Log live console">
+  <a class="brand-mark" href="/" aria-label="BrickellStatus live console">
     <BellRing size={26} strokeWidth={1.6} aria-hidden="true" />
     <span class="brand-word">TENDER’S<br />LOG</span>
   </a>

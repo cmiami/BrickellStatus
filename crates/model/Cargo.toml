@@ -1,9 +1,9 @@
 [package]
-name = "bridgestatus-model"
+name = "brickellstatus-model"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
-description = "Transport-neutral domain models for the BridgeStatus signal console"
+description = "Transport-neutral domain models for the BrickellStatus signal console"
 
 [dependencies]
 serde.workspace = true

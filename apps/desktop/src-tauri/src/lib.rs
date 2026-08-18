@@ -1,4 +1,4 @@
-//! Native Tender's Log companion: runtime, tray lifetime, delivery, and E213 I/O.
+//! Native BrickellStatus companion: runtime, tray lifetime, delivery, and E213 I/O.
 
 pub mod firmware;
 mod secret_store;
@@ -14,24 +14,24 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bridgestatus_collectors::{
+use brickellstatus_collectors::{
     CollectContext, Collector, CollectorItem, HttpFetcher, ItemKind, RainViewerCollector,
     SafeHttpFetcher,
 };
-use bridgestatus_delivery::{
+use brickellstatus_delivery::{
     DeliveryAdapter, DeliveryFailureKind, DeliveryReason, DeliveryRequest, Destination,
     EnvironmentSecretResolver, EtaRange as DeliveryEtaRange, MessagingConsent, Notice, NoticeState,
     ReqwestExecutor, SecretValue, TokenSource, WhatsAppCloud, WhatsAppConfig,
 };
-use bridgestatus_projection::{
+use brickellstatus_projection::{
     bounded_text, bps_to_percent, channel_card, display_snapshot, interrupt_allows,
 };
 // Exercised only by the projection's tests, which live with the app because
 // they assert against real snapshots the engine produces.
 #[cfg(test)]
-use bridgestatus_projection::{local_clock, span_code, upstream_spans};
+use brickellstatus_projection::{local_clock, span_code, upstream_spans};
 // Re-exported because the live-frame binary drives the same path the app does.
-use bridgestatus_eink::{
+use brickellstatus_eink::{
     DeviceBanner, MonoFrame, PanelModel, RadarFigure, RefreshMode, RenderConfig, preview_png_bytes,
     radar_figure_from_png, render_channel_card, render_channel_card_with_radar, render_snapshot,
     series_figure,
@@ -40,14 +40,15 @@ use bridgestatus_eink::{
         discover_ble_devices, discover_espressif_devices,
     },
 };
-pub use bridgestatus_projection::render_live_bridge_frame;
-use bridgestatus_runtime::{
+pub use brickellstatus_projection::render_live_bridge_frame;
+use brickellstatus_runtime::{
     AisConnectionStateDto, AppPreferences, AppSnapshot, AvailabilityDto, BridgeStateDto,
     ChannelKindDto, ChannelSnapshot, CredentialFreeCollectorFactory, DeliveryStateDto,
     DestinationIdDto, DispatchRecord, DisplayTransport, InterruptPreset, LocationSearchResult,
     MutationResult, OutputStateDto, RuntimeConfig, RuntimeEngine, SchedulerHandle, SurfacePresence,
     UrgencyDto, whatsapp_consent_is_current,
 };
+use brickellstatus_storage::{IncidentRecord, OutboxLease, OutboxRecord, Store};
 use jiff::{Timestamp, tz::TimeZone};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -57,7 +58,6 @@ use tauri::{
     tray::{TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_notification::NotificationExt;
-use tenders_storage::{IncidentRecord, OutboxLease, OutboxRecord, Store};
 use tokio::sync::{Mutex as AsyncMutex, Mutex as TokioMutex, RwLock};
 use tracing::{debug, warn};
 use url::Url;
@@ -69,7 +69,7 @@ const MENU_STATUS_ID: &str = "e213-status";
 const MENU_DETAIL_ID: &str = "e213-detail";
 const MENU_OPEN_ID: &str = "open-main";
 const MENU_QUIT_ID: &str = "quit";
-const TRAY_ID: &str = "tenders-log-tray";
+const TRAY_ID: &str = "brickellstatus-tray";
 const STATUS_EVENT: &str = "display-connection-status";
 const DISPATCH_TRACKER_KEY: &str = "desktop.whatsapp.dispatch";
 const NOTIFICATION_TRACKER_KEY: &str = "desktop.notifications.dispatch";
@@ -259,10 +259,10 @@ impl ActiveDisplay {
     ) -> Result<TransportReceipt, String> {
         let receipt = match self {
             Self::Usb { transport, .. } => {
-                bridgestatus_eink::transport::send_frame(transport.as_ref(), frame, refresh).await
+                brickellstatus_eink::transport::send_frame(transport.as_ref(), frame, refresh).await
             }
             Self::Ble { transport, .. } => {
-                bridgestatus_eink::transport::send_frame(transport.as_ref(), frame, refresh).await
+                brickellstatus_eink::transport::send_frame(transport.as_ref(), frame, refresh).await
             }
         };
         receipt.map_err(|error| error.to_string())
@@ -909,7 +909,7 @@ pub fn set_e213_transport_status(app: &AppHandle, status: DisplayConnectionStatu
     }
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         if let Err(error) = tray.set_tooltip(Some(format!(
-            "Tender's Log · {status_line} · {detail_line}"
+            "BrickellStatus · {status_line} · {detail_line}"
         ))) {
             warn!(%error, "display tray tooltip update failed");
         }
@@ -977,7 +977,7 @@ async fn get_firmware_status(
     state: State<'_, DesktopState>,
 ) -> Result<FirmwareStatus, String> {
     let connected_ready = state.display.usb_ready_observed().await;
-    let devices = bridgestatus_eink::transport::discover_espressif_devices()
+    let devices = brickellstatus_eink::transport::discover_espressif_devices()
         .await
         .unwrap_or_default();
     let port = devices.first().map(|device| device.port.clone());
@@ -1037,8 +1037,8 @@ async fn get_firmware_status(
             }
         }
         Some(port) => {
-            let transport = bridgestatus_eink::transport::UsbTransport::new(
-                bridgestatus_eink::transport::UsbConfig {
+            let transport = brickellstatus_eink::transport::UsbTransport::new(
+                brickellstatus_eink::transport::UsbConfig {
                     port: Some(port.to_owned()),
                     ..Default::default()
                 },
@@ -1245,7 +1245,7 @@ where
 
 /// The USB serial number of the board at `port`, when it reports one.
 async fn attached_board_serial(port: &str) -> Option<String> {
-    bridgestatus_eink::transport::discover_espressif_devices()
+    brickellstatus_eink::transport::discover_espressif_devices()
         .await
         .ok()?
         .into_iter()
@@ -2295,8 +2295,10 @@ fn install_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let status_item = MenuItem::with_id(app, MENU_STATUS_ID, status_line, false, None::<&str>)?;
     let detail_item = MenuItem::with_id(app, MENU_DETAIL_ID, detail_line, false, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let open_item = MenuItem::with_id(app, MENU_OPEN_ID, "Open Tender’s Log", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, MENU_QUIT_ID, "Quit Tender’s Log", true, None::<&str>)?;
+    let open_item =
+        MenuItem::with_id(app, MENU_OPEN_ID, "Open BrickellStatus", true, None::<&str>)?;
+    let quit_item =
+        MenuItem::with_id(app, MENU_QUIT_ID, "Quit BrickellStatus", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[
@@ -2318,7 +2320,7 @@ fn install_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .icon(tray_icon)
         .icon_as_template(cfg!(target_os = "macos"))
         .title(initial.tray_badge())
-        .tooltip("Tender’s Log · E213 disconnected")
+        .tooltip("BrickellStatus · E213 disconnected")
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_tray_icon_event(|tray, event| {
@@ -2350,7 +2352,7 @@ fn install_tray(app: &mut tauri::App) -> tauri::Result<()> {
 fn install_runtime(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = app.path().app_data_dir()?;
     fs::create_dir_all(&data_dir)?;
-    let database_path = data_dir.join("tenders-log.sqlite3");
+    let database_path = data_dir.join("brickellstatus.sqlite3");
     let secret_store = LocalSecretStore::new(data_dir.join("credentials.json"));
     let engine = tauri::async_runtime::block_on(async {
         let store = Store::open(database_path).await?;
@@ -2389,7 +2391,7 @@ fn install_runtime(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error
             preferences.whatsapp.token_configured = configured;
             engine.save_preferences(preferences).await?;
         }
-        Ok::<_, bridgestatus_runtime::RuntimeError>((store, engine, ais_key_fingerprint))
+        Ok::<_, brickellstatus_runtime::RuntimeError>((store, engine, ais_key_fingerprint))
     })?;
     let (store, engine, ais_key_fingerprint) = engine;
     let engine = Arc::new(engine);
@@ -2803,7 +2805,7 @@ pub fn run() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("Tender's Log could not start");
+        .expect("BrickellStatus could not start");
     application.run(|app, event| {
         if matches!(event, RunEvent::ExitRequested { .. })
             && let Some(state) = app.try_state::<DesktopState>()

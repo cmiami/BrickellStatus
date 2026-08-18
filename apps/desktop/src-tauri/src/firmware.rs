@@ -28,7 +28,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use bridgestatus_eink::PanelModel;
+use brickellstatus_eink::PanelModel;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -349,7 +349,7 @@ fn validate_layout(variant: &str, segments: &[FlashSegment]) -> Result<(), Firmw
 /// Firmware predating build reporting omits that field, so a missing build is
 /// "unknown", never "wrong" -- a working device must not be nagged to reflash
 /// just because it cannot say which build it runs.
-pub use bridgestatus_eink::DeviceBanner;
+pub use brickellstatus_eink::DeviceBanner;
 
 /// Why a flash is being offered.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -728,7 +728,7 @@ mod tests {
 
     impl Fixture {
         fn new(name: &str) -> Self {
-            let root = std::env::temp_dir().join(format!("tenders-firmware-{name}"));
+            let root = std::env::temp_dir().join(format!("brickellstatus-firmware-{name}"));
             let _ = fs::remove_dir_all(&root);
             fs::create_dir_all(&root).unwrap();
             Self { root }
@@ -1029,7 +1029,7 @@ mod tests {
 
     #[test]
     fn reports_a_missing_bundle_rather_than_panicking() {
-        let missing = std::env::temp_dir().join("tenders-firmware-absent");
+        let missing = std::env::temp_dir().join("brickellstatus-firmware-absent");
         let _ = fs::remove_dir_all(&missing);
         assert!(matches!(
             FirmwareBundle::load(&missing).unwrap_err(),
@@ -1088,7 +1088,7 @@ mod tests {
         };
         assert_ne!(
             revision,
-            bridgestatus_eink::UNKNOWN_BUILD,
+            brickellstatus_eink::UNKNOWN_BUILD,
             "a bundle that cannot name its own build must not be shipped"
         );
         for variant in bundle.variants() {

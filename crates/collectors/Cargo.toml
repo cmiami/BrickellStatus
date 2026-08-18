@@ -1,10 +1,10 @@
 [package]
-name = "bridgestatus-collectors"
+name = "brickellstatus-collectors"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Normalized public-feed and optional secret-backed signal collectors for Tender's Log"
+description = "Normalized public-feed and optional secret-backed signal collectors for BrickellStatus"
 
 [features]
 # Fetching over a real network stack. On by default so nothing existing

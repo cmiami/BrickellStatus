@@ -1,5 +1,5 @@
 ---
-name: Tender's Log
+name: BrickellStatus
 description: A weatherproof dispatch instrument for signals worth acting on.
 colors:
   marine-ink: "#0F2A44"
@@ -133,13 +133,13 @@ components:
     padding: "12px 14px"
 ---
 
-# Design System: Tender's Log
+# Design System: BrickellStatus
 
 ## Overview
 
-**Creative North Star: "The Working Tender's Log"**
+**Creative North Star: "The Working BrickellStatus"**
 
-Tender's Log turns an operator's weatherproof log sheet into a precise personal signal instrument. It feels written for daylight, motion, and consequential glances: cool paper, marine ink, clipped evidence strips, registration marks, and one live time rail. The system is tactile without cosplay and civic without becoming institutional.
+BrickellStatus turns an operator's weatherproof log sheet into a precise personal signal instrument. It feels written for daylight, motion, and consequential glances: cool paper, marine ink, clipped evidence strips, registration marks, and one live time rail. The system is tactile without cosplay and civic without becoming institutional.
 
 The visual hierarchy always answers three questions in order: what is happening, when might it matter, and why does the system believe it. Density belongs in the evidence log and configuration surfaces; the current decision remains large, plain, and calm. The web interface and monochrome e-paper layout share the same typography, line hierarchy, state words, and strip grammar rather than imitating one another pixel for pixel.
 

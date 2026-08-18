@@ -1,4 +1,4 @@
-use bridgestatus_eink::ChannelUrgency;
+use brickellstatus_eink::ChannelUrgency;
 
 use super::*;
 
@@ -296,7 +296,8 @@ fn aisstream_key_shape_is_bounded_and_control_free() {
 
 #[tokio::test]
 async fn local_secret_store_round_trips_without_os_vault_access() {
-    let directory = std::env::temp_dir().join(format!("tenders-secret-test-{}", Uuid::now_v7()));
+    let directory =
+        std::env::temp_dir().join(format!("brickellstatus-secret-test-{}", Uuid::now_v7()));
     let path = directory.join("credentials.json");
     let store = LocalSecretStore::new(path.clone());
 
@@ -325,7 +326,8 @@ async fn local_secret_store_round_trips_without_os_vault_access() {
 #[cfg(windows)]
 #[tokio::test]
 async fn windows_credentials_rest_encrypted_and_migrate_from_plaintext() {
-    let directory = std::env::temp_dir().join(format!("tenders-secret-test-{}", Uuid::now_v7()));
+    let directory =
+        std::env::temp_dir().join(format!("brickellstatus-secret-test-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join("credentials.json");
 
@@ -365,7 +367,8 @@ async fn windows_credentials_rest_encrypted_and_migrate_from_plaintext() {
 #[cfg(windows)]
 #[tokio::test]
 async fn a_sealed_file_this_account_cannot_open_does_not_lock_the_store() {
-    let directory = std::env::temp_dir().join(format!("tenders-secret-test-{}", Uuid::now_v7()));
+    let directory =
+        std::env::temp_dir().join(format!("brickellstatus-secret-test-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join("credentials.json");
     // Shaped like an envelope this machine did not write, as a file restored
@@ -502,7 +505,7 @@ async fn escalating_weather_re_alerts_while_jitter_does_not() {
         .position(|channel| channel.kind == ChannelKindDto::Weather)
         .unwrap();
     snapshot.channels[index].active = true;
-    snapshot.channels[index].signal = Some(bridgestatus_runtime::ChannelSignalDto {
+    snapshot.channels[index].signal = Some(brickellstatus_runtime::ChannelSignalDto {
         headline: "Rain".into(),
         detail: "Rain 62% in 40 min".into(),
         action: "Forecast conditions cross the configured weather thresholds.".into(),
@@ -554,7 +557,7 @@ async fn sourced_signal_copy_reaches_message_native_and_epaper_surfaces() {
     official.coverage_complete = true;
     official.interrupt_preset = InterruptPreset::Recommended;
     official.summary = "Miami · 1 active official alert".into();
-    official.signal = Some(bridgestatus_runtime::ChannelSignalDto {
+    official.signal = Some(brickellstatus_runtime::ChannelSignalDto {
         headline: "Flash Flood Warning".into(),
         detail: "Life-threatening flash flooding is occurring in downtown Miami.".into(),
         action: "Move to higher ground now.".into(),
@@ -631,7 +634,7 @@ async fn critical_quiet_bypass_uses_event_severity_not_interrupt_preset() {
     official.enabled = true;
     official.active = true;
     official.interrupt_preset = InterruptPreset::ConfirmedOnly;
-    official.signal = Some(bridgestatus_runtime::ChannelSignalDto {
+    official.signal = Some(brickellstatus_runtime::ChannelSignalDto {
         headline: "Tornado Warning".into(),
         detail: "A tornado warning is active.".into(),
         action: "Take shelter now.".into(),
@@ -689,7 +692,7 @@ async fn partial_coverage_never_resolves_an_announced_incident() {
     preferences.whatsapp.enabled = true;
     preferences.whatsapp.token_configured = true;
     preferences.whatsapp.recipient = "+13055550123".into();
-    preferences.whatsapp.consent = bridgestatus_runtime::WhatsAppRecipientConsent::OptedIn;
+    preferences.whatsapp.consent = brickellstatus_runtime::WhatsAppRecipientConsent::OptedIn;
     preferences.whatsapp.consent_recipient = Some("+13055550123".into());
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     let mut snapshot = engine.get_snapshot().await.unwrap();
@@ -791,7 +794,7 @@ async fn material_channel_is_persisted_and_leased_from_outbox() {
     preferences.profile.quiet_hours.enabled = false;
     preferences.whatsapp.enabled = true;
     preferences.whatsapp.token_configured = true;
-    preferences.whatsapp.consent = bridgestatus_runtime::WhatsAppRecipientConsent::OptedIn;
+    preferences.whatsapp.consent = brickellstatus_runtime::WhatsAppRecipientConsent::OptedIn;
     preferences.whatsapp.consent_recipient = Some("+13055550123".into());
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     preferences.whatsapp.recipient = "+13055550123".into();
@@ -861,7 +864,7 @@ async fn whatsapp_dispatch_context_reloads_route_after_a_recipient_mutation() {
     let stale = engine.get_preferences().await;
     let mut replacement = stale.clone();
     replacement.whatsapp.recipient = "+13055550222".into();
-    replacement.whatsapp.consent = bridgestatus_runtime::WhatsAppRecipientConsent::NotRecorded;
+    replacement.whatsapp.consent = brickellstatus_runtime::WhatsAppRecipientConsent::NotRecorded;
     replacement.whatsapp.consent_recipient = None;
     replacement.whatsapp.consent_recorded_at_millis = None;
     engine.save_preferences(replacement).await.unwrap();
@@ -883,7 +886,7 @@ async fn stale_or_changed_outbox_notice_fails_closed_before_delivery() {
     preferences.whatsapp.enabled = true;
     preferences.whatsapp.token_configured = true;
     preferences.whatsapp.recipient = "+13055550123".into();
-    preferences.whatsapp.consent = bridgestatus_runtime::WhatsAppRecipientConsent::OptedIn;
+    preferences.whatsapp.consent = brickellstatus_runtime::WhatsAppRecipientConsent::OptedIn;
     preferences.whatsapp.consent_recipient = Some("+13055550123".into());
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     let mut snapshot = engine.get_snapshot().await.unwrap();
@@ -984,7 +987,7 @@ async fn all_clear_requires_a_prior_provider_accepted_active_notice() {
     preferences.whatsapp.enabled = true;
     preferences.whatsapp.token_configured = true;
     preferences.whatsapp.recipient = "+13055550123".into();
-    preferences.whatsapp.consent = bridgestatus_runtime::WhatsAppRecipientConsent::OptedIn;
+    preferences.whatsapp.consent = brickellstatus_runtime::WhatsAppRecipientConsent::OptedIn;
     preferences.whatsapp.consent_recipient = Some("+13055550123".into());
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     let mut snapshot = engine.get_snapshot().await.unwrap();
@@ -1039,7 +1042,7 @@ async fn accepted_outbox_revision_recovers_announced_state_before_all_clear() {
     preferences.whatsapp.enabled = true;
     preferences.whatsapp.token_configured = true;
     preferences.whatsapp.recipient = "+13055550123".into();
-    preferences.whatsapp.consent = bridgestatus_runtime::WhatsAppRecipientConsent::OptedIn;
+    preferences.whatsapp.consent = brickellstatus_runtime::WhatsAppRecipientConsent::OptedIn;
     preferences.whatsapp.consent_recipient = Some("+13055550123".into());
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     let mut snapshot = engine.get_snapshot().await.unwrap();
@@ -1111,7 +1114,7 @@ async fn expired_current_notice_rearms_one_fresh_representation() {
     preferences.whatsapp.enabled = true;
     preferences.whatsapp.token_configured = true;
     preferences.whatsapp.recipient = "+13055550123".into();
-    preferences.whatsapp.consent = bridgestatus_runtime::WhatsAppRecipientConsent::OptedIn;
+    preferences.whatsapp.consent = brickellstatus_runtime::WhatsAppRecipientConsent::OptedIn;
     preferences.whatsapp.consent_recipient = Some("+13055550123".into());
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     let mut snapshot = engine.get_snapshot().await.unwrap();
@@ -1206,7 +1209,7 @@ async fn temporarily_unavailable_active_notice_rearms_after_source_recovers() {
     preferences.whatsapp.enabled = true;
     preferences.whatsapp.token_configured = true;
     preferences.whatsapp.recipient = "+13055550123".into();
-    preferences.whatsapp.consent = bridgestatus_runtime::WhatsAppRecipientConsent::OptedIn;
+    preferences.whatsapp.consent = brickellstatus_runtime::WhatsAppRecipientConsent::OptedIn;
     preferences.whatsapp.consent_recipient = Some("+13055550123".into());
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     let mut snapshot = engine.get_snapshot().await.unwrap();
@@ -1295,7 +1298,7 @@ async fn recipient_route_fingerprint_never_inherits_announced_state() {
     preferences.whatsapp.enabled = true;
     preferences.whatsapp.token_configured = true;
     preferences.whatsapp.recipient = "+13055550123".into();
-    preferences.whatsapp.consent = bridgestatus_runtime::WhatsAppRecipientConsent::OptedIn;
+    preferences.whatsapp.consent = brickellstatus_runtime::WhatsAppRecipientConsent::OptedIn;
     preferences.whatsapp.consent_recipient = Some("+13055550123".into());
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     let mut snapshot = engine.get_snapshot().await.unwrap();
@@ -1389,7 +1392,7 @@ async fn credential_replacement_rearms_an_unchanged_active_alert() {
     preferences.whatsapp.enabled = true;
     preferences.whatsapp.token_configured = true;
     preferences.whatsapp.recipient = "+13055550123".into();
-    preferences.whatsapp.consent = bridgestatus_runtime::WhatsAppRecipientConsent::OptedIn;
+    preferences.whatsapp.consent = brickellstatus_runtime::WhatsAppRecipientConsent::OptedIn;
     preferences.whatsapp.consent_recipient = Some("+13055550123".into());
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     let mut snapshot = engine.get_snapshot().await.unwrap();
@@ -1616,7 +1619,9 @@ async fn off_messages_only_and_inactive_active_only_never_reach_epaper() {
 }
 
 mod river_spans {
-    use bridgestatus_runtime::{BridgeRelationDto, BridgeStateIntervalDto, ObservedBridgeStateDto};
+    use brickellstatus_runtime::{
+        BridgeRelationDto, BridgeStateIntervalDto, ObservedBridgeStateDto,
+    };
     use jiff::tz::TimeZone;
 
     use super::super::{local_clock, span_code, upstream_spans};
@@ -2042,14 +2047,14 @@ mod panel {
 }
 
 mod radar {
-    use bridgestatus_collectors::parse_rainviewer_index;
+    use brickellstatus_collectors::parse_rainviewer_index;
 
     use super::super::{panel_tile_url, radar_enabled, radar_layer_from_items};
     use super::*;
 
     const OBSERVED: i64 = 1_786_844_400;
 
-    fn frame_items() -> Vec<bridgestatus_collectors::CollectorItem> {
+    fn frame_items() -> Vec<brickellstatus_collectors::CollectorItem> {
         let body = serde_json::to_vec(&serde_json::json!({
             "host": "https://tilecache.rainviewer.com",
             "radar": {"past": [{"time": OBSERVED, "path": "/v2/radar/f6ad5f810281"}]},

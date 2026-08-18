@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use bridgestatus_collectors::{CollectorHealth, HealthState, Location, SourceLink};
+use brickellstatus_collectors::{CollectorHealth, HealthState, Location, SourceLink};
 use serde_json::json;
 use tokio::sync::Notify;
 use url::Url;
@@ -1098,7 +1098,7 @@ async fn ais_secret_can_be_set_replaced_and_cleared_without_restart() {
     let store = Store::in_memory().await.unwrap();
     let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
     let factory = Arc::new(
-        CredentialFreeCollectorFactory::new("PuenteGonorrea fixture (+https://example.invalid)")
+        CredentialFreeCollectorFactory::new("BrickellStatus fixture (+https://example.invalid)")
             .unwrap(),
     );
     let engine = RuntimeEngine::initialize(store.clone(), RuntimeConfig::default(), factory, clock)
@@ -1179,7 +1179,7 @@ async fn failed_ais_secret_transaction_restores_factory_and_published_state() {
     let store = Store::in_memory().await.unwrap();
     let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
     let factory = Arc::new(
-        CredentialFreeCollectorFactory::new("PuenteGonorrea fixture (+https://example.invalid)")
+        CredentialFreeCollectorFactory::new("BrickellStatus fixture (+https://example.invalid)")
             .unwrap(),
     );
     let engine = RuntimeEngine::initialize(
@@ -1223,7 +1223,7 @@ async fn ais_enablement_or_radius_change_retires_cached_positions_immediately() 
     let store = Store::in_memory().await.unwrap();
     let clock = Arc::new(FixedClock(AtomicI64::new(now_ms)));
     let factory = Arc::new(
-        CredentialFreeCollectorFactory::new("PuenteGonorrea fixture (+https://example.invalid)")
+        CredentialFreeCollectorFactory::new("BrickellStatus fixture (+https://example.invalid)")
             .unwrap(),
     );
     let engine = RuntimeEngine::initialize(store, RuntimeConfig::default(), factory, clock)
@@ -1480,7 +1480,7 @@ fn backoff_is_bounded() {
     let config = RuntimeConfig::default();
     assert_eq!(
         config.user_agent,
-        "PuenteGonorrea/0.1 (+https://github.com/cmiami/PuenteGonorrea)"
+        "BrickellStatus/0.1 (+https://github.com/cmiami/BrickellStatus)"
     );
     assert_eq!(backoff_for(&config, 1), config.backoff_initial);
     assert_eq!(backoff_for(&config, 100), config.backoff_max);
@@ -2861,7 +2861,7 @@ fn imminent_rain_outranks_a_distant_bridge_prediction_end_to_end() {
 #[tokio::test]
 async fn enabling_a_channel_survives_a_restart() {
     let file = std::env::temp_dir().join(format!(
-        "tenders-persist-{}-{:?}.db",
+        "brickellstatus-persist-{}-{:?}.db",
         std::process::id(),
         std::thread::current().id()
     ));

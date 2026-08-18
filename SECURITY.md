@@ -1,6 +1,6 @@
 # Security policy
 
-PuenteGonorrea ingests public internet data, can hold messaging credentials,
+BrickellStatus ingests public internet data, can hold messaging credentials,
 and can dispatch alerts to physical and personal destinations. Please report
 security defects privately so a fix can land before exploitation details are
 made public.
@@ -9,7 +9,7 @@ made public.
 
 Use GitHub's private vulnerability form:
 
-**[Report a security vulnerability privately](https://github.com/cmiami/PuenteGonorrea/security/advisories/new)**
+**[Report a security vulnerability privately](https://github.com/cmiami/BrickellStatus/security/advisories/new)**
 
 Please include only what the maintainers need to reproduce and assess the
 problem:
@@ -80,7 +80,7 @@ Reports are especially useful when they involve:
 
 ## Safety boundary
 
-Tender's Log is decision-support software. It does not control a bridge,
+BrickellStatus is decision-support software. It does not control a bridge,
 replace official emergency instructions, guarantee an opening prediction, or
 guarantee message delivery. A bad prediction is still a serious correctness
 bug, but it is not automatically a security vulnerability; report it through

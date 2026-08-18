@@ -12,11 +12,11 @@
 //!
 //! Nothing here reaches a network, a disk, or a clock it was not handed.
 
-use bridgestatus_eink::{
+use brickellstatus_eink::{
     ChannelAvailability, ChannelCard, ChannelKind, ChannelSource, ChannelUrgency, EtaRange,
     Evidence, Freshness, LiveSnapshot, MonoFrame, RenderConfig, SnapshotState, render_snapshot,
 };
-use bridgestatus_runtime::{
+use brickellstatus_runtime::{
     AppPreferences, AppSnapshot, AvailabilityDto, BridgeStateDto, ChannelKindDto, ChannelSnapshot,
     InterruptPreset, UrgencyDto,
 };
@@ -116,9 +116,9 @@ pub fn display_snapshot(snapshot: &AppSnapshot) -> LiveSnapshot {
     let source = snapshot
         .evidence
         .iter()
-        .find(|item| item.state == bridgestatus_runtime::EvidenceStateDto::Live)
+        .find(|item| item.state == brickellstatus_runtime::EvidenceStateDto::Live)
         .map(|item| item.source_label.clone())
-        .unwrap_or_else(|| "Tender's Log".into());
+        .unwrap_or_else(|| "BrickellStatus".into());
     let mut output = LiveSnapshot::brickell(
         state,
         Freshness::new(source, snapshot.decision.source_age_seconds, 300),
@@ -135,7 +135,7 @@ pub fn display_snapshot(snapshot: &AppSnapshot) -> LiveSnapshot {
     output.evidence = snapshot
         .evidence
         .iter()
-        .filter(|item| item.state == bridgestatus_runtime::EvidenceStateDto::Live)
+        .filter(|item| item.state == brickellstatus_runtime::EvidenceStateDto::Live)
         .take(3)
         .map(|item| {
             Evidence::new(
@@ -186,12 +186,13 @@ pub fn span_code(bridge_key: &str, bridge_name: &str) -> String {
 /// is history, and reporting it as still up would tell a driver the river is
 /// blocked when it is not.
 pub fn upstream_spans(
-    intervals: &[bridgestatus_runtime::BridgeStateIntervalDto],
+    intervals: &[brickellstatus_runtime::BridgeStateIntervalDto],
     zone: Option<&TimeZone>,
-) -> Vec<bridgestatus_eink::SpanStatus> {
-    let mut latest: BTreeMap<&str, &bridgestatus_runtime::BridgeStateIntervalDto> = BTreeMap::new();
+) -> Vec<brickellstatus_eink::SpanStatus> {
+    let mut latest: BTreeMap<&str, &brickellstatus_runtime::BridgeStateIntervalDto> =
+        BTreeMap::new();
     for interval in intervals {
-        if interval.relation != bridgestatus_runtime::BridgeRelationDto::Upstream {
+        if interval.relation != brickellstatus_runtime::BridgeRelationDto::Upstream {
             continue;
         }
         let winner = match latest.get(interval.bridge_key.as_str()) {
@@ -215,8 +216,8 @@ pub fn upstream_spans(
         .into_iter()
         .map(|interval| {
             let open = interval.ended_at.is_none()
-                && interval.state == bridgestatus_runtime::ObservedBridgeStateDto::Up;
-            let mut span = bridgestatus_eink::SpanStatus::new(
+                && interval.state == brickellstatus_runtime::ObservedBridgeStateDto::Up;
+            let mut span = brickellstatus_eink::SpanStatus::new(
                 span_code(&interval.bridge_key, &interval.bridge_name),
                 open,
             );
@@ -240,7 +241,7 @@ pub fn local_clock(instant: &str, zone: &TimeZone) -> Option<String> {
 /// desktop application.
 pub fn render_live_bridge_frame(
     snapshot: &AppSnapshot,
-) -> Result<MonoFrame, bridgestatus_eink::RenderError> {
+) -> Result<MonoFrame, brickellstatus_eink::RenderError> {
     render_snapshot(&display_snapshot(snapshot), &RenderConfig::default())
 }
 

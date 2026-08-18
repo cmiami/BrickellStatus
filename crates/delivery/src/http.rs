@@ -147,7 +147,7 @@ impl ReqwestExecutor {
             .no_proxy()
             .connect_timeout(self.connect_timeout)
             .timeout(self.request_timeout)
-            .user_agent("PuenteGonorrea/0.1 delivery (+https://github.com/cmiami/PuenteGonorrea)");
+            .user_agent("BrickellStatus/0.1 delivery (+https://github.com/cmiami/BrickellStatus)");
 
         if let Some(Host::Domain(domain)) = url.host() {
             // The TLS SNI and certificate check still use `domain`; only the

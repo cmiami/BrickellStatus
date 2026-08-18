@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Tender's Log",
+  "productName": "BrickellStatus",
   "version": "../../console/package.json",
-  "identifier": "com.cmiami.puentegonorrea",
+  "identifier": "com.cmiami.brickellstatus",
   "build": {
     "beforeDevCommand": {
       "script": "npm run dev",
@@ -19,7 +19,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Tender's Log",
+        "title": "BrickellStatus",
         "width": 1440,
         "height": 920,
         "minWidth": 960,
@@ -52,10 +52,10 @@
       "resources/firmware/": "firmware/"
     },
     "licenseFile": "../../../LICENSE-MIT",
-    "copyright": "Copyright \u00a9 2026 PuenteGonorrea contributors",
+    "copyright": "Copyright \u00a9 2026 BrickellStatus contributors",
     "category": "Utility",
     "shortDescription": "A configurable personal signal console.",
-    "longDescription": "Tender's Log monitors user-selected signals, predicts Brickell Avenue Bridge openings, and routes trusted updates to desktop, WhatsApp, and a Heltec E213 display.",
+    "longDescription": "BrickellStatus monitors user-selected signals, predicts Brickell Avenue Bridge openings, and routes trusted updates to desktop, WhatsApp, and a Heltec E213 display.",
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper",
@@ -68,7 +68,7 @@
         "languages": ["English"],
         "displayLanguageSelector": false,
         "compression": "lzma",
-        "startMenuFolder": "Tender's Log"
+        "startMenuFolder": "BrickellStatus"
       }
     },
     "macOS": {

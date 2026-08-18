@@ -2,13 +2,13 @@
 
 use std::{env, path::PathBuf, sync::Arc};
 
-use bridgestatus_eink::{
+use brickellstatus_desktop_lib::render_live_bridge_frame;
+use brickellstatus_eink::{
     RefreshMode,
     transport::{UsbConfig, UsbTransport, send_frame},
 };
-use bridgestatus_runtime::{CredentialFreeCollectorFactory, RuntimeConfig, RuntimeEngine};
-use puente_gonorrea_desktop_lib::render_live_bridge_frame;
-use tenders_storage::Store;
+use brickellstatus_runtime::{CredentialFreeCollectorFactory, RuntimeConfig, RuntimeEngine};
+use brickellstatus_storage::Store;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         |_| "AISSTREAM_API_KEY must be available so the saved secret flag is not altered",
     )?;
     let factory = CredentialFreeCollectorFactory::new(
-        "Tender's Log E213 live proof (+https://github.com/cmiami/PuenteGonorrea)",
+        "BrickellStatus E213 live proof (+https://github.com/cmiami/BrickellStatus)",
     )?
     .with_aisstream_key(Some(ais_key))?;
     let engine = RuntimeEngine::with_factory(

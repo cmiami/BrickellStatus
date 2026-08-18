@@ -1,6 +1,6 @@
 """Re-measures the bridge predictor against what the app has actually recorded.
 
-    python3 scripts/calibrate_bridge.py [path/to/tenders-log.sqlite3]
+    python3 scripts/calibrate_bridge.py [path/to/brickellstatus.sqlite3]
 
 Reads the running app's history read-only and answers three questions the weight
 table in `crates/policy/src/bridge.rs` currently answers from a single weekend:
@@ -52,7 +52,7 @@ from pathlib import Path
 
 DEFAULT_DB = (
     Path.home()
-    / "Library/Application Support/com.cmiami.puentegonorrea/tenders-log.sqlite3"
+    / "Library/Application Support/com.cmiami.brickellstatus/brickellstatus.sqlite3"
 )
 LOCAL = timezone(timedelta(hours=-4))  # Miami, EDT
 MINUTE = 60_000
