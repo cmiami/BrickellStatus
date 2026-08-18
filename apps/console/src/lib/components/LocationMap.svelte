@@ -75,9 +75,16 @@
     element.setAttribute('aria-label', `${point.label}. Select location.`);
     element.title = point.detail ? `${point.label} · ${point.detail}` : point.label;
     if (point.courseDegrees != null) element.style.setProperty('--course', `${point.courseDegrees}deg`);
+    // MapLibre writes an inline transform on the root every camera frame, so
+    // the pin's own shape and hover motion live one level in; anything
+    // transformed or transitioned on the root fights the map for position.
+    const body = document.createElement('span');
+    body.className = 'location-map-pin__body';
+    body.setAttribute('aria-hidden', 'true');
     const dot = document.createElement('span');
-    dot.setAttribute('aria-hidden', 'true');
-    element.append(dot);
+    dot.className = 'location-map-pin__dot';
+    body.append(dot);
+    element.append(body);
     element.addEventListener('click', (event) => {
       event.stopPropagation();
       onselect(point);
@@ -615,6 +622,9 @@
     font-size: var(--type-caption);
   }
 
+  /* The root carries only its footprint: MapLibre owns its transform and
+     rewrites it on every camera frame, so a transform or a transition here
+     makes the pin chase the map instead of holding its coordinate. */
   :global(.location-map-pin) {
     position: relative;
     display: grid;
@@ -622,34 +632,43 @@
     height: 38px;
     place-items: center;
     padding: 0;
+    background: none;
+    border: 0;
+    cursor: pointer;
+  }
+
+  :global(.location-map-pin__body) {
+    display: grid;
+    width: 100%;
+    height: 100%;
+    place-items: center;
     color: var(--white);
     background: var(--marine);
     border: 2px solid var(--white);
     border-radius: 50% 50% 50% 4px;
     box-shadow: 0 3px 0 rgba(17, 20, 24, 0.28), 0 8px 20px rgba(17, 20, 24, 0.24);
-    cursor: pointer;
-    transform: rotate(-45deg);
-    transition: transform 140ms ease-out, background-color 140ms ease-out;
+    transition: transform 140ms ease-out, background-color 140ms ease-out,
+      border-color 140ms ease-out, color 140ms ease-out;
   }
 
-  :global(.location-map-pin > span) {
+  :global(.location-map-pin__dot) {
     width: 8px;
     height: 8px;
     background: currentColor;
     border-radius: 50%;
   }
 
-  :global(.location-map-pin:hover),
-  :global(.location-map-pin:focus-visible),
-  :global(.location-map-pin.is-selected) {
+  :global(.location-map-pin:hover) :global(.location-map-pin__body),
+  :global(.location-map-pin:focus-visible) :global(.location-map-pin__body),
+  :global(.location-map-pin.is-selected) :global(.location-map-pin__body) {
     color: var(--graphite);
     background: var(--amber);
     border-color: var(--graphite);
-    transform: rotate(-45deg) scale(1.14);
+    transform: scale(1.14);
   }
 
-  :global(.location-map-pin--candidate),
-  :global(.location-map-pin--bridge) {
+  :global(.location-map-pin--candidate) :global(.location-map-pin__body),
+  :global(.location-map-pin--bridge) :global(.location-map-pin__body) {
     color: var(--graphite);
     background: var(--amber);
     border-color: var(--graphite);
@@ -658,14 +677,16 @@
   :global(.location-map-pin--vessel) {
     width: 28px;
     height: 28px;
+  }
+
+  :global(.location-map-pin--vessel) :global(.location-map-pin__body) {
     color: var(--white);
     background: var(--channel);
     border-color: var(--white);
     border-radius: 50%;
-    transform: none;
   }
 
-  :global(.location-map-pin--vessel > span) {
+  :global(.location-map-pin--vessel) :global(.location-map-pin__dot) {
     width: 10px;
     height: 12px;
     background: currentColor;
@@ -675,13 +696,7 @@
     transform: rotate(var(--course, 0deg));
   }
 
-  :global(.location-map-pin--vessel:hover),
-  :global(.location-map-pin--vessel:focus-visible),
-  :global(.location-map-pin--vessel.is-selected) {
-    transform: scale(1.14);
-  }
-
-  :global(.location-map-pin.is-disabled) {
+  :global(.location-map-pin.is-disabled) :global(.location-map-pin__body) {
     color: var(--marine);
     background: var(--paper);
     border-color: var(--marine);
@@ -741,7 +756,7 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    :global(.location-map-pin) {
+    :global(.location-map-pin__body) {
       transition: none;
     }
   }

@@ -333,12 +333,8 @@
   <header class="page-heading-row">
     <div>
       <a class="back-link" href="/channels"><ArrowLeft size={16} aria-hidden="true" /> Back to channels</a>
-      <p class="registration-label">Coverage and vessel desk</p>
-      <h1 class="sheet-heading">Map</h1>
-      <p class="sheet-intro">
-        Saved coverage, the Brickell prediction target, and the last hour of received AISStream vessel courses share
-        one live map. Search or place a pin to add forecast and alert coverage.
-      </p>
+      <h1 class="sheet-heading">Place what you watch</h1>
+      <p class="sheet-intro">Saved coverage, the Brickell target, and the last hour of vessel courses.</p>
     </div>
     <button class="primary-action save-action" onclick={save} disabled={!draft || $saving}>
       <Save size={17} aria-hidden="true" /> {$saving ? 'Saving map' : 'Save map settings'}
@@ -573,6 +569,26 @@
 <style>
   .map-page {
     padding-inline: clamp(18px, 2.5vw, 36px);
+  }
+
+  /* The map is the instrument on this page, so the header yields to it: a
+     section-scale title rather than the headline other sheets open with. */
+  .map-page .sheet-heading {
+    font-size: var(--type-section);
+    letter-spacing: -0.01em;
+  }
+
+  .map-page .sheet-intro {
+    max-width: 62ch;
+    margin-top: 6px;
+  }
+
+  .map-page .back-link {
+    margin-bottom: 10px;
+  }
+
+  .map-page .page-heading-row {
+    margin-bottom: 18px;
   }
 
   .back-link,
