@@ -2,6 +2,37 @@ use brickellstatus_eink::ChannelUrgency;
 
 use super::*;
 
+/// A board that has never run our firmware speaks no banner, so the variant
+/// written to it is a guess — the first in the bundle, which is an E213 build.
+/// Guess wrong and the firmware refuses to drive the panel, e-paper keeps the
+/// factory image, and a flash that genuinely succeeded looks like it did
+/// nothing. The board settles it at boot, and the app has to act on that.
+#[test]
+fn a_board_that_is_not_the_panel_we_wrote_asks_for_the_right_build() {
+    let mismatched = DeviceBanner::parse("READY INK1 250x122 3904 abc1234 E290 MISMATCH");
+    assert_eq!(
+        correction_for(&mismatched, "vision-master-e213-v11"),
+        Some(PanelModel::E290),
+        "an E290 told to run an E213 build must ask for the E290 one"
+    );
+}
+
+#[test]
+fn a_board_running_the_build_it_should_is_left_alone() {
+    // No mismatch: nothing to correct, whatever the banner names.
+    let happy = DeviceBanner::parse("READY INK1 296x128 4736 abc1234 E290");
+    assert_eq!(correction_for(&happy, "vision-master-e290"), None);
+
+    // Mismatch naming the board we already wrote for would mean rewriting the
+    // same image forever, so it is not a correction.
+    let same = DeviceBanner::parse("READY INK1 296x128 4736 abc1234 E290 MISMATCH");
+    assert_eq!(correction_for(&same, "vision-master-e290"), None);
+
+    // A banner with no board named settles nothing.
+    let nameless = DeviceBanner::parse("READY INK1 250x122 3904 abc1234 NONE MISMATCH");
+    assert_eq!(correction_for(&nameless, "vision-master-e213"), None);
+}
+
 #[test]
 fn display_status_contract_matches_frontend() {
     let status = DisplayConnectionStatus {

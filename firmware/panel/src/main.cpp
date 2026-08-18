@@ -91,7 +91,7 @@ char bannerLine[96] = "READY";
 BaseDisplay *makeDisplay() {
 #if defined(Vision_Master_E290)
   return new DEPG0290BNS800();
-#elif TENDERS_LOG_PANEL_V11
+#elif BRICKELLSTATUS_PANEL_V11
   return new EInkDisplay_VisionMasterE213V1_1();
 #else
   return new EInkDisplay_VisionMasterE213();
@@ -277,7 +277,7 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
 };
 
 void setupBle() {
-#if TENDERS_LOG_ENABLE_BLE
+#if BRICKELLSTATUS_ENABLE_BLE
   char name[32];
   snprintf(name, sizeof(name), "InkDock %s",
            attached != nullptr ? attached->name : kBuiltFor.name);
@@ -339,10 +339,10 @@ void composeBanner() {
   if (driving) {
     snprintf(bannerLine, sizeof(bannerLine), "READY INK1 %ux%u %u %s %s",
              kWidth, kHeight, static_cast<unsigned>(kPayloadSize),
-             TENDERS_LOG_BUILD_ID, board);
+             BRICKELLSTATUS_BUILD_ID, board);
   } else {
     snprintf(bannerLine, sizeof(bannerLine), "READY INK1 0x0 0 %s %s MISMATCH",
-             TENDERS_LOG_BUILD_ID, board);
+             BRICKELLSTATUS_BUILD_ID, board);
   }
 }
 
