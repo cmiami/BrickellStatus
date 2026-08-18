@@ -5,13 +5,20 @@ import type { BridgeStateInterval, RiverCorridor, VesselTrack } from '$lib/types
 
 import RiverLine from './RiverLine.svelte';
 
+/**
+ * A trimmed cut of the engine's real geometry. The chart places stations at
+ * their actual coordinates, so the fixture must put them on the water rather
+ * than at one invented point.
+ */
 function station(
   label: string,
   kind: 'target' | 'bridge' | 'mouth' | 'waypoint',
+  latitude: number,
+  longitude: number,
   sMeters: number,
   bridgeKey?: string
 ) {
-  return { label, kind, bridgeKey, latitude: 25.77, longitude: -80.19, sMeters };
+  return { label, kind, bridgeKey, latitude, longitude, sMeters };
 }
 
 const CORRIDOR: RiverCorridor = {
@@ -26,16 +33,17 @@ const CORRIDOR: RiverCorridor = {
       centerline: [
         [25.771, -80.1849],
         [25.7699, -80.19005],
+        [25.7692, -80.1938],
+        [25.768907, -80.197552],
+        [25.773038, -80.200591],
         [25.778307, -80.206931]
       ],
       stations: [
-        station('River mouth', 'mouth', -520),
-        station('Brickell Ave', 'target', 0, 'brickell'),
-        station('S Miami Ave', 'bridge', 380),
-        station('SW 2 Ave', 'bridge', 780, 'sw_2_ave'),
-        station('NW 5 St', 'bridge', 2180, 'nw_5_st'),
-        // Beyond the drawn reach: must be dropped, not squeezed in.
-        station('Palmer Lake', 'waypoint', 8200)
+        station('River mouth', 'mouth', 25.771, -80.1849, -530),
+        station('Brickell Ave', 'target', 25.7699, -80.19005, 0, 'brickell'),
+        station('S Miami Ave', 'bridge', 25.7692, -80.1938, 380),
+        station('SW 2 Ave', 'bridge', 25.768907, -80.197552, 780, 'sw_2_ave'),
+        station('NW 5 St', 'bridge', 25.778307, -80.206931, 2180, 'nw_5_st')
       ]
     },
     {
@@ -44,12 +52,13 @@ const CORRIDOR: RiverCorridor = {
       corridorOffsetMeters: 150,
       centerline: [
         [25.771, -80.1849],
+        [25.7779, -80.1799],
         [25.7635, -80.133]
       ],
       stations: [
-        station('River mouth', 'mouth', -520),
-        station('Bayfront ICW', 'waypoint', -900),
-        station('Government Cut', 'waypoint', -5200)
+        station('River mouth', 'mouth', 25.771, -80.1849, -530),
+        station('Port entrance', 'waypoint', 25.7779, -80.1799, -1470),
+        station('Government Cut', 'waypoint', 25.7635, -80.133, -6600)
       ]
     }
   ]
@@ -67,6 +76,7 @@ function vessel(overrides: Partial<VesselTrack> = {}): VesselTrack {
     observedAt: '2026-08-17T17:50:00Z',
     posture: 'underway',
     sMeters: 1200,
+    branch: 'river',
     openingPropensity: 6700,
     etaMinMinutes: 6,
     etaMaxMinutes: 9,
@@ -105,7 +115,7 @@ const INTERVALS: BridgeStateInterval[] = [
 afterEach(cleanup);
 
 describe('RiverLine', () => {
-  it('draws the channel with its bridges and seaward marks named', () => {
+  it('draws the water with its bridges and seaward marks named', () => {
     render(RiverLine, { corridor: CORRIDOR, vesselTracks: [], intervals: INTERVALS });
 
     // Read the drawn labels, not the accessible <title> that repeats them.
@@ -118,24 +128,29 @@ describe('RiverLine', () => {
     expect(drawn).toContain('S Miami Ave');
     // Seaward marks come from the approach channels.
     expect(drawn).toContain('Government Cut');
-    // The main channel and the river are one continuous spine, drawn as one
-    // line per row; the south approach forks off it as its own dashed leg.
-    expect(document.querySelectorAll('.line').length).toBeGreaterThanOrEqual(1);
-    expect(document.querySelectorAll('.line.approach').length).toBe(0);
+    // Every branch draws as a water ribbon; the approaches read lighter.
+    expect(document.querySelectorAll('.water .ribbon').length).toBe(2);
+    expect(document.querySelectorAll('.water.approach .ribbon').length).toBe(1);
+    // The mouth is one junction shared by every branch, drawn once.
+    expect(drawn.filter((label) => label === 'River mouth').length).toBe(1);
   });
 
-  it('wraps the channel into rows instead of one unreadable line', () => {
+  it('centres the range rings on the Brickell span', () => {
     render(RiverLine, { corridor: CORRIDOR, vesselTracks: [], intervals: [] });
-    const stations = Array.from(document.querySelectorAll('.station rect, .station circle'));
-    // Laid out straight these labels collide; the serpentine is what buys the
-    // room, so more than one row must actually exist.
-    const rows = new Set(
-      Array.from(document.querySelectorAll('.station text')).map((node) =>
-        Math.round(Number(node.getAttribute('y')) / 40)
-      )
+    const rings = Array.from(document.querySelectorAll('.rings circle'));
+    expect(rings.length).toBeGreaterThanOrEqual(2);
+    const target = document.querySelector('.station.is-target');
+    expect(target).toBeTruthy();
+    // Every ring shares one centre, and the target span sits on it.
+    const centres = new Set(
+      rings.map((ring) => `${ring.getAttribute('cx')},${ring.getAttribute('cy')}`)
     );
-    expect(stations.length).toBeGreaterThan(6);
-    expect(rows.size).toBeGreaterThan(1);
+    expect(centres.size).toBe(1);
+    const [cx, cy] = [...centres][0].split(',').map(Number);
+    const mark = target?.querySelector('g')?.getAttribute('transform') ?? '';
+    const [, x, y] = /translate\((-?[\d.]+) (-?[\d.]+)\)/.exec(mark) ?? ['', '0', '0'];
+    expect(Math.abs(Number(x) - cx)).toBeLessThan(2);
+    expect(Math.abs(Number(y) - cy)).toBeLessThan(2);
   });
 
   it('carries live bascule state onto the station it belongs to', () => {
@@ -154,12 +169,16 @@ describe('RiverLine', () => {
     expect(span('Brickell Ave')?.title).toContain('closed');
   });
 
-  it('places a vessel on the line and reports distance, heading and arrival', () => {
+  it('places a vessel on the water and reports distance, heading and arrival', () => {
     render(RiverLine, { corridor: CORRIDOR, vesselTracks: [vessel()], intervals: INTERVALS });
 
     expect(document.querySelectorAll('.vessel').length).toBe(1);
     const transform = document.querySelector('.vessel')?.getAttribute('transform') ?? '';
     expect(transform).not.toContain('NaN');
+    // The hull is rotated to its course along the drawn channel.
+    const hull = document.querySelector('.vessel .hull-group')?.getAttribute('transform') ?? '';
+    expect(hull).toContain('rotate(');
+    expect(hull).not.toContain('NaN');
     expect(screen.getByText('Downriver')).toBeTruthy();
     expect(screen.getByText('1.2 km')).toBeTruthy();
     expect(screen.getByText('6–9 min')).toBeTruthy();
@@ -174,6 +193,8 @@ describe('RiverLine', () => {
           mmsi: '338215012',
           vesselName: 'BRIGHT SIDE',
           vesselClass: 'pleasure craft',
+          sMeters: -900,
+          branch: 'north_approach',
           openingPropensity: 3300,
           scheduleExempt: false,
           waitsForSlot: true,
@@ -188,7 +209,7 @@ describe('RiverLine', () => {
     // The commercial exemption and the learned opener are separate claims.
     expect(screen.getAllByText('Commercial').length).toBe(1);
     // The opener is tagged twice on purpose: once on the water, once in the
-    // list, so it is unmissable whichever the reader is looking at.
+    // ledger, so it is unmissable whichever the reader is looking at.
     expect(document.querySelectorAll('.opener-tag').length).toBe(1);
     expect(document.querySelectorAll('.manifest .tag.opens').length).toBe(1);
   });
@@ -200,7 +221,7 @@ describe('RiverLine', () => {
       intervals: INTERVALS
     });
     expect(screen.getByText(/AIS source is off/)).toBeTruthy();
-    // The channel itself is still drawn: the geometry is true regardless.
+    // The water itself is still drawn: the geometry is true regardless.
     const drawn = Array.from(document.querySelectorAll('.station-label')).map(
       (node) => node.textContent
     );
@@ -241,6 +262,8 @@ describe('RiverLine', () => {
         // Broadcast nothing but a position: no name, no size, no destination.
         vessel({
           mmsi: '367354090',
+          sMeters: -1600,
+          branch: 'north_approach',
           vesselName: undefined,
           vesselClass: undefined,
           lengthMeters: undefined,
@@ -273,7 +296,7 @@ describe('RiverLine', () => {
       intervals: INTERVALS
     });
     expect(document.querySelector('.manifest')?.textContent).toContain('WDF7318');
-    // And the drawing labels it the same way, never as a bare MMSI.
+    // And the chart labels it the same way, never as a bare MMSI.
     expect(document.querySelector('.vessel-tag')?.textContent).toBe('WDF7318');
   });
 

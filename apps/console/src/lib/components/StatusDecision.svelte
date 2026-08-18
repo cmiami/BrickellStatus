@@ -108,6 +108,12 @@
     border-bottom-color: rgba(255, 255, 255, 0.5);
   }
 
+  /* The subject line must survive the inverse field; muted graphite vanishes
+     into the danger red. */
+  .decision[data-state='open'] :global(.registration-label) {
+    color: rgba(255, 255, 255, 0.85);
+  }
+
   h1 {
     margin: clamp(24px, 4vh, 46px) 0 0;
     font-family: var(--font-instrument);

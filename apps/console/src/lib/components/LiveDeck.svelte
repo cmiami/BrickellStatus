@@ -58,49 +58,13 @@ river at full width, which is the element the page exists to show.
     border-bottom: 1px solid var(--rule-strong);
   }
 
-  /* A flex column, not grid rows: the attribution strip only exists while the
-     span is up, and positional rows silently reassigned themselves the moment
-     it appeared, which is what pushed the drawing off the bottom of the tile. */
+  /* The chart component manages its own chart-and-ledger split; the tile only
+     hands it the full remaining height and forbids it from growing the page. */
   .live-deck > :global(.river) {
-    display: flex;
-    flex-direction: column;
     height: 100%;
     min-height: 0;
     overflow: hidden;
-    background: var(--white);
     border-top: 0;
-  }
-
-  /* The drawing takes every pixel left over and scales into it. Its viewBox
-     letterboxes rather than overflowing, so the whole river is always on
-     screen however short the window is. */
-  .live-deck :global(.river-scroll) {
-    position: relative;
-    flex: 1 1 auto;
-    min-height: 0;
-    margin-top: 8px;
-    overflow: hidden;
-  }
-
-  /* Pinned to its box rather than sized by its own aspect ratio. A percentage
-     height against a flex parent does not resolve reliably, and the drawing
-     then set the tile's height instead of obeying it. */
-  .live-deck :global(.river-plot) {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    min-width: 0;
-  }
-
-  /* The list is what gives way when there is more traffic than room, so the
-     drawing above it never moves under the reader. */
-  .live-deck :global(.manifest) {
-    flex: 0 1 auto;
-    min-height: 0;
-    max-height: 24%;
-    overflow-y: auto;
-    overscroll-behavior: contain;
   }
 
   /* On a phone the tile stops being a viewport and becomes a page again. */

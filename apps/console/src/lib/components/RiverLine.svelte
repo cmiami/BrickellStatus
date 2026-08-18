@@ -1,14 +1,16 @@
 <!--
-THESIS: The river as a transit line — how many vessels, which way, how soon,
-and whether the span will actually let them through.
-FORM: Corridor violet is the line and its traffic; the target keeps marine ink;
-amber marks only a hull that will lift the span.
+THESIS: The river as a chart — where every hull actually is on the water that
+leads to Brickell, and whether the span will let it through.
+FORM: A plan chart drawn from the engine's own geometry, Brickell Avenue
+Bridge at its centre with range rings around it. Corridor violet is the
+tracked water and its traffic; amber marks only a hull that will lift the
+span. The manifest docks beside the chart as a ledger column.
 -->
 <script lang="ts">
   import BasculeMark from './BasculeMark.svelte';
-  import ChannelMark from './ChannelMark.svelte';
+  import SpanPlanMark from './SpanPlanMark.svelte';
   import VesselGlyph from './VesselGlyph.svelte';
-  import { riverDiagram, type DiagramVessel } from '$lib/riverline';
+  import { riverChart, type ChartVessel } from '$lib/riverchart';
   import type {
     BridgeCrossing,
     BridgeStateInterval,
@@ -54,7 +56,7 @@ amber marks only a hull that will lift the span.
     return states;
   });
 
-  const diagram = $derived(riverDiagram(corridor, vesselTracks, bridgeStates));
+  const chart = $derived(riverChart(corridor, vesselTracks, bridgeStates));
 
   /// The span's own live interval: what is happening at Brickell right now.
   const targetInterval = $derived.by(() => {
@@ -95,7 +97,7 @@ amber marks only a hull that will lift the span.
 
   /// Vessels nearest the span first: that is the order they matter in.
   const manifest = $derived(
-    diagram.vessels.slice().sort((left, right) => left.distanceMeters - right.distanceMeters)
+    chart.vessels.slice().sort((left, right) => left.distanceMeters - right.distanceMeters)
   );
 
   const openerCount = $derived(manifest.filter((vessel) => vessel.opener).length);
@@ -113,21 +115,19 @@ amber marks only a hull that will lift the span.
     }
   });
 
-  /// Speed and time to the span, which is what the mark is for. Size joins it
-  /// once a static report has actually reported one.
-  function diagramReading(vessel: DiagramVessel): string {
+  /// Speed and time to the span, which is what the mark is for.
+  function chartReading(vessel: ChartVessel): string {
     const parts = [`${vessel.speedKnots.toFixed(1)} kn`];
     const eta = etaReading(vessel);
-    // Not "to Brickell": every reading on this drawing is to Brickell, and
+    // Not "to Brickell": every reading on this chart is to Brickell, and
     // repeating it on each hull is what pushed the labels into each other.
     if (eta) parts.push(eta);
-    if (vessel.lengthMeters) parts.push(`${Math.round(vessel.lengthMeters)} m`);
     return parts.join(' · ');
   }
 
   /// Everything known about this hull's identity beyond its label, in the
   /// order a reader cares about. Absent fields are absent, not blank slots.
-  function identity(vessel: DiagramVessel): string[] {
+  function identity(vessel: ChartVessel): string[] {
     const parts: string[] = [];
     if (vessel.vesselClass) parts.push(vessel.vesselClass);
     // The call sign only earns space when it is not already the label.
@@ -143,7 +143,11 @@ amber marks only a hull that will lift the span.
 
   /// A span reads as its name and what it is doing; a channel mark has no
   /// state to report and says only what it is.
-  function stationLabel(station: { label: string; kind: string; state?: 'up' | 'down' | 'unknown' }): string {
+  function stationLabel(station: {
+    label: string;
+    kind: string;
+    state?: 'up' | 'down' | 'unknown';
+  }): string {
     if (station.kind !== 'bridge' && station.kind !== 'target') return station.label;
     return `${station.label} — ${STATE_WORD[station.state ?? 'unknown']}`;
   }
@@ -152,7 +156,7 @@ amber marks only a hull that will lift the span.
     return meters >= 1_000 ? `${(meters / 1_000).toFixed(1)} km` : `${Math.round(meters / 10) * 10} m`;
   }
 
-  function etaReading(vessel: DiagramVessel): string | null {
+  function etaReading(vessel: ChartVessel): string | null {
     if (vessel.etaMinMinutes == null) return null;
     const max = vessel.etaMaxMinutes ?? vessel.etaMinMinutes;
     return max > vessel.etaMinMinutes
@@ -160,7 +164,7 @@ amber marks only a hull that will lift the span.
       : `${vessel.etaMinMinutes} min`;
   }
 
-  function openingReading(vessel: DiagramVessel): string | null {
+  function openingReading(vessel: ChartVessel): string | null {
     if (!vessel.predictedOpeningAt) return null;
     const parsed = new Date(vessel.predictedOpeningAt);
     return Number.isNaN(parsed.getTime()) ? null : clock.format(parsed);
@@ -172,7 +176,7 @@ amber marks only a hull that will lift the span.
     holding: 'Holding'
   } as const;
 
-  function vesselLabel(vessel: DiagramVessel): string {
+  function vesselLabel(vessel: ChartVessel): string {
     const side = vessel.sMeters >= 0 ? 'upriver of' : 'seaward of';
     const kind = vessel.vesselClass ? `${vessel.vesselClass}, ` : '';
     const eta = etaReading(vessel);
@@ -199,12 +203,34 @@ amber marks only a hull that will lift the span.
     return parts.join(' ');
   }
 
+  /// On a phone the sheet pans instead of shrinking, and it wakes centred on
+  /// the span — the chart's whole subject — rather than on its west edge.
+  function centerOnSpan(node: HTMLElement) {
+    if (node.scrollWidth > node.clientWidth) {
+      node.scrollLeft =
+        (chart.bridgeX / chart.width) * node.scrollWidth - node.clientWidth / 2;
+    }
+  }
+
+  /// A hull seen from above: pointed bow, parallel body, rounded stern.
+  function hullPath(length: number, beam: number): string {
+    const l = length / 2;
+    const b = beam / 2;
+    const s = Math.min(2.4, b * 0.6);
+    return (
+      `M${l.toFixed(1)} 0 ` +
+      `Q${(l * 0.42).toFixed(1)} ${(-b).toFixed(1)} ${(-l * 0.28).toFixed(1)} ${(-b).toFixed(1)} ` +
+      `L${(-l + s).toFixed(1)} ${(-b).toFixed(1)} Q${(-l).toFixed(1)} ${(-b).toFixed(1)} ${(-l).toFixed(1)} ${(-b + s).toFixed(1)} ` +
+      `L${(-l).toFixed(1)} ${(b - s).toFixed(1)} Q${(-l).toFixed(1)} ${b.toFixed(1)} ${(-l + s).toFixed(1)} ${b.toFixed(1)} ` +
+      `L${(-l * 0.28).toFixed(1)} ${b.toFixed(1)} Q${(l * 0.42).toFixed(1)} ${b.toFixed(1)} ${l.toFixed(1)} 0 Z`
+    );
+  }
 </script>
 
 <section class="river" aria-labelledby="river-heading">
   <header class="river-head">
     <div>
-      <p class="registration-label" id="river-heading">Miami River · tracked channel</p>
+      <p class="registration-label" id="river-heading">Miami River · plan of the tracked water</p>
       <p class="river-count" aria-live="polite">
         {#if !corridor.aisLive}
           <span class="ais-off">AIS source is off — no vessels are being received</span>
@@ -212,8 +238,7 @@ amber marks only a hull that will lift the span.
           <strong>{manifest.length}</strong> under way{#if closingCount},
             <strong>{closingCount}</strong> closing on Brickell{/if}{#if openerCount}<span
               class="opener-count"
-            >
-              · {openerCount} known opener{openerCount === 1 ? '' : 's'}</span
+            >&nbsp;· {openerCount} known opener{openerCount === 1 ? '' : 's'}</span
             >{/if}
         {:else}
           Nothing under way
@@ -245,152 +270,250 @@ amber marks only a hull that will lift the span.
     </p>
   {/if}
 
-  <div class="river-scroll">
-    <svg
-      class="river-plot"
-      viewBox="0 0 {diagram.width} {diagram.height}"
-      role="img"
-      aria-label="Transit diagram of the Miami River channel: bascule bridges upriver of Brickell, marked entrance channels seaward, and {manifest.length} vessels under way."
-    >
-      {#each diagram.lines as line (line.id)}
-        <path class="line" class:approach={line.approach} fill="none" d={line.d} />
-      {/each}
-
-      {#each diagram.stations as station (station.branchId + station.label)}
-        <g
-          class="station"
-          class:is-target={station.isTarget}
-          data-kind={station.kind}
-          data-state={station.state ?? 'none'}
-        >
-          <title>{stationLabel(station)}</title>
-          {#if station.kind === 'bridge' || station.isTarget}
-            <!-- A bascule drawn as a bascule: leaves down when the road is
-                 open, lifted when the span is. -->
-            <g
-              transform="translate({station.x} {station.y}) scale({station.isTarget ? 1.9 : 1.2})"
-            >
-              <BasculeMark state={station.state ?? 'unknown'} inline />
-            </g>
-          {:else}
-            <g transform="translate({station.x} {station.y})">
-              <ChannelMark junction={station.kind === 'mouth'} />
-            </g>
-          {/if}
-          <text
-            x={station.x}
-            y={station.y - (station.isTarget ? 34 : 24)}
-            class="station-label"
-          >{station.label}</text>
+  <div class="river-body">
+    <div class="river-scroll" use:centerOnSpan>
+      <svg
+        class="river-plot"
+        viewBox="0 0 {chart.width} {chart.height}"
+        role="img"
+        aria-label="Plan chart of the Miami River and its bay approaches, Brickell Avenue Bridge at the centre with range rings at {chart.rings
+          .map((ring) => ring.kilometers)
+          .join(', ')} kilometres, and {manifest.length} vessels under way."
+      >
+        <!-- Range rings first: they sit beneath the water they measure. -->
+        <g class="rings">
+          {#each chart.rings as ring (ring.kilometers)}
+            <circle cx={chart.bridgeX} cy={chart.bridgeY} r={ring.radius} />
+            <text x={ring.labelX} y={ring.labelY}>{ring.kilometers} km</text>
+          {/each}
         </g>
-      {/each}
 
-      {#each diagram.vessels as vessel (vessel.mmsi)}
-        <g
-          class="vessel"
-          class:is-opener={vessel.opener}
-          transform="translate({vessel.x.toFixed(1)} {vessel.y.toFixed(1)})"
-        >
-          <title>{vesselLabel(vessel)}</title>
-          <VesselGlyph
-            kind={vessel.vesselClass}
-            length={vessel.hullLength * 2.1}
-            flip={Math.abs(vessel.headingDegrees) > 90}
-            opener={vessel.opener}
+        <!-- The tracked water. Bank rules first, then every fill on top, so
+             the three channels merge seamlessly where they meet at the mouth
+             instead of drawing their edges across one another. -->
+        {#each chart.branches as branch (branch.id)}
+          <path
+            class="bank"
+            class:approach={branch.approach}
+            d={branch.ribbon}
           />
+        {/each}
+        {#each chart.branches as branch (branch.id)}
+          <g class="water" class:approach={branch.approach}>
+            <path class="ribbon" d={branch.ribbon} />
+            <path class="channel-rule" fill="none" d={branch.centerline} />
+          </g>
+        {/each}
 
-          <!-- A presentation attribute loses to the stylesheet, so the stacked
-               anchor is a class rather than text-anchor="start". -->
-          <text
-            class="vessel-tag"
-            class:stacked={vessel.stackedColumn}
-            x={vessel.stackedColumn ? 20 : 0}
-            y={vessel.labelY}>{vessel.label}</text>
-          <text
-            class="vessel-read"
-            class:stacked={vessel.stackedColumn}
-            x={vessel.stackedColumn ? 20 : 0}
-            y={vessel.labelY + 12}>{diagramReading(vessel)}</text>
-          {#if vessel.opener}
-            <!-- The tag rides with the hull, not only in the table: this is the
-                 one mark on the drawing that changes a driver's plan. -->
-            <g
-              class="opener-tag"
-              transform="translate({vessel.stackedColumn ? 50 : 0} {vessel.labelY + 24})"
-            >
-              <rect x="-30" y="-9" width="60" height="13" rx="1" />
-              <text y="0.5">Opens span</text>
-            </g>
-          {/if}
+        {#if chart.bayLabel}
+          <text class="bay-label" x={chart.bayLabel.x} y={chart.bayLabel.y}
+            >Biscayne Bay</text
+          >
+        {/if}
+
+        <!-- Wakes ride the water beneath every mark. -->
+        <g class="wakes">
+          {#each chart.vessels as vessel (vessel.mmsi)}
+            {#each vessel.wake.slice(0, -1) as point, index (index)}
+              {@const next = vessel.wake[index + 1]}
+              <line
+                x1={point.x.toFixed(1)}
+                y1={point.y.toFixed(1)}
+                x2={next.x.toFixed(1)}
+                y2={next.y.toFixed(1)}
+                style="opacity: {(0.08 + 0.3 * next.freshness).toFixed(2)}; stroke-width: {(
+                  1 +
+                  1.8 * next.freshness
+                ).toFixed(1)}"
+              />
+            {/each}
+          {/each}
         </g>
-      {/each}
-    </svg>
-  </div>
 
-  {#if manifest.length}
-    <ul class="manifest">
-      {#each manifest as vessel (vessel.mmsi)}
-        <li class:is-opener={vessel.opener} title={vesselLabel(vessel)}>
-          <span class="cell id">
-            <strong>{vessel.label}</strong>
-            <small>
-              {#if vessel.opener}<em class="tag opens">Opens span</em>{/if}
-              {#if vessel.scheduleExempt}<em class="tag exempt">Commercial</em>{/if}
-              {identity(vessel).join(' · ')}
-            </small>
-            {#if vessel.destination}
-              <!-- The skipper said where they are going. Nothing inferred from
-                   course competes with that. -->
-              <small class="destination">for {vessel.destination}</small>
+        {#each chart.stations as station (station.branchId + station.label)}
+          <g
+            class="station"
+            class:is-target={station.isTarget}
+            data-kind={station.kind}
+            data-state={station.state ?? 'none'}
+          >
+            <title>{stationLabel(station)}</title>
+            {#if station.kind === 'bridge' || station.isTarget}
+              <g transform="translate({station.x} {station.y}) rotate({station.angleDegrees})">
+                <SpanPlanMark
+                  state={station.state ?? 'unknown'}
+                  halfWidth={station.halfWidth}
+                  target={station.isTarget}
+                />
+              </g>
+            {:else}
+              <circle
+                class="channel-mark"
+                class:is-mouth={station.kind === 'mouth'}
+                cx={station.x}
+                cy={station.y}
+                r={station.kind === 'mouth' ? 4.4 : 3}
+              />
             {/if}
-          </span>
-          <span class="cell">
-            <strong>{DIRECTION_WORD[vessel.direction]}</strong>
-            <small>{vessel.speedKnots.toFixed(1)} kn</small>
-          </span>
-          <span class="cell">
-            <strong>{distanceReading(vessel.distanceMeters)}</strong>
-            <small>{vessel.sMeters >= 0 ? 'upriver' : 'seaward'}</small>
-          </span>
-          <span class="cell">
-            {#if etaReading(vessel)}
-              <strong>{etaReading(vessel)}</strong>
-              <small>to Brickell</small>
+            <text
+              class="station-label"
+              class:anchor-start={station.labelAnchor === 'start'}
+              class:anchor-end={station.labelAnchor === 'end'}
+              x={station.labelX}
+              y={station.labelY}
+            >{station.label}</text>
+            {#if station.isTarget}
+              <text
+                class="target-state"
+                x={station.x}
+                y={station.y - station.halfWidth - 13}
+              >{STATE_WORD[station.state ?? 'unknown']}</text>
             {/if}
-          </span>
-          <span class="cell opening" class:waits={vessel.waitsForSlot}>
-            {#if openingReading(vessel)}
-              <strong>{openingReading(vessel)}</strong>
-              <small>
-                {#if vessel.waitsForSlot}waits for slot
-                {:else if vessel.scheduleExempt}opens on signal
-                {:else}earliest opening{/if}
-              </small>
+          </g>
+        {/each}
+
+        {#each chart.vessels as vessel (vessel.mmsi)}
+          <g
+            class="vessel"
+            class:is-opener={vessel.opener}
+            transform="translate({vessel.x.toFixed(1)} {vessel.y.toFixed(1)})"
+          >
+            <title>{vesselLabel(vessel)}</title>
+            <g class="hull-group" transform="rotate({vessel.angleDegrees.toFixed(1)})">
+              <path class="hull" d={hullPath(vessel.hullLength, vessel.hullBeam)} />
+              {#if vessel.hullLength >= 20}
+                <rect
+                  class="house"
+                  x={-vessel.hullLength * 0.32}
+                  y={-vessel.hullBeam * 0.22}
+                  width={vessel.hullLength * 0.3}
+                  height={vessel.hullBeam * 0.44}
+                  rx="0.8"
+                />
+              {/if}
+            </g>
+
+            <!-- A presentation attribute loses to the stylesheet, so the
+                 stacked anchor is a class rather than text-anchor="start". -->
+            <text
+              class="vessel-tag"
+              class:stacked={vessel.stackedColumn}
+              x={vessel.stackedColumn ? 16 : 0}
+              y={vessel.labelY}>{vessel.label}</text>
+            <text
+              class="vessel-read"
+              class:stacked={vessel.stackedColumn}
+              x={vessel.stackedColumn ? 16 : 0}
+              y={vessel.labelY + 11}>{chartReading(vessel)}</text>
+            {#if vessel.opener}
+              <!-- The tag rides with the hull, not only in the ledger: this is
+                   the one mark on the chart that changes a driver's plan. -->
+              <g
+                class="opener-tag"
+                transform="translate({vessel.stackedColumn ? 46 : 0} {vessel.labelY + 22})"
+              >
+                <rect x="-30" y="-9" width="60" height="13" rx="1" />
+                <text y="0.5">Opens span</text>
+              </g>
             {/if}
-          </span>
-        </li>
-      {/each}
-    </ul>
-  {:else if corridor.aisLive}
-    <p class="river-empty">Nothing is moving toward Brickell.</p>
-  {:else}
-    <p class="river-empty">
-      The channel is drawn from the geometry this app tracks, but the AIS source
-      is switched off, so no vessel positions are arriving. Enable it in
-      Channels to populate the line.
-    </p>
-  {/if}
+          </g>
+        {/each}
+
+        <!-- Chart furniture: north, and what the rings mean. -->
+        <g class="compass" transform="translate({chart.width - 34} 34)">
+          <line x1="0" y1="12" x2="0" y2="-10" />
+          <path d="M0 -14 L4.5 -4 L0 -7 L-4.5 -4 Z" />
+          <text y="26">N</text>
+        </g>
+        <text class="scale-note" x="16" y={chart.height - 14}
+          >Rings · distance to the span — water beyond 1 km drawn compressed</text
+        >
+      </svg>
+    </div>
+
+    <aside class="manifest-rail" aria-label="Vessels under way, nearest the span first">
+      {#if manifest.length}
+        <ul class="manifest">
+          {#each manifest as vessel (vessel.mmsi)}
+            <li class:is-opener={vessel.opener} title={vesselLabel(vessel)}>
+              <svg class="profile" viewBox="-24 -21 48 27" aria-hidden="true">
+                <VesselGlyph
+                  kind={vessel.vesselClass}
+                  length={40}
+                  flip={vessel.direction === 'downriver'}
+                  opener={vessel.opener}
+                />
+              </svg>
+              <div class="strip">
+                <p class="strip-id">
+                  <strong>{vessel.label}</strong>
+                  {#if vessel.opener}<em class="tag opens">Opens span</em>{/if}
+                  {#if vessel.scheduleExempt}<em class="tag exempt">Commercial</em>{/if}
+                </p>
+                {#if identity(vessel).length}
+                  <p class="strip-identity">{identity(vessel).join(' · ')}</p>
+                {/if}
+                {#if vessel.destination}
+                  <!-- The skipper said where they are going. Nothing inferred
+                       from course competes with that. -->
+                  <p class="strip-identity destination">for {vessel.destination}</p>
+                {/if}
+                <p class="strip-readings">
+                  <span
+                    ><strong>{DIRECTION_WORD[vessel.direction]}</strong>
+                    <small>{vessel.speedKnots.toFixed(1)} kn</small></span
+                  >
+                  <span
+                    ><strong>{distanceReading(vessel.distanceMeters)}</strong>
+                    <small>{vessel.sMeters >= 0 ? 'upriver' : 'seaward'}</small></span
+                  >
+                  {#if etaReading(vessel)}
+                    <span
+                      ><strong>{etaReading(vessel)}</strong>
+                      <small>to Brickell</small></span
+                    >
+                  {/if}
+                  {#if openingReading(vessel)}
+                    <span class="opening" class:waits={vessel.waitsForSlot}
+                      ><strong>{openingReading(vessel)}</strong>
+                      <small>
+                        {#if vessel.waitsForSlot}waits for slot
+                        {:else if vessel.scheduleExempt}opens on signal
+                        {:else}earliest opening{/if}
+                      </small></span
+                    >
+                  {/if}
+                </p>
+              </div>
+            </li>
+          {/each}
+        </ul>
+      {:else if corridor.aisLive}
+        <p class="river-empty">Nothing is moving toward Brickell.</p>
+      {:else}
+        <p class="river-empty">
+          The chart is drawn from the geometry this app tracks, but the AIS
+          source is switched off, so no vessel positions are arriving. Enable it
+          in Channels to populate the water.
+        </p>
+      {/if}
+    </aside>
+  </div>
 </section>
 
 <style>
   .river {
-    padding: clamp(16px, 2.2vw, 26px) clamp(20px, 3vw, 42px);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: clamp(14px, 2vw, 22px) clamp(20px, 3vw, 42px) clamp(16px, 2.2vw, 24px);
     background: var(--frost);
     border-top: 1px solid var(--rule-strong);
   }
 
   .river-head {
     display: flex;
+    flex: none;
     align-items: flex-start;
     justify-content: space-between;
     gap: 16px;
@@ -461,6 +584,7 @@ amber marks only a hull that will lift the span.
      explains an event the reader is currently looking at. */
   .opening-attribution {
     display: flex;
+    flex: none;
     flex-wrap: wrap;
     align-items: baseline;
     gap: 5px;
@@ -491,67 +615,165 @@ amber marks only a hull that will lift the span.
     font-weight: 700;
   }
 
-  /* Wide diagrams scroll inside their own box rather than pushing the page. */
-  .river-scroll {
-    overflow-x: auto;
+  /* The chart is the broad field; the ledger docks beside it and scrolls so
+     the water never moves under the reader. */
+  .river-body {
+    display: grid;
+    flex: 1 1 auto;
+    grid-template-columns: minmax(0, 1fr) clamp(264px, 24vw, 344px);
+    gap: 14px;
+    min-height: 0;
     margin-top: 12px;
   }
 
-  .river-plot {
-    display: block;
-    width: 100%;
-    min-width: 760px;
-    height: auto;
+  .river-scroll {
+    position: relative;
+    min-height: 0;
+    overflow: hidden;
     background: var(--white);
     border: 1px solid var(--rule);
   }
 
-  .line {
+  .river-plot {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  .rings circle {
     fill: none;
-    stroke: var(--corridor);
-    stroke-width: 7;
+    stroke: var(--steel);
+    stroke-dasharray: 1.5 5.5;
     stroke-linecap: round;
+    stroke-width: 1.1;
+    opacity: 0.65;
+  }
+
+  /* Ring readings sit over whatever the ring crosses, so they carry their own
+     paper behind the letterforms. */
+  .rings text {
+    fill: var(--muted);
+    stroke: var(--white);
+    stroke-width: 3;
+    paint-order: stroke;
+    font-family: var(--font-instrument);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-anchor: middle;
+    text-transform: uppercase;
+  }
+
+  /* Bank rules live on their own layer beneath every fill, so the junction at
+     the mouth reads as one body of water rather than three outlines. */
+  .bank {
+    fill: none;
+    stroke: var(--corridor-rule);
+    stroke-width: 0.9;
     stroke-linejoin: round;
-    opacity: 0.32;
   }
 
-  /* The entrance channels are the same water, drawn lighter so the trunk the
-     bridge sits on stays the primary line. */
-  .line.approach {
-    stroke-width: 5.5;
-    opacity: 0.2;
-    stroke-dasharray: 13 7;
+  .bank.approach {
+    opacity: 0.7;
   }
 
+  .water .ribbon {
+    fill: var(--corridor-wash);
+    stroke: none;
+  }
 
+  /* The entrance channels are the same water, drawn a shade lighter so the
+     river the bridge sits on stays the primary line. */
+  .water.approach .ribbon {
+    opacity: 0.72;
+  }
 
+  /* The bay is context, set like water names on a chart: spaced, quiet. */
+  .bay-label {
+    fill: var(--steel);
+    font-family: var(--font-instrument);
+    font-size: 15px;
+    font-style: italic;
+    font-weight: 600;
+    letter-spacing: 0.34em;
+    opacity: 0.62;
+    text-anchor: middle;
+    text-transform: uppercase;
+  }
 
+  .water .channel-rule {
+    stroke: var(--corridor);
+    stroke-dasharray: 5 7;
+    stroke-width: 1;
+    opacity: 0.35;
+  }
 
-
-
-  .station {
-    transition: opacity 400ms ease-out;
+  .wakes line {
+    stroke: var(--corridor);
+    stroke-linecap: round;
   }
 
   .station-label {
     fill: var(--muted);
+    stroke: var(--white);
+    stroke-width: 3;
+    paint-order: stroke;
     font-family: var(--font-instrument);
-    font-size: 13px;
+    font-size: 12.5px;
     font-weight: 600;
     letter-spacing: 0.04em;
     text-anchor: middle;
     text-transform: uppercase;
   }
 
-  .station.is-target .station-label {
-    fill: var(--marine);
-    font-size: 17px;
-    font-weight: 700;
+  .station-label.anchor-start {
+    text-anchor: start;
   }
 
+  .station-label.anchor-end {
+    text-anchor: end;
+  }
 
+  .station.is-target .station-label {
+    fill: var(--marine);
+    font-size: 19px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
 
-  /* The opener tag rides on the drawing beside its hull. */
+  /* The state word rides with the target's name: the one span whose reading
+     must survive without the legend, in words as well as colour. */
+  .target-state {
+    fill: var(--muted);
+    stroke: var(--white);
+    stroke-width: 3;
+    paint-order: stroke;
+    font-family: var(--font-instrument);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-anchor: middle;
+    text-transform: uppercase;
+  }
+
+  .station.is-target[data-state='up'] .target-state {
+    fill: var(--danger);
+  }
+
+  .channel-mark {
+    fill: var(--white);
+    stroke: var(--corridor);
+    stroke-width: 1.3;
+    opacity: 0.8;
+  }
+
+  .channel-mark.is-mouth {
+    stroke-width: 1.8;
+  }
+
+  /* The opener tag rides on the chart beside its hull. */
   .opener-tag rect {
     fill: var(--amber-sheet);
     stroke: var(--amber-ink);
@@ -570,13 +792,38 @@ amber marks only a hull that will lift the span.
 
   /* Ten seconds between snapshots, so a vessel that jumps reads as a glitch
      rather than as movement. Easing the transform lets it run the distance it
-     actually ran. Everything else that changes fades rather than swaps. */
+     actually ran. */
   .vessel {
     transition: transform 1100ms cubic-bezier(0.22, 0.61, 0.36, 1);
   }
 
+  .hull-group {
+    transition: transform 1100ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+
+  .hull {
+    fill: var(--corridor);
+    stroke: var(--white);
+    stroke-width: 1.1;
+    stroke-linejoin: round;
+  }
+
+  .house {
+    fill: none;
+    stroke: var(--white);
+    stroke-width: 0.9;
+    opacity: 0.85;
+  }
+
+  .vessel.is-opener .hull {
+    fill: var(--amber-ink);
+  }
+
   .vessel-tag {
     fill: var(--graphite);
+    stroke: var(--white);
+    stroke-width: 3;
+    paint-order: stroke;
     font-family: var(--font-instrument);
     font-size: 12px;
     font-weight: 600;
@@ -592,8 +839,11 @@ amber marks only a hull that will lift the span.
   /* The two numbers a driver is actually after, under the name. */
   .vessel-read {
     fill: var(--muted);
+    stroke: var(--white);
+    stroke-width: 3;
+    paint-order: stroke;
     font-family: var(--font-body);
-    font-size: 10.5px;
+    font-size: 10px;
     font-weight: 500;
     text-anchor: middle;
   }
@@ -602,25 +852,55 @@ amber marks only a hull that will lift the span.
     text-anchor: start;
   }
 
-  .destination {
-    color: var(--corridor);
+  .compass line {
+    stroke: var(--steel);
+    stroke-width: 1.2;
+  }
+
+  .compass path {
+    fill: var(--steel);
+  }
+
+  .compass text {
+    fill: var(--muted);
+    font-family: var(--font-instrument);
+    font-size: 11px;
+    font-weight: 700;
+    text-anchor: middle;
+  }
+
+  .scale-note {
+    fill: var(--muted);
+    font-family: var(--font-instrument);
+    font-size: 10.5px;
     font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  /* The ledger: every hull as a clipped evidence strip, nearest first. */
+  .manifest-rail {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border-left: 1px solid var(--rule);
+    padding-left: 14px;
   }
 
   .manifest {
     display: grid;
     gap: 0;
-    margin: 14px 0 0;
+    margin: 0;
     padding: 0;
     list-style: none;
   }
 
   .manifest li {
     display: grid;
-    grid-template-columns: minmax(170px, 2.4fr) repeat(4, minmax(74px, 1fr));
-    gap: clamp(8px, 1.4vw, 18px);
-    align-items: center;
-    padding: 8px 0;
+    grid-template-columns: 44px minmax(0, 1fr);
+    gap: 10px;
+    align-items: start;
+    padding: 10px 0;
     border-bottom: 1px solid var(--rule);
   }
 
@@ -628,36 +908,81 @@ amber marks only a hull that will lift the span.
     border-bottom: 0;
   }
 
-  .cell {
-    display: grid;
-    min-width: 0;
-    gap: 1px;
+  .profile {
+    width: 44px;
+    height: 25px;
+    margin-top: 2px;
   }
 
-  .cell strong {
+  .strip {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .strip-id {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: baseline;
+    margin: 0;
+  }
+
+  .strip-id strong {
     overflow: hidden;
     color: var(--graphite);
     font-family: var(--font-instrument);
     font-size: var(--type-label);
-    font-weight: 600;
+    font-weight: 700;
     letter-spacing: 0.03em;
     text-overflow: ellipsis;
     text-transform: uppercase;
     white-space: nowrap;
   }
 
-  .cell small {
+  .strip-identity {
+    margin: 0;
     color: var(--muted);
     font-size: var(--type-micro);
   }
 
-  .cell.opening.waits strong {
+  .destination {
+    color: var(--corridor);
+    font-weight: 600;
+  }
+
+  .strip-readings {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    margin: 2px 0 0;
+  }
+
+  .strip-readings span {
+    display: grid;
+    gap: 0;
+  }
+
+  .strip-readings strong {
+    color: var(--graphite);
+    font-family: var(--font-instrument);
+    font-size: var(--type-label);
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+  }
+
+  .strip-readings small {
+    color: var(--muted);
+    font-size: var(--type-micro);
+  }
+
+  .strip-readings .opening.waits strong {
     color: var(--amber-ink);
   }
 
   .tag {
     display: inline-block;
-    margin-right: 4px;
     padding: 1px 4px;
     font-family: var(--font-instrument);
     font-size: var(--type-micro);
@@ -678,23 +1003,42 @@ amber marks only a hull that will lift the span.
   }
 
   .river-empty {
-    margin: 14px 0 2px;
-    max-width: 66ch;
+    margin: 8px 0 2px;
+    max-width: 34ch;
     color: var(--muted);
     font-size: var(--type-caption);
     line-height: 1.55;
   }
 
-  @media (max-width: 720px) {
-    .manifest li {
-      grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1fr);
-      row-gap: 4px;
+  @media (max-width: 900px) {
+    .river-body {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    /* A phone pans the sheet rather than shrinking its lettering away; the
+       action above wakes the scroll centred on the Brickell span. */
+    .river-scroll {
+      overflow-x: auto;
+      overflow-y: hidden;
+      overscroll-behavior-x: contain;
+    }
+
+    .river-plot {
+      position: static;
+      width: 760px;
+      height: auto;
+    }
+
+    .manifest-rail {
+      border-left: 0;
+      padding-left: 0;
+      overflow-y: visible;
     }
   }
 
   @media (prefers-reduced-motion: reduce) {
     .vessel,
-    .station {
+    .hull-group {
       transition: none;
     }
   }
