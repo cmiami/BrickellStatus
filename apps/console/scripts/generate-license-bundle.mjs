@@ -122,9 +122,22 @@ function cargoPackages() {
     }));
 }
 
+// Reach npm through the very entrypoint that is already running this script,
+// rather than whichever shim the PATH happens to resolve. On Windows those
+// differ: the pinned release is installed globally, but a spawned `npm.cmd`
+// finds the copy bundled with Node, whose version the repo's devEngines pin
+// then rejects.
+function npmInvocation() {
+  const execPath = process.env.npm_execpath;
+  if (execPath?.endsWith('.js')) {
+    return { command: process.execPath, leading: [execPath] };
+  }
+  return { command: process.platform === 'win32' ? 'npm.cmd' : 'npm', leading: [] };
+}
+
 function npmPackages() {
-  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  const tree = runJson(npm, ['ls', '--all', '--json', '--long'], consoleDirectory);
+  const { command, leading } = npmInvocation();
+  const tree = runJson(command, [...leading, 'ls', '--all', '--json', '--long'], consoleDirectory);
   const selected = new Map();
   function visit(node) {
     for (const dependency of Object.values(node.dependencies ?? {})) {
