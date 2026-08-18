@@ -59,7 +59,7 @@ use tauri::{
 };
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{Mutex as AsyncMutex, Mutex as TokioMutex, RwLock};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use url::Url;
 use uuid::Uuid;
 
@@ -1149,7 +1149,7 @@ async fn flash_firmware(
         .ok_or_else(|| format!("unknown firmware variant {variant_id:?}"))?
         .clone();
     let bundled_build = bundle.source_revision.clone();
-    let variant_id_for_record = variant_id.clone();
+    let mut variant_id_for_record = variant_id.clone();
     // Read the board's identity now, while it is still enumerated and holding
     // still. Afterwards it is in a hard reset and re-enumerating, and a lookup
     // that comes back empty in that gap loses the record — which is the record
@@ -1161,23 +1161,49 @@ async fn flash_firmware(
     // tens of seconds, so it must not run on the async runtime.
     let emitter = app.clone();
     let preferences = state.engine.get_preferences().await;
-    let outcome = state
-        .display
-        .holding_the_port_for_flash(&preferences, async move {
-            tauri::async_runtime::spawn_blocking(move || {
-                let mut progress = EmitProgress {
-                    app: emitter,
-                    total: variant.total_bytes(),
-                    done: 0,
-                    current: 0,
-                };
-                firmware::flash_variant(&port, &variant, &mut progress)
+    let write = async |variant: firmware::FirmwareVariant, app: AppHandle, port: String| {
+        let outcome = state
+            .display
+            .holding_the_port_for_flash(&preferences, async move {
+                tauri::async_runtime::spawn_blocking(move || {
+                    let mut progress = EmitProgress {
+                        app,
+                        total: variant.total_bytes(),
+                        done: 0,
+                        current: 0,
+                    };
+                    firmware::flash_variant(&port, &variant, &mut progress)
+                })
+                .await
+                .map_err(|error| error.to_string())
             })
-            .await
-            .map_err(|error| error.to_string())
-        })
-        .await;
-    outcome?.map_err(|error| error.to_string())?;
+            .await;
+        outcome?.map_err(|error| error.to_string())
+    };
+
+    write(variant, emitter, port.clone()).await?;
+
+    // Ask the board what it just became. A virgin panel could not be asked
+    // before the write, so the variant that went on was a guess, and a wrong
+    // guess leaves the screen showing whatever the factory left there — the
+    // firmware correctly declines to drive a panel it was not built for, and
+    // e-paper keeps its last image, so a successful flash looks like a no-op.
+    if let Some(banner) = banner_after_flash(&port).await
+        && let Some(board) = correction_for(&banner, &variant_id)
+        && let Some(correct) = bundle.for_board(board, None).cloned()
+    {
+        info!(
+            wrote = %variant_id,
+            board = %board.label(),
+            correcting_to = %correct.id,
+            "the board is not the panel the written build drives; flashing the one it is",
+        );
+        variant_id_for_record = correct.id.clone();
+        // Once. The board has now been told by its own probe, so a second
+        // mismatch would mean the bundle disagrees with the hardware and
+        // rewriting again would only loop.
+        write(correct, app.clone(), port.clone()).await?;
+    }
 
     // Remember what went onto which board. The banner is only spoken at boot
     // and the port is usually held by the display worker, so a device that is
@@ -1215,6 +1241,49 @@ async fn flash_firmware(
         ),
     }
     Ok(())
+}
+
+/// Reads the banner a freshly flashed board speaks at boot.
+///
+/// Opening the port is what resets the board, so this is also what makes it
+/// talk. `None` means it never said anything, which is not the same as it
+/// saying something unwelcome.
+async fn banner_after_flash(port: &str) -> Option<DeviceBanner> {
+    let transport = brickellstatus_eink::transport::UsbTransport::new(
+        brickellstatus_eink::transport::UsbConfig {
+            port: Some(port.to_owned()),
+            ..Default::default()
+        },
+    );
+    let banner = transport
+        .ensure_connected()
+        .await
+        .ok()
+        .and_then(|info| info.banner)
+        .map(|line| DeviceBanner::parse(&line));
+    transport.disconnect().await;
+    banner
+}
+
+/// The variant this board says it needs, when the one just written is not it.
+///
+/// A board that has never run our firmware speaks no banner, so nothing knows
+/// which panel it carries and the first variant in the bundle gets written on
+/// spec. Land that on the other board and the firmware does the right thing —
+/// it refuses to drive a panel it was not built for — but e-paper holds its
+/// last image, so the screen keeps showing whatever was on it and the flash
+/// looks like it did nothing at all.
+///
+/// The board settles it the moment it boots. This is the one question the
+/// reader is never asked, per the product's own rule, so the app has to act on
+/// the answer rather than report it.
+fn correction_for(banner: &DeviceBanner, written: &str) -> Option<PanelModel> {
+    if !banner.mismatch {
+        return None;
+    }
+    let board = banner.board?;
+    // Only when the board names a panel the written variant is not for.
+    (!written.contains(board.label().to_lowercase().as_str())).then_some(board)
 }
 
 /// Key for the last-flashed record in the settings table.

@@ -1,4 +1,4 @@
-"""Injects TENDERS_LOG_BUILD_ID so the device banner identifies its firmware.
+"""Injects BRICKELLSTATUS_BUILD_ID so the device banner identifies its firmware.
 
 The id is derived from the tracked firmware sources rather than from HEAD, so a
 commit that touches nothing under firmware/ does not invalidate a device that is
@@ -58,4 +58,4 @@ def build_id() -> str:
         return "unknown"
 
 
-env.Append(CPPDEFINES=[("TENDERS_LOG_BUILD_ID", env.StringifyMacro(build_id()))])  # noqa: F821
+env.Append(CPPDEFINES=[("BRICKELLSTATUS_BUILD_ID", env.StringifyMacro(build_id()))])  # noqa: F821
