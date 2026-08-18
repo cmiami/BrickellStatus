@@ -103,7 +103,13 @@
     for (const point of allPoints) {
       const marker = new maplibreModule.Marker({
         element: markerElement(point),
-        anchor: 'bottom',
+        // Anchor the part of the mark that actually claims the coordinate. A
+        // vessel is a disc centred on its fix; a pin is a point that touches
+        // the ground at its tip. Anchoring both at 'bottom' drew every vessel
+        // half its own height north of where it was, and because the error is
+        // a fixed number of screen pixels it reads as the mark wandering as
+        // you zoom.
+        anchor: point.kind === 'vessel' ? 'center' : 'bottom',
         draggable: point.draggable === true
       }).setLngLat([point.longitude, point.latitude]);
 
@@ -625,12 +631,19 @@
   /* The root carries only its footprint: MapLibre owns its transform and
      rewrites it on every camera frame, so a transform or a transition here
      makes the pin chase the map instead of holding its coordinate. */
+  /* The pin is a 24px square with one sharp corner, turned 45 degrees so that
+     corner points straight down. Rotating about the corner itself (rather than
+     the square's middle) means the tip is the one part of the mark that never
+     moves — not when the square is placed, and not when it grows on hover.
+
+     The geometry is exact rather than eyeballed: a 24px square measures 24√2 ≈
+     33.9px across its diagonal, so a 34px box holds it with the tip landing on
+     the bottom edge, dead centre. `anchor: 'bottom'` then puts that tip on the
+     coordinate. Change the square and this box has to change with it. */
   :global(.location-map-pin) {
     position: relative;
-    display: grid;
-    width: 30px;
-    height: 38px;
-    place-items: center;
+    width: 34px;
+    height: 34px;
     padding: 0;
     background: none;
     border: 0;
@@ -638,15 +651,21 @@
   }
 
   :global(.location-map-pin__body) {
+    position: absolute;
+    /* Places the square's sharp corner on the box's bottom centre: 17 - 24 to
+       the left, 34 - 24 down. */
+    inset: 10px auto auto -7px;
     display: grid;
-    width: 100%;
-    height: 100%;
+    width: 24px;
+    height: 24px;
     place-items: center;
     color: var(--white);
     background: var(--marine);
     border: 2px solid var(--white);
-    border-radius: 50% 50% 50% 4px;
+    border-radius: 50% 50% 4px 50%;
     box-shadow: 0 3px 0 rgba(17, 20, 24, 0.28), 0 8px 20px rgba(17, 20, 24, 0.24);
+    transform: rotate(45deg);
+    transform-origin: 100% 100%;
     transition: transform 140ms ease-out, background-color 140ms ease-out,
       border-color 140ms ease-out, color 140ms ease-out;
   }
@@ -656,6 +675,8 @@
     height: 8px;
     background: currentColor;
     border-radius: 50%;
+    /* Undoes the head's turn, so the mark inside stays upright. */
+    transform: rotate(-45deg);
   }
 
   :global(.location-map-pin:hover) :global(.location-map-pin__body),
@@ -664,7 +685,7 @@
     color: var(--graphite);
     background: var(--amber);
     border-color: var(--graphite);
-    transform: scale(1.14);
+    transform: rotate(45deg) scale(1.14);
   }
 
   :global(.location-map-pin--candidate) :global(.location-map-pin__body),
@@ -674,16 +695,30 @@
     border-color: var(--graphite);
   }
 
+  /* A vessel is a disc centred on its fix, not a pin standing on it, so it
+     keeps its own square box and no 45-degree turn. It is anchored 'center' in
+     syncMarkers to match. */
   :global(.location-map-pin--vessel) {
     width: 28px;
     height: 28px;
   }
 
   :global(.location-map-pin--vessel) :global(.location-map-pin__body) {
+    inset: 0;
+    width: 100%;
+    height: 100%;
     color: var(--white);
     background: var(--channel);
     border-color: var(--white);
     border-radius: 50%;
+    transform: none;
+    transform-origin: 50% 50%;
+  }
+
+  :global(.location-map-pin--vessel:hover) :global(.location-map-pin__body),
+  :global(.location-map-pin--vessel:focus-visible) :global(.location-map-pin__body),
+  :global(.location-map-pin--vessel.is-selected) :global(.location-map-pin__body) {
+    transform: scale(1.14);
   }
 
   :global(.location-map-pin--vessel) :global(.location-map-pin__dot) {

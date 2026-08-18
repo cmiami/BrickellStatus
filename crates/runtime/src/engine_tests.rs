@@ -2900,6 +2900,67 @@ async fn enabling_a_channel_survives_a_restart() {
     assert!(enabled, "the channel must still be on after a restart");
 }
 
+/// A channel added in a later release has to reach a profile that already
+/// exists. Seeding only on a fresh install meant an upgrading reader never saw
+/// it — the stored channel list was taken as the whole truth at load.
+#[tokio::test]
+async fn a_channel_shipped_after_this_install_still_arrives() {
+    let file = std::env::temp_dir().join(format!(
+        "brickellstatus-adopt-{}-{:?}.db",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&file);
+
+    // A profile from before Sports existed, with one channel deliberately
+    // edited so the adoption cannot be a wholesale reset to defaults.
+    {
+        let store = Store::open(&file).await.unwrap();
+        let engine = RuntimeEngine::new(store, RuntimeConfig::default())
+            .await
+            .unwrap();
+        let mut preferences = engine.get_preferences().await;
+        preferences
+            .profile
+            .channels
+            .retain(|channel| channel.kind != ChannelKindDto::Sports);
+        let news = preferences
+            .profile
+            .channels
+            .iter_mut()
+            .find(|channel| channel.kind == ChannelKindDto::News)
+            .unwrap();
+        news.title = "My own headlines".into();
+        news.scope
+            .insert("feeds".into(), json!(["https://example.com/mine.xml"]));
+        engine.save_preferences(preferences).await.unwrap();
+    }
+
+    let store = Store::open(&file).await.unwrap();
+    let engine = RuntimeEngine::new(store, RuntimeConfig::default())
+        .await
+        .unwrap();
+    let reloaded = engine.get_preferences().await;
+    let _ = std::fs::remove_file(&file);
+
+    let sports = reloaded
+        .profile
+        .channels
+        .iter()
+        .find(|channel| channel.kind == ChannelKindDto::Sports)
+        .expect("the sports channel must arrive on an existing profile");
+    assert!(!sports.enabled, "an adopted channel must not start itself");
+
+    let news = reloaded
+        .profile
+        .channels
+        .iter()
+        .find(|channel| channel.kind == ChannelKindDto::News)
+        .unwrap();
+    assert_eq!(news.title, "My own headlines", "edits must survive adoption");
+    assert_eq!(news.scope["feeds"], json!(["https://example.com/mine.xml"]));
+}
+
 /// The reader is told what is true about their stock, never which company the
 /// app asked. A source that has not answered yet is not a broken source, and
 /// naming one is something the reader can do nothing with.

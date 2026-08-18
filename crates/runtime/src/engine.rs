@@ -404,6 +404,11 @@ impl RuntimeEngine {
         let now_ms = clock.now_millis();
         let stored_preferences = store.get_json::<AppPreferences>(PREFERENCES_KEY).await?;
         let mut preferences = stored_preferences.clone().unwrap_or_default();
+        // A channel shipped after this install first ran would otherwise never
+        // appear: the stored list is taken verbatim, so defaults only ever
+        // reached a fresh profile. Adopt the ones the user has never seen,
+        // switched off, and leave every channel they already have alone.
+        let adopted = adopt_new_default_channels(&mut preferences);
         let secret_status_changed = if let Some(configured) = factory.aisstream_key_configured()? {
             let changed = preferences.ais.api_key_configured != configured;
             preferences.ais.api_key_configured = configured;
@@ -412,7 +417,7 @@ impl RuntimeEngine {
             false
         };
         validate_preferences(&preferences)?;
-        if stored_preferences.is_none() || secret_status_changed {
+        if stored_preferences.is_none() || secret_status_changed || adopted > 0 {
             store
                 .set_json(PREFERENCES_KEY, &preferences, &iso_timestamp(now_ms)?)
                 .await?;
@@ -1177,6 +1182,37 @@ impl Drop for SchedulerHandle {
     fn drop(&mut self) {
         self.cancellation.cancel();
     }
+}
+
+/// Adds default channels this profile has never seen, and returns how many.
+///
+/// Shipping a new channel used to reach nobody who already had the app: the
+/// stored profile is the whole truth at load, so `default_channel_preferences`
+/// only ever applied to a first run.
+///
+/// Matching is by id, so a channel the user deleted stays deleted only until
+/// the next release — that is the trade for a new one ever arriving at all.
+/// Everything adopted comes in disabled, so nothing starts polling or takes a
+/// rotation slot until it is switched on, and a channel already in the profile
+/// is never touched, however far it has been edited from its default.
+fn adopt_new_default_channels(preferences: &mut AppPreferences) -> usize {
+    let known = preferences
+        .profile
+        .channels
+        .iter()
+        .map(|channel| channel.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let missing = crate::preferences::default_channel_preferences()
+        .into_iter()
+        .filter(|channel| !known.contains(&channel.id))
+        .map(|mut channel| {
+            channel.enabled = false;
+            channel
+        })
+        .collect::<Vec<_>>();
+    let adopted = missing.len();
+    preferences.profile.channels.extend(missing);
+    adopted
 }
 
 fn active_source_map(
