@@ -168,6 +168,7 @@ fn infallible<T>(result: Result<T, Infallible>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PanelModel;
 
     /// Ink laid down by one word, as a set of coordinates, so two words can be
     /// compared for how much of their form they actually share.
@@ -175,11 +176,11 @@ mod tests {
         draw: fn(&mut MonoFrame, i32, i32, &str, BinaryColor),
         value: &str,
     ) -> Vec<(u16, u16)> {
-        let mut frame = MonoFrame::white();
+        let mut frame = MonoFrame::white(PanelModel::E213);
         draw(&mut frame, 2, 2, value, BinaryColor::On);
         let mut set = Vec::new();
-        for y in 0..crate::HEIGHT {
-            for x in 0..crate::WIDTH {
+        for y in 0..PanelModel::E213.height() {
+            for x in 0..PanelModel::E213.width() {
                 if frame.is_black(x, y) {
                     set.push((x, y));
                 }
@@ -235,10 +236,10 @@ mod tests {
     /// stops a wider face from printing over its own border.
     #[test]
     fn the_strong_glyph_width_matches_the_face_it_describes() {
-        let mut frame = MonoFrame::white();
+        let mut frame = MonoFrame::white(PanelModel::E213);
         strong(&mut frame, 0, 0, "MM", BinaryColor::On);
-        let rightmost = (0..crate::WIDTH)
-            .rfind(|x| (0..crate::HEIGHT).any(|y| frame.is_black(*x, y)))
+        let rightmost = (0..PanelModel::E213.width())
+            .rfind(|x| (0..PanelModel::E213.height()).any(|y| frame.is_black(*x, y)))
             .expect("two glyphs leave ink");
         assert!(
             i32::from(rightmost) < STRONG_GLYPH_WIDTH * 2,

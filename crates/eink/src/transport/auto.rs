@@ -117,7 +117,7 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::{MonoFrame, RefreshMode};
+    use crate::{MonoFrame, PanelModel, RefreshMode};
 
     struct FakeTransport {
         kind: TransportKind,
@@ -166,7 +166,7 @@ mod tests {
             Some(ble.clone()),
         );
         let receipt = transport
-            .send_frame(&MonoFrame::white(), RefreshMode::Fast)
+            .send_frame(&MonoFrame::white(PanelModel::E213), RefreshMode::Fast)
             .await
             .unwrap();
         assert_eq!(receipt.transport, TransportKind::Usb);
@@ -192,7 +192,7 @@ mod tests {
             Some(ble.clone()),
         );
         let receipt = transport
-            .send_frame(&MonoFrame::white(), RefreshMode::Fast)
+            .send_frame(&MonoFrame::white(PanelModel::E213), RefreshMode::Fast)
             .await
             .unwrap();
         assert_eq!(receipt.transport, TransportKind::Ble);

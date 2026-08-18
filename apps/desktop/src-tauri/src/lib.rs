@@ -32,8 +32,9 @@ use bridgestatus_projection::{
 use bridgestatus_projection::{local_clock, span_code, upstream_spans};
 // Re-exported because the live-frame binary drives the same path the app does.
 use bridgestatus_eink::{
-    MonoFrame, RadarFigure, RefreshMode, RenderConfig, preview_png_bytes, radar_figure_from_png,
-    render_channel_card, render_channel_card_with_radar, render_snapshot, series_figure,
+    DeviceBanner, MonoFrame, PanelModel, RadarFigure, RefreshMode, RenderConfig, preview_png_bytes,
+    radar_figure_from_png, render_channel_card, render_channel_card_with_radar, render_snapshot,
+    series_figure,
     transport::{
         BleConfig, BleTransport, TransportKind, TransportReceipt, UsbConfig, UsbTransport,
         discover_ble_devices, discover_espressif_devices,
@@ -103,6 +104,11 @@ pub struct DisplayConnectionStatus {
     pub last_frame_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_ack_at: Option<String>,
+    /// Which panel the connected board reports carrying. Absent until a board
+    /// has said, because this is a fact read off the device and never a
+    /// setting: the interface names what was detected, or names nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub panel: Option<PanelModel>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -121,6 +127,7 @@ impl Default for DisplayConnectionStatus {
             detail: "No display connected. Scan for USB or Bluetooth Low Energy devices.".into(),
             last_frame_at: None,
             last_ack_at: None,
+            panel: None,
         }
     }
 }
@@ -129,36 +136,40 @@ impl DisplayConnectionStatus {
     fn menu_lines(&self) -> (String, String) {
         let first = match (self.state, self.transport) {
             (DisplayConnectionState::Connected, Some(DisplayConnectionTransport::Usb)) => {
-                "E213 · USB active"
+                "USB active"
             }
             (DisplayConnectionState::Connected, Some(DisplayConnectionTransport::Ble)) => {
-                "E213 · BLE connected"
+                "BLE connected"
             }
             (DisplayConnectionState::Connecting, Some(DisplayConnectionTransport::Usb)) => {
-                "E213 · USB connecting"
+                "USB connecting"
             }
             (DisplayConnectionState::Connecting, Some(DisplayConnectionTransport::Ble)) => {
-                "E213 · BLE connecting"
+                "BLE connecting"
             }
-            (DisplayConnectionState::Connecting, None) => "E213 · scanning",
-            (DisplayConnectionState::Disconnected, _) => "E213 · disconnected",
+            (DisplayConnectionState::Connecting, None) => "scanning",
+            (DisplayConnectionState::Disconnected, _) => "disconnected",
             (DisplayConnectionState::Unavailable, Some(DisplayConnectionTransport::Usb)) => {
-                "E213 · USB unavailable"
+                "USB unavailable"
             }
             (DisplayConnectionState::Unavailable, Some(DisplayConnectionTransport::Ble)) => {
-                "E213 · BLE unavailable"
+                "BLE unavailable"
             }
-            (DisplayConnectionState::Unavailable, None) => "E213 · unavailable",
-            (DisplayConnectionState::Error, Some(DisplayConnectionTransport::Usb)) => {
-                "E213 · USB error"
-            }
-            (DisplayConnectionState::Error, Some(DisplayConnectionTransport::Ble)) => {
-                "E213 · BLE error"
-            }
-            (DisplayConnectionState::Error, None) => "E213 · transport error",
-            (DisplayConnectionState::Connected, None) => "E213 · connected",
+            (DisplayConnectionState::Unavailable, None) => "unavailable",
+            (DisplayConnectionState::Error, Some(DisplayConnectionTransport::Usb)) => "USB error",
+            (DisplayConnectionState::Error, Some(DisplayConnectionTransport::Ble)) => "BLE error",
+            (DisplayConnectionState::Error, None) => "transport error",
+            (DisplayConnectionState::Connected, None) => "connected",
         };
-        (first.into(), clean_menu_text(&self.detail))
+        // The board names itself, so the menu bar names the board that is there
+        // rather than the one this project happened to start with. Before any
+        // board has spoken there is nothing to name, and the line simply says
+        // what the panel route is doing.
+        let subject = self.panel.map_or("Panel", PanelModel::label);
+        (
+            format!("{subject} · {first}"),
+            clean_menu_text(&self.detail),
+        )
     }
 
     fn tray_badge(&self) -> &'static str {
@@ -302,6 +313,9 @@ struct DisplayController {
     /// spoken at boot and nowhere else. Counted, not latched, so one dropped
     /// frame does not condemn a working board.
     unanswered_frames: AtomicU32,
+    /// Which panel the attached board reports carrying, which is what every
+    /// frame is drawn for. A fact learned from the device, never a setting.
+    attached_panel: std::sync::RwLock<PanelModel>,
     preferred_usb_port: AsyncMutex<Option<String>>,
     preferred_ble_id: AsyncMutex<Option<String>>,
 }
@@ -329,6 +343,7 @@ impl DisplayController {
             automatic_reconnect: std::sync::atomic::AtomicBool::new(saved_usb.is_some()),
             delivery_armed: std::sync::atomic::AtomicBool::new(false),
             unanswered_frames: AtomicU32::new(0),
+            attached_panel: std::sync::RwLock::new(PanelModel::default()),
             preferred_usb_port: AsyncMutex::new(saved_usb),
             preferred_ble_id: AsyncMutex::new(None),
         }
@@ -486,7 +501,7 @@ impl DisplayController {
                 "INK1 protocol compatibility confirmed; send a test frame to prove end-to-end acknowledgement."
             }
         };
-        let status = connected_status(&active, None, None, detail);
+        let status = connected_status(&active, Some(self.panel()), None, None, detail);
         *self.active.write().await = Some(active);
         self.automatic_reconnect.store(true, Ordering::Relaxed);
         self.delivery_armed.store(false, Ordering::Relaxed);
@@ -515,6 +530,7 @@ impl DisplayController {
         let active = self.connect_preferred_locked(preferences).await?;
         let status = connected_status(
             &active,
+            Some(self.panel()),
             None,
             None,
             "Connection restored; waiting to send the current rotation frame.",
@@ -615,6 +631,35 @@ impl DisplayController {
         }
     }
 
+    /// The panel every frame is drawn for.
+    ///
+    /// Taken from what the connected board said about itself, which is the only
+    /// party that knows. A board that has not said — an older firmware, a BLE
+    /// route that has not read its banner yet, nothing connected at all — leaves
+    /// the last one that did in place, and the original panel is the answer
+    /// before any board has ever spoken. Nothing here reads a preference,
+    /// because a preference is a person being asked to identify hardware they
+    /// are holding.
+    fn panel(&self) -> PanelModel {
+        *self
+            .attached_panel
+            .read()
+            .expect("panel lock is not poisoned")
+    }
+
+    /// Records what a board reported, so the next frame is drawn for it.
+    fn observe_panel(&self, panel: Option<PanelModel>) {
+        let Some(panel) = panel else { return };
+        let mut attached = self
+            .attached_panel
+            .write()
+            .expect("panel lock is not poisoned");
+        if *attached != panel {
+            tracing::info!(panel = panel.label(), "attached panel changed");
+            *attached = panel;
+        }
+    }
+
     async fn disconnect_locked(&self) -> Result<(), String> {
         let active = self.active.write().await.take();
         // Delivery history belongs to a connection: the next one may not even
@@ -636,10 +681,14 @@ impl DisplayController {
             .ensure_connected()
             .await
             .map_err(|error| error.to_string())?;
-        let name = if connected.ready_observed {
-            format!("E213 on {}", connected.port)
-        } else {
-            format!("USB display on {}", connected.port)
+        // The board names its panel in the same breath as it says it is ready,
+        // so the route knows what it is drawing for before it draws anything.
+        let banner = connected.banner.as_deref().map(DeviceBanner::parse);
+        self.observe_panel(banner.as_ref().and_then(|banner| banner.panel));
+        let name = match banner.as_ref().and_then(|banner| banner.board) {
+            Some(panel) => format!("{} on {}", panel.label(), connected.port),
+            None if connected.ready_observed => format!("Panel on {}", connected.port),
+            None => format!("USB display on {}", connected.port),
         };
         Ok(ActiveDisplay::Usb {
             name,
@@ -662,6 +711,16 @@ impl DisplayController {
             .ensure_connected()
             .await
             .map_err(|error| error.to_string())?;
+        // Over Bluetooth the banner is held on the TX characteristic rather
+        // than spoken once at boot, so the panel is known from the moment the
+        // connection opens.
+        self.observe_panel(
+            connected
+                .banner
+                .as_deref()
+                .map(DeviceBanner::parse)
+                .and_then(|banner| banner.panel),
+        );
         Ok(ActiveDisplay::Ble {
             name: connected.name,
             transport,
@@ -873,6 +932,12 @@ pub struct FirmwareStatus {
     pub port: Option<String>,
     /// Build this app ships, when it ships one.
     pub bundled_build: Option<String>,
+    /// Which board is attached, as the board itself reported it.
+    pub board: Option<PanelModel>,
+    /// The build to write to it, worked out from that report and from whatever
+    /// answered the one question hardware cannot. The interface flashes this;
+    /// it does not offer a menu.
+    pub recommended_variant_id: Option<String>,
     /// Variants available to flash.
     pub variants: Vec<FirmwareVariantSummary>,
     /// Whether the operator should be prompted, and why.
@@ -886,7 +951,10 @@ pub struct FirmwareStatus {
 pub struct FirmwareVariantSummary {
     pub id: String,
     pub label: String,
-    pub panel_revision: firmware::PanelRevision,
+    /// Board this build drives, so the interface can offer only the builds that
+    /// could possibly apply to what is attached.
+    pub panel: PanelModel,
+    pub panel_revision: Option<firmware::PanelRevision>,
     pub total_bytes: usize,
 }
 
@@ -898,9 +966,11 @@ fn firmware_root(app: &AppHandle) -> Option<std::path::PathBuf> {
 
 /// Reports whether an attached board needs the bundled firmware.
 ///
-/// Detection of the board is automatic. The panel revision is not and cannot
-/// be: both builds run on the same ESP32-S3 with the same USB identifiers, and
-/// only the physical display differs, so the variant stays an operator choice.
+/// Which board it is comes from the board: its boot probe reports the panel it
+/// found, and the build to write follows from that. The one thing hardware
+/// cannot settle is the E213's panel revision — two controllers behind
+/// identical wiring — which is why the app remembers which build produced a
+/// readable screen instead of asking anyone to identify their display.
 #[tauri::command]
 async fn get_firmware_status(
     app: AppHandle,
@@ -919,6 +989,8 @@ async fn get_firmware_status(
         return Ok(FirmwareStatus {
             port,
             bundled_build: None,
+            board: None,
+            recommended_variant_id: None,
             variants: Vec::new(),
             requirement: firmware::FlashRequirement::NoDevice,
             unavailable: Some("this build ships no firmware".into()),
@@ -931,6 +1003,8 @@ async fn get_firmware_status(
             return Ok(FirmwareStatus {
                 port,
                 bundled_build: None,
+                board: None,
+                recommended_variant_id: None,
                 variants: Vec::new(),
                 requirement: firmware::FlashRequirement::NoDevice,
                 unavailable: Some(error.to_string()),
@@ -1009,15 +1083,48 @@ async fn get_firmware_status(
         state.display.usb_route_evidence().await,
     );
 
+    // What the board said it is. A board that has not spoken this session is
+    // not guessed at here; the last build written to it is the better answer,
+    // and that is what the record holds.
+    let reported = match &probe {
+        firmware::DeviceProbe::Answered(banner) => banner.board,
+        _ => None,
+    };
+    // Drawing follows the device, so a board that named itself has just told
+    // the display route which panel to render for.
+    if let firmware::DeviceProbe::Answered(banner) = &probe {
+        state.display.observe_panel(banner.panel);
+    }
+    let remembered_revision = remembered
+        .as_ref()
+        .and_then(|record| bundle.variant(&record.variant_id))
+        .and_then(|variant| variant.panel_revision);
+    let board = reported.or_else(|| {
+        remembered
+            .as_ref()
+            .and_then(|record| bundle.variant(&record.variant_id))
+            .map(|variant| variant.panel)
+    });
+    let recommended_variant_id = board
+        .and_then(|board| bundle.for_board(board, remembered_revision))
+        // With no board known at all — a virgin board that has never spoken —
+        // the first build in the bundle is the one to try, and the firmware
+        // will say so if it lands on something else.
+        .or_else(|| bundle.variants().first())
+        .map(|variant| variant.id.clone());
+
     Ok(FirmwareStatus {
         port,
         bundled_build: bundle.source_revision.clone(),
+        board,
+        recommended_variant_id,
         variants: bundle
             .variants()
             .iter()
             .map(|variant| FirmwareVariantSummary {
                 id: variant.id.clone(),
                 label: variant.label.clone(),
+                panel: variant.panel,
                 panel_revision: variant.panel_revision,
                 total_bytes: variant.total_bytes(),
             })
@@ -1522,6 +1629,7 @@ async fn scan_display_devices(
                 detail: "Scanning USB and Bluetooth Low Energy for an INK1 display…".into(),
                 last_frame_at: previous.last_frame_at.clone(),
                 last_ack_at: previous.last_ack_at.clone(),
+                panel: None,
             },
         );
     }
@@ -1540,6 +1648,7 @@ async fn scan_display_devices(
                 },
                 last_frame_at: previous.last_frame_at,
                 last_ack_at: previous.last_ack_at,
+                panel: None,
             }
         } else {
             DisplayConnectionStatus {
@@ -1553,6 +1662,7 @@ async fn scan_display_devices(
                 ),
                 last_frame_at: previous.last_frame_at,
                 last_ack_at: previous.last_ack_at,
+                panel: None,
             }
         };
         set_e213_transport_status(&app, status);
@@ -1584,6 +1694,7 @@ async fn connect_display_device(
             },
             last_frame_at: previous.last_frame_at,
             last_ack_at: previous.last_ack_at,
+            panel: None,
         },
     );
     let preferences = state.engine.get_preferences().await;
@@ -1652,11 +1763,17 @@ async fn get_eink_preview(
         .iter()
         .find(|channel| channel.id == requested)
         .ok_or_else(|| format!("No current channel exists for {requested:?}."))?;
+    // The preview is a picture of what the board is showing, so it is drawn on
+    // the board's own panel rather than on a nominal one.
+    let panel = state.display.panel();
     let frame = if channel.kind == ChannelKindDto::Bridge {
-        render_snapshot(&display_snapshot(&snapshot), &RenderConfig::default())
-            .map_err(|error| format!("Bridge preview render failed: {error}"))?
+        render_snapshot(
+            &display_snapshot(&snapshot),
+            &RenderConfig::default().for_panel(panel),
+        )
+        .map_err(|error| format!("Bridge preview render failed: {error}"))?
     } else {
-        render_channel_card(&channel_card(channel, &preferences, &snapshot))
+        render_channel_card(&channel_card(channel, &preferences, &snapshot), panel)
             .map_err(|error| format!("Channel preview render failed: {error}"))?
     };
     let png = preview_png_bytes(&frame)
@@ -1878,8 +1995,12 @@ async fn send_rotating_snapshot_to_display(
             None,
         );
     };
+    let panel = display.panel();
     let frame = if channel.kind == ChannelKindDto::Bridge {
-        match render_snapshot(&display_snapshot(snapshot), &RenderConfig::default()) {
+        match render_snapshot(
+            &display_snapshot(snapshot),
+            &RenderConfig::default().for_panel(panel),
+        ) {
             Ok(frame) => frame,
             Err(error) => {
                 return (
@@ -1902,6 +2023,7 @@ async fn send_rotating_snapshot_to_display(
         };
         match render_channel_card_with_radar(
             &channel_card(channel, preferences, snapshot),
+            panel,
             drawn.as_ref(),
         ) {
             Ok(frame) => frame,
@@ -1944,6 +2066,7 @@ async fn send_rendered_frame_to_display(
                 detail: "Connecting to the configured E213 display…".into(),
                 last_frame_at: None,
                 last_ack_at: None,
+                panel: None,
             },
         );
     }
@@ -1967,6 +2090,7 @@ async fn send_rendered_frame_to_display(
                 detail,
                 last_frame_at: Some(at.clone()),
                 last_ack_at: Some(at),
+                panel: None,
             };
             set_e213_transport_status(app, status);
             MutationResult {
@@ -1993,6 +2117,7 @@ async fn send_rendered_frame_to_display(
 
 fn connected_status(
     active: &ActiveDisplay,
+    panel: Option<PanelModel>,
     last_frame_at: Option<String>,
     last_ack_at: Option<String>,
     detail: &str,
@@ -2004,6 +2129,7 @@ fn connected_status(
         detail: detail.into(),
         last_frame_at,
         last_ack_at,
+        panel,
     }
 }
 
@@ -2018,6 +2144,7 @@ fn error_status(
         detail: error.into(),
         last_frame_at: None,
         last_ack_at: None,
+        panel: None,
     }
 }
 
@@ -2041,6 +2168,7 @@ fn unavailable_or_error_status(
         detail: format!("{error} · retrying in {retry_seconds}s"),
         last_frame_at: None,
         last_ack_at: None,
+        panel: None,
     }
 }
 
@@ -2359,6 +2487,7 @@ async fn run_display_worker(
                         .into(),
                     last_frame_at: None,
                     last_ack_at: None,
+                    panel: None,
                 },
             );
             match tokio::time::timeout(

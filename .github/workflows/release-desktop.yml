@@ -99,14 +99,14 @@ jobs:
             ~/.platformio/.cache
             ~/.platformio/packages
             ~/.platformio/platforms
-          key: pio-${{ runner.os }}-${{ hashFiles('firmware/e213/platformio.ini') }}
+          key: pio-${{ runner.os }}-${{ hashFiles('firmware/panel/platformio.ini') }}
           restore-keys: pio-${{ runner.os }}-
 
       - name: Install PlatformIO
         run: pip install --upgrade platformio==6.1.18
 
-      - name: Build E213 firmware
-        run: python3 firmware/e213/scripts/bundle_firmware.py
+      - name: Build panel firmware
+        run: python3 firmware/panel/scripts/bundle_firmware.py
 
       # `rustup target add --toolchain` assumes that toolchain is already
       # present and intact. When a runner image ships a partial 1.97.1 the step
@@ -205,14 +205,14 @@ jobs:
             ~/.platformio/.cache
             ~/.platformio/packages
             ~/.platformio/platforms
-          key: pio-${{ runner.os }}-${{ hashFiles('firmware/e213/platformio.ini') }}
+          key: pio-${{ runner.os }}-${{ hashFiles('firmware/panel/platformio.ini') }}
           restore-keys: pio-${{ runner.os }}-
 
       - name: Install PlatformIO
         run: pip install --upgrade platformio==6.1.18
 
-      - name: Build E213 firmware
-        run: python3 firmware/e213/scripts/bundle_firmware.py
+      - name: Build panel firmware
+        run: python3 firmware/panel/scripts/bundle_firmware.py
 
       - name: Install the pinned Rust toolchain
         run: |

@@ -3,10 +3,10 @@ use thiserror::Error;
 
 use crate::{
     ChannelAvailability, ChannelCard, ChannelCardError, ChannelFrame, ChannelUrgency, MonoFrame,
-    RadarFigure,
+    PanelModel, RADAR_FIGURE_WIDTH, RadarFigure,
     channel::display_ascii,
-    panel_grid::{self, CONTENT_RIGHT, MARGIN_LEFT},
-    panel_rail::{self, CONTENT_WIDTH},
+    panel::{MARGIN_LEFT, PanelGrid},
+    panel_grid, panel_rail,
     render_primitives::{
         LABEL_GLYPH_WIDTH, STRONG_GLYPH_WIDTH, fill, fit, label, large, line, outline, strong,
         text_width, wrap,
@@ -20,19 +20,51 @@ const HEADER_HEIGHT: u32 = 15;
 const TITLE_BASELINE: i32 = HEADER_HEIGHT as i32 + 2;
 const TITLE_RULE_Y: i32 = TITLE_BASELINE + 11;
 const HEADLINE_TOP: i32 = TITLE_RULE_Y + 2;
-const HEADLINE_HEIGHT: u32 = 42;
+/// Headline band on the smaller panel, and the floor on any panel.
+const HEADLINE_MIN_HEIGHT: u32 = 42;
 /// Leading for the display face in the headline band, and for the emphatic face
 /// when a figure has taken the width.
 const HEADLINE_LEADING: i32 = 20;
 const FIGURE_HEADLINE_LEADING: i32 = 14;
-const DETAIL_BASELINE: i32 = HEADLINE_TOP + HEADLINE_HEIGHT as i32 + 3;
-const DETAIL_RULE_Y: i32 = DETAIL_BASELINE + 11;
-const ACTION_TOP: i32 = DETAIL_RULE_Y + 3;
 const ACTION_HEIGHT: u32 = 16;
 
+/// The headline band takes the rows the larger panel adds, for the same reason
+/// the bridge panel's state band does: it is the band that carries the message,
+/// and it is the one that inverts.
+fn headline_height(grid: PanelGrid) -> u32 {
+    HEADLINE_MIN_HEIGHT + u32::try_from(grid.extra_rows().max(0)).unwrap_or(0)
+}
+
+fn detail_baseline(grid: PanelGrid) -> i32 {
+    HEADLINE_TOP + headline_height(grid) as i32 + 3
+}
+
+fn detail_rule_y(grid: PanelGrid) -> i32 {
+    detail_baseline(grid) + 11
+}
+
+fn action_top(grid: PanelGrid) -> i32 {
+    detail_rule_y(grid) + 3
+}
+
+/// Rows the headline band gained, split above and below its lines.
+///
+/// Without this the taller band pushed its slack entirely underneath the copy,
+/// and a one-line headline sat against the rule above it with a hole beneath —
+/// a band that looked broken rather than roomy.
+fn headline_slack(grid: PanelGrid) -> i32 {
+    grid.extra_rows().max(0) / 2
+}
+
 /// Left edge of the radar figure, and therefore the right edge of the headline
-/// when one is present.
-const RADAR_FIGURE_X: i32 = 132;
+/// when one is present. The figure is a fixed size on both panels — it is
+/// corroborating texture, and the extra width belongs to the words it
+/// corroborates — so it docks against the content edge and the headline keeps
+/// everything to its left.
+fn radar_figure_x(grid: PanelGrid) -> i32 {
+    grid.content_right() - i32::from(RADAR_FIGURE_WIDTH)
+}
+
 const RADAR_FIGURE_Y: i32 = HEADLINE_TOP;
 
 /// Failure to turn a generic channel card into pixels.
@@ -43,9 +75,12 @@ pub enum ChannelRenderError {
     Card(#[from] ChannelCardError),
 }
 
-/// Renders one generic signal card into a deterministic 250×122 one-bit frame.
-pub fn render_channel_card(card: &ChannelCard) -> Result<MonoFrame, ChannelRenderError> {
-    render_channel_card_with_radar(card, None)
+/// Renders one generic signal card into a deterministic one-bit frame.
+pub fn render_channel_card(
+    card: &ChannelCard,
+    panel: PanelModel,
+) -> Result<MonoFrame, ChannelRenderError> {
+    render_channel_card_with_radar(card, panel, None)
 }
 
 /// As [`render_channel_card`], with a radar composite beside the headline.
@@ -55,6 +90,7 @@ pub fn render_channel_card(card: &ChannelCard) -> Result<MonoFrame, ChannelRende
 /// still says everything it needs to in words.
 pub fn render_channel_card_with_radar(
     card: &ChannelCard,
+    panel: PanelModel,
     radar: Option<&RadarFigure>,
 ) -> Result<MonoFrame, ChannelRenderError> {
     card.validate()?;
@@ -64,14 +100,14 @@ pub fn render_channel_card_with_radar(
     // the width back.
     let radar = radar.filter(|figure| figure.is_worth_drawing());
 
-    let mut frame = MonoFrame::white();
+    let mut frame = MonoFrame::white(panel);
     draw_header(&mut frame, card);
     draw_title(&mut frame, card);
     draw_headline(&mut frame, card, radar.is_some());
     if let Some(figure) = radar {
         figure.draw(
             &mut frame,
-            u16::try_from(RADAR_FIGURE_X).unwrap_or(0),
+            u16::try_from(radar_figure_x(panel.grid())).unwrap_or(0),
             u16::try_from(RADAR_FIGURE_Y).unwrap_or(0),
         );
     }
@@ -83,8 +119,11 @@ pub fn render_channel_card_with_radar(
 }
 
 /// Frame-oriented spelling of [`render_channel_card`] for rotation schedulers.
-pub fn render_channel_frame(frame: &ChannelFrame) -> Result<MonoFrame, ChannelRenderError> {
-    render_channel_card(frame)
+pub fn render_channel_frame(
+    frame: &ChannelFrame,
+    panel: PanelModel,
+) -> Result<MonoFrame, ChannelRenderError> {
+    render_channel_card(frame, panel)
 }
 
 /// Identity strip: which channel, and how loudly it is speaking.
@@ -94,10 +133,18 @@ pub fn render_channel_frame(frame: &ChannelFrame) -> Result<MonoFrame, ChannelRe
 /// here and again in the tape along the bottom — on a panel with roughly six
 /// usable rows.
 fn draw_header(frame: &mut MonoFrame, card: &ChannelCard) {
-    fill(frame, 0, 0, CONTENT_WIDTH, HEADER_HEIGHT, BinaryColor::On);
+    let grid = frame.grid();
+    fill(
+        frame,
+        0,
+        0,
+        grid.content_width(),
+        HEADER_HEIGHT,
+        BinaryColor::On,
+    );
     let urgency = card.urgency.label();
-    let right_x = CONTENT_RIGHT - text_width(urgency, LABEL_GLYPH_WIDTH);
-    let channel_width = characters_between(MARGIN_LEFT, right_x);
+    let right_x = grid.content_right() - text_width(urgency, LABEL_GLYPH_WIDTH);
+    let channel_width = grid.characters_between(MARGIN_LEFT, right_x, LABEL_GLYPH_WIDTH);
     label(
         frame,
         MARGIN_LEFT,
@@ -110,44 +157,42 @@ fn draw_header(frame: &mut MonoFrame, card: &ChannelCard) {
 
 /// The subject, with the whole row to itself.
 fn draw_title(frame: &mut MonoFrame, card: &ChannelCard) {
+    let grid = frame.grid();
+    let characters = grid.characters_between(MARGIN_LEFT, grid.content_right(), LABEL_GLYPH_WIDTH);
     label(
         frame,
         MARGIN_LEFT,
         TITLE_BASELINE,
-        &fit(&card.title, characters_between(MARGIN_LEFT, CONTENT_RIGHT)),
+        &fit(&card.title, characters),
         BinaryColor::On,
     );
     line(
         frame,
         MARGIN_LEFT,
         TITLE_RULE_Y,
-        CONTENT_RIGHT,
+        grid.content_right(),
         TITLE_RULE_Y,
         BinaryColor::On,
     );
 }
 
-/// Characters of the label face that fit between two x positions.
-fn characters_between(left: i32, right: i32) -> usize {
-    usize::try_from(((right - left - 4).max(LABEL_GLYPH_WIDTH)) / LABEL_GLYPH_WIDTH).unwrap_or(1)
-}
-
 fn draw_headline(frame: &mut MonoFrame, card: &ChannelCard, has_radar: bool) {
+    let grid = frame.grid();
     let critical = card.urgency == ChannelUrgency::Critical;
     if critical {
         // The inversion stops at the figure. Radar drawn into a black band
         // would read inside out — more ink meaning less rain.
         let width = if has_radar {
-            u32::try_from(RADAR_FIGURE_X).unwrap_or(CONTENT_WIDTH)
+            u32::try_from(radar_figure_x(grid)).unwrap_or(grid.content_width())
         } else {
-            CONTENT_WIDTH
+            grid.content_width()
         };
         fill(
             frame,
             0,
             HEADLINE_TOP,
             width,
-            HEADLINE_HEIGHT,
+            headline_height(grid),
             BinaryColor::On,
         );
     }
@@ -168,14 +213,17 @@ fn draw_headline(frame: &mut MonoFrame, card: &ChannelCard, has_radar: bool) {
     if has_radar {
         let lines = wrap(
             &card.headline,
-            FIGURE_HEADLINE_COLUMNS,
+            figure_headline_columns(grid),
             FIGURE_HEADLINE_LINES,
         );
         for (index, value) in lines.iter().enumerate() {
             strong(
                 frame,
                 MARGIN_LEFT,
-                HEADLINE_TOP + 1 + i32::try_from(index).unwrap_or(0) * FIGURE_HEADLINE_LEADING,
+                HEADLINE_TOP
+                    + 1
+                    + headline_slack(grid)
+                    + i32::try_from(index).unwrap_or(0) * FIGURE_HEADLINE_LEADING,
                 value,
                 ink,
             );
@@ -183,12 +231,13 @@ fn draw_headline(frame: &mut MonoFrame, card: &ChannelCard, has_radar: bool) {
         return;
     }
 
-    let lines = wrap(&card.headline, 22, 2);
-    let first_y = if lines.len() == 1 {
-        HEADLINE_TOP + 10
-    } else {
-        HEADLINE_TOP + 1
-    };
+    let lines = wrap(&card.headline, headline_columns(grid), 2);
+    let first_y = headline_slack(grid)
+        + if lines.len() == 1 {
+            HEADLINE_TOP + 10
+        } else {
+            HEADLINE_TOP + 1
+        };
     for (index, value) in lines.iter().enumerate() {
         large(
             frame,
@@ -202,25 +251,32 @@ fn draw_headline(frame: &mut MonoFrame, card: &ChannelCard, has_radar: bool) {
 
 /// Headline budget on a card carrying a figure, derived from the gap the figure
 /// leaves and the face that fills it.
-const FIGURE_HEADLINE_COLUMNS: usize =
-    ((RADAR_FIGURE_X - MARGIN_LEFT - 4) / STRONG_GLYPH_WIDTH) as usize;
+fn figure_headline_columns(grid: PanelGrid) -> usize {
+    usize::try_from((radar_figure_x(grid) - MARGIN_LEFT - 4).max(0) / STRONG_GLYPH_WIDTH)
+        .unwrap_or(1)
+}
+/// Headline budget on a card with the full width to itself, at the display face.
+fn headline_columns(grid: PanelGrid) -> usize {
+    grid.characters_between(MARGIN_LEFT, grid.content_right(), 10)
+}
 /// Three rows of the emphatic face fit the headline band exactly.
 const FIGURE_HEADLINE_LINES: usize = 3;
 
 fn draw_detail(frame: &mut MonoFrame, card: &ChannelCard) {
+    let grid = frame.grid();
     label(
         frame,
         DETAIL_TEXT_X,
-        DETAIL_BASELINE,
-        &fit(&card.detail, DETAIL_CHARACTERS),
+        detail_baseline(grid),
+        &fit(&card.detail, detail_characters(grid)),
         BinaryColor::On,
     );
     line(
         frame,
         MARGIN_LEFT,
-        DETAIL_RULE_Y,
-        CONTENT_RIGHT,
-        DETAIL_RULE_Y,
+        detail_rule_y(grid),
+        grid.content_right(),
+        detail_rule_y(grid),
         BinaryColor::On,
     );
 }
@@ -236,14 +292,16 @@ fn draw_detail(frame: &mut MonoFrame, card: &ChannelCard) {
 /// of six, which left the most urgent card on the panel with the least internal
 /// hierarchy.
 fn draw_action(frame: &mut MonoFrame, card: &ChannelCard) {
+    let grid = frame.grid();
+    let top = action_top(grid);
     let headline_owns_emphasis = card.urgency == ChannelUrgency::Critical;
     let inverse = card.urgency.is_interrupting() && !headline_owns_emphasis;
     if inverse {
         fill(
             frame,
             MARGIN_LEFT,
-            ACTION_TOP,
-            ACTION_WIDTH,
+            top,
+            action_width(grid),
             ACTION_HEIGHT,
             BinaryColor::On,
         );
@@ -251,8 +309,8 @@ fn draw_action(frame: &mut MonoFrame, card: &ChannelCard) {
         outline(
             frame,
             MARGIN_LEFT,
-            ACTION_TOP,
-            ACTION_WIDTH,
+            top,
+            action_width(grid),
             ACTION_HEIGHT,
             if headline_owns_emphasis { 2 } else { 1 },
         );
@@ -260,21 +318,14 @@ fn draw_action(frame: &mut MonoFrame, card: &ChannelCard) {
             // One solid registration edge, which is the system's own mark for a
             // state. The two hairlines this replaces read at panel scale as a
             // stray artefact or a pause glyph rather than as advisory.
-            fill(
-                frame,
-                MARGIN_LEFT,
-                ACTION_TOP,
-                3,
-                ACTION_HEIGHT,
-                BinaryColor::On,
-            );
+            fill(frame, MARGIN_LEFT, top, 3, ACTION_HEIGHT, BinaryColor::On);
         }
     }
     strong(
         frame,
         ACTION_TEXT_X,
-        ACTION_TOP + 1,
-        &fit(&card.action, ACTION_CHARACTERS),
+        top + 1,
+        &fit(&card.action, action_characters(grid)),
         if inverse {
             BinaryColor::Off
         } else {
@@ -287,16 +338,23 @@ fn draw_action(frame: &mut MonoFrame, card: &ChannelCard) {
 /// gap rather than from `characters_between`, which reserves a trailing column
 /// for a right-aligned value this row does not have.
 const DETAIL_TEXT_X: i32 = MARGIN_LEFT + 1;
-const DETAIL_CHARACTERS: usize = ((CONTENT_RIGHT - DETAIL_TEXT_X) / LABEL_GLYPH_WIDTH) as usize;
+
+fn detail_characters(grid: PanelGrid) -> usize {
+    usize::try_from((grid.content_right() - DETAIL_TEXT_X).max(0) / LABEL_GLYPH_WIDTH).unwrap_or(1)
+}
 
 /// Width of the action box, from the left margin to the content edge.
-const ACTION_WIDTH: u32 = (CONTENT_RIGHT - MARGIN_LEFT) as u32;
+fn action_width(grid: PanelGrid) -> u32 {
+    u32::try_from((grid.content_right() - MARGIN_LEFT).max(0)).unwrap_or(0)
+}
 /// Left edge of the action line, clear of the advisory registration rule.
 const ACTION_TEXT_X: i32 = MARGIN_LEFT + 9;
 /// Characters the action line fits, derived rather than guessed: a wider face
 /// buys legible letterforms and costs budget, and the box must win that trade
 /// by truncating rather than by printing over its own border.
-const ACTION_CHARACTERS: usize = ((CONTENT_RIGHT - ACTION_TEXT_X) / STRONG_GLYPH_WIDTH) as usize;
+fn action_characters(grid: PanelGrid) -> usize {
+    usize::try_from((grid.content_right() - ACTION_TEXT_X).max(0) / STRONG_GLYPH_WIDTH).unwrap_or(1)
+}
 
 /// Bottom tape: whether this reading can be trusted, and how old it is.
 ///
@@ -355,6 +413,11 @@ mod tests {
     use crate::render_primitives::TRUNCATION_MARK;
     use crate::{ChannelKind, ChannelSource, radar_figure_from_png};
 
+    /// The panel a single-geometry assertion is made against. Anything that
+    /// depends on the layout rather than on the content is checked on every
+    /// panel instead.
+    const PANEL: PanelModel = PanelModel::E213;
+
     fn card(kind: ChannelKind, urgency: ChannelUrgency) -> ChannelCard {
         ChannelCard::new(
             kind,
@@ -370,60 +433,78 @@ mod tests {
 
     /// The grid has to stay a grid. Every band is derived from the one above
     /// it, and the point of that is that a change which would overlap two rows
-    /// fails here rather than shipping as text printed over a rule.
+    /// fails here rather than shipping as text printed over a rule. Checked on
+    /// every panel, because a band that fits one and collides on the other is
+    /// exactly the defect a second geometry introduces.
     #[test]
     fn no_band_overlaps_the_one_below_it() {
-        let rows: [(&str, i32, i32); 5] = [
-            ("header", 0, HEADER_HEIGHT as i32),
-            ("title", TITLE_BASELINE, TITLE_RULE_Y),
-            (
-                "headline",
-                HEADLINE_TOP,
-                HEADLINE_TOP + HEADLINE_HEIGHT as i32,
-            ),
-            ("detail", DETAIL_BASELINE, DETAIL_RULE_Y),
-            ("action", ACTION_TOP, ACTION_TOP + ACTION_HEIGHT as i32),
-        ];
-        for pair in rows.windows(2) {
-            let (name, _, ends) = pair[0];
-            let (next, starts, _) = pair[1];
+        for model in PanelModel::ALL {
+            let grid = model.grid();
+            let rows: [(&str, i32, i32); 5] = [
+                ("header", 0, HEADER_HEIGHT as i32),
+                ("title", TITLE_BASELINE, TITLE_RULE_Y),
+                (
+                    "headline",
+                    HEADLINE_TOP,
+                    HEADLINE_TOP + headline_height(grid) as i32,
+                ),
+                ("detail", detail_baseline(grid), detail_rule_y(grid)),
+                (
+                    "action",
+                    action_top(grid),
+                    action_top(grid) + ACTION_HEIGHT as i32,
+                ),
+            ];
+            for pair in rows.windows(2) {
+                let (name, _, ends) = pair[0];
+                let (next, starts, _) = pair[1];
+                assert!(
+                    ends <= starts,
+                    "{model:?}: {name} ends at {ends} but {next} starts at {starts}"
+                );
+            }
+            let (_, _, action_ends) = rows[4];
             assert!(
-                ends <= starts,
-                "{name} ends at {ends} but {next} starts at {starts}"
+                action_ends <= grid.tape_top(),
+                "{model:?}: the action box runs into the tape at {}",
+                grid.tape_top()
             );
         }
-        let (_, _, action_ends) = rows[4];
-        assert!(
-            action_ends <= panel_grid::TAPE_TOP,
-            "the action box runs into the tape at {}",
-            panel_grid::TAPE_TOP
-        );
     }
 
     #[test]
     fn every_builtin_channel_renders_a_physical_frame() {
-        for kind in [
-            ChannelKind::Weather,
-            ChannelKind::OfficialAlert,
-            ChannelKind::Tropical,
-            ChannelKind::News,
-            ChannelKind::Earthquake,
-            ChannelKind::Markets,
-        ] {
-            let frame = render_channel_card(&card(kind, ChannelUrgency::Advisory)).unwrap();
+        for (model, kind) in PanelModel::ALL.into_iter().flat_map(|model| {
+            [
+                ChannelKind::Weather,
+                ChannelKind::OfficialAlert,
+                ChannelKind::Tropical,
+                ChannelKind::News,
+                ChannelKind::Earthquake,
+                ChannelKind::Markets,
+            ]
+            .map(|kind| (model, kind))
+        }) {
+            let frame = render_channel_card(&card(kind, ChannelUrgency::Advisory), model).unwrap();
             assert!(frame.black_pixel_count() > 1_000);
-            assert!(frame.black_pixel_count() < 250 * 122);
+            assert!(
+                frame.black_pixel_count()
+                    < usize::from(model.width()) * usize::from(model.height())
+            );
         }
     }
 
     #[test]
     fn urgency_levels_have_materially_distinct_pixels() {
         let routine =
-            render_channel_card(&card(ChannelKind::Weather, ChannelUrgency::Routine)).unwrap();
+            render_channel_card(&card(ChannelKind::Weather, ChannelUrgency::Routine), PANEL)
+                .unwrap();
         let urgent =
-            render_channel_card(&card(ChannelKind::Weather, ChannelUrgency::Urgent)).unwrap();
+            render_channel_card(&card(ChannelKind::Weather, ChannelUrgency::Urgent), PANEL)
+                .unwrap();
         let critical =
-            render_channel_card(&card(ChannelKind::Weather, ChannelUrgency::Critical)).unwrap();
+            render_channel_card(&card(ChannelKind::Weather, ChannelUrgency::Critical), PANEL)
+                .unwrap();
         assert_ne!(routine.packed(), urgent.packed());
         assert_ne!(urgent.packed(), critical.packed());
         assert!(critical.black_pixel_count() > routine.black_pixel_count());
@@ -436,8 +517,8 @@ mod tests {
         first.headline = format!("{} X", "LONG ".repeat(30));
         second.headline = format!("{} Y", "LONG ".repeat(30));
         assert_eq!(
-            render_channel_card(&first).unwrap(),
-            render_channel_card(&second).unwrap()
+            render_channel_card(&first, PANEL).unwrap(),
+            render_channel_card(&second, PANEL).unwrap()
         );
     }
 
@@ -445,9 +526,14 @@ mod tests {
     fn long_unbroken_headlines_do_not_overrun_the_panel() {
         let mut value = card(ChannelKind::Tropical, ChannelUrgency::Critical);
         value.headline = "SUPERCALIFRAGILISTICEXPIALIDOCIOUSSTORMSIGNAL".into();
-        let frame = render_channel_card(&value).unwrap();
-        assert!(frame.black_pixel_count() > 1_000);
-        assert!(frame.black_pixel_count() < 250 * 122);
+        for model in PanelModel::ALL {
+            let frame = render_channel_card(&value, model).unwrap();
+            assert!(frame.black_pixel_count() > 1_000);
+            assert!(
+                frame.black_pixel_count()
+                    < usize::from(model.width()) * usize::from(model.height())
+            );
+        }
     }
 
     #[test]
@@ -459,7 +545,7 @@ mod tests {
             let mut value = card(ChannelKind::OfficialAlert, ChannelUrgency::Routine);
             value.availability = availability;
             value.source = ChannelSource::unavailable("NWS");
-            assert!(render_channel_card(&value).is_ok());
+            assert!(render_channel_card(&value, PANEL).is_ok());
         }
     }
 
@@ -467,8 +553,8 @@ mod tests {
     fn frame_alias_uses_the_same_renderer_contract() {
         let frame: ChannelFrame = card(ChannelKind::Markets, ChannelUrgency::Routine);
         assert_eq!(
-            render_channel_frame(&frame).unwrap(),
-            render_channel_card(&frame).unwrap()
+            render_channel_frame(&frame, PANEL).unwrap(),
+            render_channel_card(&frame, PANEL).unwrap()
         );
     }
 
@@ -505,9 +591,9 @@ mod tests {
     fn a_channel_card_never_prints_the_feed_that_produced_it() {
         let mut card = card(ChannelKind::Weather, ChannelUrgency::Advisory);
         card.source.name = "SOME FEED NAME".into();
-        let with_name = render_channel_card(&card).unwrap();
+        let with_name = render_channel_card(&card, PANEL).unwrap();
         card.source.name = "AN ENTIRELY DIFFERENT FEED".into();
-        let with_other = render_channel_card(&card).unwrap();
+        let with_other = render_channel_card(&card, PANEL).unwrap();
         assert_eq!(
             with_name.packed(),
             with_other.packed(),
@@ -536,12 +622,23 @@ mod tests {
     #[test]
     fn a_radar_card_stays_inside_the_panel_and_leaves_the_words_room() {
         let card = card(ChannelKind::Weather, ChannelUrgency::Advisory);
-        let with_radar = render_channel_card_with_radar(&card, Some(&wet_figure())).unwrap();
-        let without = render_channel_card(&card).unwrap();
-        assert_ne!(with_radar, without);
-        // Ink in the figure's box, and none where the headline still lives.
-        assert!(with_radar.black_pixel_count() > without.black_pixel_count());
-        assert!((30..72).any(|y| (132..228).any(|x| with_radar.is_black(x, y))));
+        for model in PanelModel::ALL {
+            let grid = model.grid();
+            let with_radar =
+                render_channel_card_with_radar(&card, model, Some(&wet_figure())).unwrap();
+            let without = render_channel_card(&card, model).unwrap();
+            assert_ne!(with_radar, without);
+            // Ink in the figure's box, wherever that box sits on this panel.
+            assert!(with_radar.black_pixel_count() > without.black_pixel_count());
+            let left = u16::try_from(radar_figure_x(grid)).unwrap();
+            let right = u16::try_from(grid.content_right()).unwrap();
+            let bottom = u16::try_from(HEADLINE_TOP + headline_height(grid) as i32).unwrap();
+            assert!(
+                (HEADLINE_TOP as u16..bottom)
+                    .any(|y| (left..right).any(|x| with_radar.is_black(x, y))),
+                "{model:?}: the figure drew nothing in its own box"
+            );
+        }
     }
 
     /// An empty sky costs the headline nothing. The figure is dropped and the
@@ -559,8 +656,8 @@ mod tests {
         let empty = radar_figure_from_png(&bytes).unwrap();
         let card = card(ChannelKind::Weather, ChannelUrgency::Advisory);
         assert_eq!(
-            render_channel_card_with_radar(&card, Some(&empty)).unwrap(),
-            render_channel_card(&card).unwrap()
+            render_channel_card_with_radar(&card, PANEL, Some(&empty)).unwrap(),
+            render_channel_card(&card, PANEL).unwrap()
         );
     }
 
@@ -570,14 +667,39 @@ mod tests {
     #[test]
     fn a_critical_card_does_not_invert_the_radar() {
         let card = card(ChannelKind::Weather, ChannelUrgency::Critical);
-        let frame = render_channel_card_with_radar(&card, Some(&wet_figure())).unwrap();
-        // The band is black to the left of the figure...
-        assert!(frame.is_black(20, 50));
-        // ...and the figure's own box is not solid.
-        let black = (30..72)
-            .flat_map(|y| (132..228).map(move |x| (x, y)))
-            .filter(|(x, y)| frame.is_black(*x, *y))
-            .count();
-        assert!(black > 0 && black < 96 * 42, "{black} of {}", 96 * 42);
+        for model in PanelModel::ALL {
+            let grid = model.grid();
+            let frame = render_channel_card_with_radar(&card, model, Some(&wet_figure())).unwrap();
+            // The band is a black field to the left of the figure, carrying
+            // white letters. Measured as a field rather than sampled at one
+            // pixel, which only says where a glyph happens to fall.
+            let band_rows = HEADLINE_TOP as u16
+                ..u16::try_from(HEADLINE_TOP + headline_height(grid) as i32).unwrap();
+            let words = u16::try_from(radar_figure_x(grid)).unwrap();
+            let (ink, total) = band_rows
+                .clone()
+                .flat_map(|y| (0..words).map(move |x| (x, y)))
+                .fold((0usize, 0usize), |(ink, total), (x, y)| {
+                    (ink + usize::from(frame.is_black(x, y)), total + 1)
+                });
+            assert!(
+                ink * 10 > total * 6,
+                "{model:?}: the critical headline band is not an inverted field ({ink}/{total})"
+            );
+            // ...and the figure's own box is not solid.
+            let left = u16::try_from(radar_figure_x(grid)).unwrap();
+            let right = u16::try_from(grid.content_right()).unwrap();
+            let bottom = u16::try_from(HEADLINE_TOP + headline_height(grid) as i32).unwrap();
+            let black = (HEADLINE_TOP as u16..bottom)
+                .flat_map(|y| (left..right).map(move |x| (x, y)))
+                .filter(|(x, y)| frame.is_black(*x, *y))
+                .count();
+            let box_pixels =
+                usize::from(RADAR_FIGURE_WIDTH) * usize::from(crate::RADAR_FIGURE_HEIGHT);
+            assert!(
+                black > 0 && black < box_pixels,
+                "{model:?}: {black} of {box_pixels}"
+            );
+        }
     }
 }

@@ -7,12 +7,15 @@
 use std::path::PathBuf;
 
 use bridgestatus_eink::{
-    ChannelAvailability, ChannelCard, ChannelKind, ChannelSource, ChannelUrgency, HEIGHT,
-    MonoFrame, RADAR_FIGURE_HEIGHT, RADAR_FIGURE_WIDTH, RadarFigure, WIDTH, radar_figure_from_png,
+    ChannelAvailability, ChannelCard, ChannelKind, ChannelSource, ChannelUrgency, MonoFrame,
+    PanelModel, RADAR_FIGURE_HEIGHT, RADAR_FIGURE_WIDTH, RadarFigure, radar_figure_from_png,
     render_channel_card_with_radar, series_figure,
 };
 use image::{GrayImage, Luma};
 
+/// Figure cards are reviewed on the smaller panel: it is the tighter fit, so a
+/// figure that leaves the words room here leaves them room on the E290 too.
+const PANEL: PanelModel = PanelModel::E213;
 const SCALE: u32 = 3;
 const GUTTER: u32 = 10;
 const COLUMNS: u32 = 2;
@@ -91,14 +94,15 @@ fn card(
             action,
             ChannelSource::aged("Yahoo Finance", 42),
         ),
+        PANEL,
         figure,
     )
     .expect("fixture card is valid")
 }
 
 fn sheet(frames: &[(String, MonoFrame)], path: PathBuf) {
-    let cell_w = u32::from(WIDTH) * SCALE;
-    let cell_h = u32::from(HEIGHT) * SCALE;
+    let cell_w = u32::from(PANEL.width()) * SCALE;
+    let cell_h = u32::from(PANEL.height()) * SCALE;
     let rows = (frames.len() as u32).div_ceil(COLUMNS);
     let mut sheet = GrayImage::from_pixel(
         COLUMNS * cell_w + (COLUMNS + 1) * GUTTER,
@@ -131,9 +135,9 @@ fn figure_plate(figures: &[(String, RadarFigure)], path: PathBuf) {
         figures.len() as u32 * (cell_h + GUTTER) + GUTTER,
         Luma([150]),
     );
-    let mut frame = MonoFrame::white();
+    let mut frame = MonoFrame::white(PANEL);
     for (index, (name, figure)) in figures.iter().enumerate() {
-        frame = MonoFrame::white();
+        frame = MonoFrame::white(PANEL);
         figure.draw(&mut frame, 0, 0);
         let oy = GUTTER + index as u32 * (cell_h + GUTTER);
         for y in 0..cell_h {

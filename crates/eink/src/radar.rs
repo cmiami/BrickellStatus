@@ -274,6 +274,7 @@ fn floyd_steinberg(image: &image::GrayImage) -> Vec<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PanelModel;
 
     fn png(build: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
         let mut image = image::RgbaImage::new(64, 64);
@@ -357,7 +358,7 @@ mod tests {
             usize::from(RADAR_FIGURE_WIDTH) * usize::from(RADAR_FIGURE_HEIGHT)
         );
 
-        let mut frame = MonoFrame::white();
+        let mut frame = MonoFrame::white(PanelModel::E213);
         figure.draw(&mut frame, 132, 30);
         // Nothing outside the box, in either direction.
         assert!(!frame.is_black(131, 50));
@@ -463,6 +464,7 @@ pub fn series_figure(values: &[f64], reference: Option<f64>) -> Option<RadarFigu
 #[cfg(test)]
 mod figure_tests {
     use super::*;
+    use crate::PanelModel;
 
     /// A square source squashed into a 96x42 box turns a circular cell into a
     /// wide ellipse, so rain approaching from the north looked nearer than rain
@@ -528,7 +530,7 @@ mod figure_tests {
     fn only_a_composite_centred_on_the_reader_carries_the_mark() {
         let solid = vec![true; usize::from(RADAR_FIGURE_WIDTH) * usize::from(RADAR_FIGURE_HEIGHT)];
         let pale = |figure: &RadarFigure| {
-            let mut frame = MonoFrame::white();
+            let mut frame = MonoFrame::white(PanelModel::E213);
             figure.draw(&mut frame, 0, 0);
             (0..RADAR_FIGURE_WIDTH)
                 .flat_map(|x| (0..RADAR_FIGURE_HEIGHT).map(move |y| (x, y)))
@@ -584,6 +586,7 @@ mod figure_tests {
 #[cfg(test)]
 mod series_tests {
     use super::*;
+    use crate::PanelModel;
 
     fn rows_with_ink(figure: &RadarFigure) -> Vec<usize> {
         (0..usize::from(RADAR_FIGURE_HEIGHT))
@@ -668,7 +671,7 @@ mod series_tests {
     #[test]
     fn the_figure_fits_the_same_box_radar_does() {
         let figure = series_figure(&[1.0, 5.0, 2.0, 9.0], None).unwrap();
-        let mut frame = MonoFrame::white();
+        let mut frame = MonoFrame::white(PanelModel::E213);
         figure.draw(&mut frame, 132, 30);
         assert!(!frame.is_black(131, 50));
         assert!(!frame.is_black(228, 50));

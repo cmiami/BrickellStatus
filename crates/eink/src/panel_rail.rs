@@ -10,20 +10,18 @@
 //! The rail answers three questions in fixed positions: which channel this is
 //! (the code), where this reading sits on its own ladder (the slot), and whether
 //! it is allowed to interrupt (the hatch).
+//!
+//! Its width is the same on every panel and its marks are placed from its own
+//! left edge, so the larger board moves the rail outward rather than stretching
+//! it. A ruler that grows with the sheet is not a ruler.
 
 use embedded_graphics::pixelcolor::BinaryColor;
 
 use crate::{
-    HEIGHT, MonoFrame,
+    MonoFrame,
+    panel::PanelGrid,
     render_primitives::{fill, fit, line, strong},
 };
-
-/// Left edge of the rail, and therefore the right edge of everything else.
-pub(crate) const RAIL_LEFT: i32 = 232;
-/// Width of the rail, taking it exactly to the panel's right edge.
-pub(crate) const RAIL_WIDTH: u32 = 18;
-/// Drawing width available to panel content.
-pub(crate) const CONTENT_WIDTH: u32 = RAIL_LEFT as u32;
 
 /// Baseline of the first character of the two-letter code.
 const CODE_TOP: i32 = 2;
@@ -34,12 +32,16 @@ const CODE_RULE_Y: i32 = 29;
 
 /// Ladder region, between the code rule and the interrupt hatch.
 const LADDER_TOP: i32 = 36;
-const LADDER_BOTTOM: i32 = 92;
+/// Distance from the bottom of the panel at which the ladder stops, leaving the
+/// hatch its room. Measured from the edge rather than fixed at a row, so the
+/// taller panel lengthens the ladder region instead of crowding the hatch.
+const LADDER_BOTTOM_INSET: i32 = 30;
 /// Vertical pitch between ladder rungs.
 const SLOT_PITCH: i32 = 10;
 
-/// First hatch stroke, and the step between strokes.
-const HATCH_TOP: i32 = 96;
+/// First hatch stroke, likewise measured up from the bottom edge, and the step
+/// between strokes.
+const HATCH_TOP_INSET: i32 = 26;
 const HATCH_PITCH: usize = 7;
 /// Vertical run of one hatch stroke.
 const HATCH_RISE: i32 = 5;
@@ -58,48 +60,59 @@ pub(crate) fn draw_rail(
     slots: usize,
     interrupting: bool,
 ) {
+    let grid = frame.grid();
+    let rail = grid.rail_left();
     fill(
         frame,
-        RAIL_LEFT,
+        rail,
         0,
-        RAIL_WIDTH,
-        u32::from(HEIGHT),
+        crate::panel::RAIL_WIDTH,
+        u32::from(grid.height),
         BinaryColor::On,
     );
 
     for (index, character) in fit(code, 2).chars().take(2).enumerate() {
         strong(
             frame,
-            237,
+            rail + 5,
             CODE_TOP + i32::try_from(index).unwrap_or(0) * CODE_PITCH,
             &character.to_string(),
             BinaryColor::Off,
         );
     }
-    line(frame, 235, CODE_RULE_Y, 247, CODE_RULE_Y, BinaryColor::Off);
+    line(
+        frame,
+        rail + 3,
+        CODE_RULE_Y,
+        rail + 15,
+        CODE_RULE_Y,
+        BinaryColor::Off,
+    );
 
-    draw_ladder(frame, active, slots);
+    draw_ladder(frame, grid, active, slots);
 
     if interrupting {
-        draw_hatch(frame);
+        draw_hatch(frame, grid);
     }
 }
 
 /// The ladder, centred in its region so a four-rung and a five-rung panel share
 /// an optical centre rather than a shared starting pixel.
-fn draw_ladder(frame: &mut MonoFrame, active: usize, slots: usize) {
+fn draw_ladder(frame: &mut MonoFrame, grid: PanelGrid, active: usize, slots: usize) {
+    let rail = grid.rail_left();
+    let bottom = i32::from(grid.height) - LADDER_BOTTOM_INSET;
     let slots = slots.max(1);
     let span = i32::try_from(slots.saturating_sub(1)).unwrap_or(0) * SLOT_PITCH;
-    let top = LADDER_TOP + ((LADDER_BOTTOM - LADDER_TOP) - span) / 2;
+    let top = LADDER_TOP + ((bottom - LADDER_TOP) - span) / 2;
 
     for index in 0..slots {
         let y = top + i32::try_from(index).unwrap_or(0) * SLOT_PITCH;
         // Alternating rung lengths give the ladder a readable rhythm rather
         // than a row of identical dashes.
         let length = if index % 2 == 0 { 10 } else { 6 };
-        line(frame, 248 - length, y, 248, y, BinaryColor::Off);
+        line(frame, rail + 16 - length, y, rail + 16, y, BinaryColor::Off);
         if index == active {
-            fill(frame, 234, y - 2, 14, 5, BinaryColor::Off);
+            fill(frame, rail + 2, y - 2, 14, 5, BinaryColor::Off);
         }
     }
 }
@@ -109,21 +122,37 @@ fn draw_ladder(frame: &mut MonoFrame, active: usize, slots: usize) {
 /// Bounded to strokes that land entirely on the panel. Both renderers used to
 /// step past the last drawable row, so the drawing layer clipped the final
 /// stroke and the hatch tapered out instead of ending on the panel edge.
-fn draw_hatch(frame: &mut MonoFrame) {
-    let last = i32::from(HEIGHT) - 1 - HATCH_RISE;
-    for y in (HATCH_TOP..=last).step_by(HATCH_PITCH) {
-        line(frame, 233, y + HATCH_RISE, 240, y, BinaryColor::Off);
-        line(frame, 241, y + HATCH_RISE, 249, y, BinaryColor::Off);
+fn draw_hatch(frame: &mut MonoFrame, grid: PanelGrid) {
+    let rail = grid.rail_left();
+    let first = i32::from(grid.height) - HATCH_TOP_INSET;
+    let last = i32::from(grid.height) - 1 - HATCH_RISE;
+    for y in (first..=last).step_by(HATCH_PITCH) {
+        line(
+            frame,
+            rail + 1,
+            y + HATCH_RISE,
+            rail + 8,
+            y,
+            BinaryColor::Off,
+        );
+        line(
+            frame,
+            rail + 9,
+            y + HATCH_RISE,
+            rail + 17,
+            y,
+            BinaryColor::Off,
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::WIDTH;
+    use crate::PanelModel;
 
-    fn rail(active: usize, slots: usize, interrupting: bool) -> MonoFrame {
-        let mut frame = MonoFrame::white();
+    fn rail(model: PanelModel, active: usize, slots: usize, interrupting: bool) -> MonoFrame {
+        let mut frame = MonoFrame::white(model);
         draw_rail(&mut frame, "BR", active, slots, interrupting);
         frame
     }
@@ -132,44 +161,75 @@ mod tests {
     /// its final stroke was clipped and the mark tapered out.
     #[test]
     fn the_interrupt_hatch_lands_entirely_on_the_panel() {
-        let interrupting = rail(0, 4, true);
-        let quiet = rail(0, 4, false);
-        assert_ne!(interrupting.packed(), quiet.packed(), "the hatch must draw");
+        for model in PanelModel::ALL {
+            let interrupting = rail(model, 0, 4, true);
+            let quiet = rail(model, 0, 4, false);
+            assert_ne!(
+                interrupting.packed(),
+                quiet.packed(),
+                "{model:?}: the hatch must draw"
+            );
 
-        // The last row the hatch reaches has to carry the same pair of strokes
-        // as the rows above it; a clipped stroke leaves a thinner last row.
-        let ink_at = |frame: &MonoFrame, y: u16| {
-            (RAIL_LEFT..i32::from(WIDTH))
-                .filter(|x| !frame.is_black(u16::try_from(*x).unwrap_or(0), y))
-                .count()
-        };
-        let bottom = i32::from(HEIGHT) - 1;
-        assert!(
-            ink_at(&interrupting, u16::try_from(bottom).unwrap_or(0)) == 0,
-            "the hatch must stop clear of the panel edge rather than being cut by it"
-        );
+            let grid = model.grid();
+            let ink_at = |frame: &MonoFrame, y: u16| {
+                (grid.rail_left()..i32::from(grid.width))
+                    .filter(|x| !frame.is_black(u16::try_from(*x).unwrap_or(0), y))
+                    .count()
+            };
+            let bottom = u16::try_from(i32::from(grid.height) - 1).unwrap_or(0);
+            assert!(
+                ink_at(&interrupting, bottom) == 0,
+                "{model:?}: the hatch must stop clear of the panel edge"
+            );
+        }
     }
 
     /// Both panels put the same reading at the same height even though their
     /// ladders have different rung counts.
     #[test]
     fn ladders_of_different_lengths_share_an_optical_centre() {
-        let centre = |slots: usize| {
-            let span = (slots - 1) as i32 * SLOT_PITCH;
-            LADDER_TOP + ((LADDER_BOTTOM - LADDER_TOP) - span) / 2 + span / 2
-        };
-        assert_eq!(
-            centre(4),
-            centre(5),
-            "a four-rung and a five-rung ladder must centre on the same row"
-        );
+        for model in PanelModel::ALL {
+            let grid = model.grid();
+            let bottom = i32::from(grid.height) - LADDER_BOTTOM_INSET;
+            let centre = |slots: usize| {
+                let span = (slots - 1) as i32 * SLOT_PITCH;
+                LADDER_TOP + ((bottom - LADDER_TOP) - span) / 2 + span / 2
+            };
+            assert_eq!(
+                centre(4),
+                centre(5),
+                "{model:?}: a four-rung and a five-rung ladder must centre together"
+            );
+        }
     }
 
     /// A panel that names no slot must still draw a rail rather than panicking
     /// or marking a rung that does not exist.
     #[test]
     fn an_out_of_range_slot_marks_nothing_and_still_draws() {
-        let frame = rail(99, 4, false);
-        assert!(frame.black_pixel_count() > 0);
+        for model in PanelModel::ALL {
+            assert!(rail(model, 99, 4, false).black_pixel_count() > 0);
+        }
+    }
+
+    /// The rail is the same object on both panels: same width, same marks, sat
+    /// against the right edge of whichever board it is on.
+    #[test]
+    fn the_rail_is_the_same_ruler_on_both_panels() {
+        let small = rail(PanelModel::E213, 1, 5, true);
+        let large = rail(PanelModel::E290, 1, 5, true);
+        let sample = |frame: &MonoFrame, y: u16| {
+            (0..crate::panel::RAIL_WIDTH as u16)
+                .map(|offset| {
+                    let x = u16::try_from(frame.grid().rail_left()).unwrap_or(0) + offset;
+                    frame.is_black(x, y)
+                })
+                .collect::<Vec<_>>()
+        };
+        // Rows above the ladder region carry the code block, which is placed
+        // from the top on both panels and must therefore be identical.
+        for y in 0..CODE_RULE_Y as u16 {
+            assert_eq!(sample(&small, y), sample(&large, y), "rail row {y}");
+        }
     }
 }

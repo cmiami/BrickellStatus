@@ -28,7 +28,7 @@ Import("env")  # noqa: F821  (PlatformIO injects this)
 # project directory is what PlatformIO does hand us, and git itself resolves the
 # rest, which also means no assumption about how deeply the firmware is nested.
 PROJECT_DIR = env.subst("$PROJECT_DIR")  # noqa: F821
-FIRMWARE_PATHS = ["firmware/e213/src", "firmware/e213/platformio.ini"]
+FIRMWARE_PATHS = ["firmware/panel/src", "firmware/panel/platformio.ini"]
 
 
 def _git(*args: str, cwd: str) -> str:

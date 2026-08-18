@@ -3,7 +3,7 @@
 use std::{fs, path::PathBuf};
 
 use bridgestatus_eink::{
-    ChannelAvailability, ChannelCard, ChannelKind, ChannelSource, ChannelUrgency,
+    ChannelAvailability, ChannelCard, ChannelKind, ChannelSource, ChannelUrgency, PanelModel,
     render_channel_card, save_preview_png, save_scaled_preview_png,
 };
 
@@ -44,9 +44,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     for (slug, card) in cards {
-        let frame = render_channel_card(&card)?;
-        save_preview_png(&frame, output.join(format!("{slug}.png")))?;
-        save_scaled_preview_png(&frame, output.join(format!("{slug}@4x.png")), 4)?;
+        for panel in PanelModel::ALL {
+            let panel_slug = panel.label().to_lowercase();
+            let frame = render_channel_card(&card, panel)?;
+            save_preview_png(&frame, output.join(format!("{slug}-{panel_slug}.png")))?;
+            save_scaled_preview_png(
+                &frame,
+                output.join(format!("{slug}-{panel_slug}@4x.png")),
+                4,
+            )?;
+        }
     }
 
     Ok(())

@@ -11,12 +11,16 @@ fn display_status_contract_matches_frontend() {
         detail: "ACK INK1".into(),
         last_frame_at: Some("2026-08-14T15:04:05Z".into()),
         last_ack_at: Some("2026-08-14T15:04:05Z".into()),
+        panel: Some(PanelModel::E290),
     };
     let value = serde_json::to_value(status).unwrap();
     assert_eq!(value["state"], "connected");
     assert_eq!(value["transport"], "ble");
     assert_eq!(value["deviceName"], "InkDock E213");
     assert_eq!(value["lastAckAt"], "2026-08-14T15:04:05Z");
+    // The panel travels with the status so the interface can name what was
+    // detected instead of naming the board this project started with.
+    assert_eq!(value["panel"], "e290");
 }
 
 #[test]

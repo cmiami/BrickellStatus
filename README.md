@@ -6,7 +6,7 @@
   <img alt="Rust 1.97.1" src="https://img.shields.io/badge/Rust-1.97.1-0F2A44?style=for-the-badge&logo=rust&logoColor=white" />
   <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-174F78?style=for-the-badge&logo=tauri&logoColor=white" />
   <img alt="Svelte 5" src="https://img.shields.io/badge/Svelte-5-F2A900?style=for-the-badge&logo=svelte&logoColor=white" />
-  <img alt="ESP32-S3" src="https://img.shields.io/badge/ESP32--S3-E213-46515B?style=for-the-badge&logo=espressif&logoColor=white" />
+  <img alt="ESP32-S3" src="https://img.shields.io/badge/ESP32--S3-E213%20%7C%20E290-46515B?style=for-the-badge&logo=espressif&logoColor=white" />
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-176B47?style=for-the-badge" />
 </p>
 
@@ -86,7 +86,7 @@ preferences.
 ## Running from source
 
 Requires Rust 1.97.1, Node 24, and npm 11.18.0. PlatformIO is optional and only
-needed to build the E213 firmware the app can flash.
+needed to build the panel firmware the app can flash.
 
 ```sh
 npm --prefix apps/console ci
@@ -102,7 +102,7 @@ Windows machine involved except for testing. The one-time toolchain setup and
 the QA protocol live in [`docs/WINDOWS_RELEASE.md`](docs/WINDOWS_RELEASE.md).
 
 `desktop:prepare` generates the three inputs the Tauri build needs — bundled
-license texts, the E213 firmware bundle, and the compiled frontend — and runs
+license texts, the panel firmware bundle, and the compiled frontend — and runs
 automatically before a build. Without PlatformIO the firmware bundle is written
 empty and the app reports that it ships no firmware.
 
@@ -110,7 +110,7 @@ empty and the app reports that it ships no firmware.
 
 `apps/console` is the SvelteKit UI, `apps/desktop/src-tauri` the desktop shell,
 `crates/` the engine (collectors, policy, storage, e-paper rendering), and
-`firmware/e213` the Arduino firmware for the display. [`DESIGN.md`](DESIGN.md)
+`firmware/panel` the Arduino firmware for the display. [`DESIGN.md`](DESIGN.md)
 covers the interface contract, [`PRODUCT.md`](PRODUCT.md) the product intent, and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) how to work on it.
 

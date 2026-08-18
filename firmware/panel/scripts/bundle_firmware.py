@@ -2,7 +2,7 @@
 
 Run from the repository root:
 
-    python3 firmware/e213/scripts/bundle_firmware.py [--skip-build]
+    python3 firmware/panel/scripts/bundle_firmware.py [--skip-build]
 
 Writes `apps/desktop/src-tauri/resources/firmware/` containing one directory per
 PlatformIO environment plus a `manifest.json` describing the flash layout.
@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-FIRMWARE_ROOT = REPOSITORY_ROOT / "firmware" / "e213"
+FIRMWARE_ROOT = REPOSITORY_ROOT / "firmware" / "panel"
 OUTPUT_ROOT = (
     REPOSITORY_ROOT / "apps" / "desktop" / "src-tauri" / "resources" / "firmware"
 )
@@ -44,20 +44,33 @@ LAYOUT = [
     ("0x10000", "firmware.bin"),
 ]
 
+# One build per panel the app can drive. `panel` is the board a build is for,
+# which the firmware's boot probe reports back so the app can tell whether it
+# wrote the right one. `panelRevision` only means anything on the E213, whose
+# two panel controllers are electrically indistinguishable and so remain the one
+# thing hardware cannot answer for itself.
 VARIANTS = [
-    {
-        "id": "vision-master-e213",
-        "label": "Vision Master E213 (original panel)",
-        "panelRevision": "original",
-    },
     {
         "id": "vision-master-e213-v11",
         "label": "Vision Master E213 (panel v1.1)",
+        "panel": "e213",
         "panelRevision": "v11",
+    },
+    {
+        "id": "vision-master-e213",
+        "label": "Vision Master E213 (original panel)",
+        "panel": "e213",
+        "panelRevision": "original",
+    },
+    {
+        "id": "vision-master-e290",
+        "label": "Vision Master E290",
+        "panel": "e290",
+        "panelRevision": None,
     },
 ]
 
-BUILD_ID_PATHS = ["firmware/e213/src", "firmware/e213/platformio.ini"]
+BUILD_ID_PATHS = ["firmware/panel/src", "firmware/panel/platformio.ini"]
 
 
 def git(*args: str) -> str:
@@ -175,7 +188,9 @@ def main() -> int:
         variants.append({**variant, "images": images})
 
     manifest = {
-        "schemaVersion": 1,
+        # 2: variants name the board they drive, because there is now more than
+        # one board and the app picks between them without asking.
+        "schemaVersion": 2,
         "chip": "esp32s3",
         "sourceRevision": source_revision(),
         "variants": variants,
