@@ -8,6 +8,7 @@ description = "Transactional delivery adapters for Tender's Log"
 [dependencies]
 async-trait.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

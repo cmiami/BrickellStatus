@@ -31,7 +31,10 @@ bounty SLA.
 
 ## Local data-at-rest boundary
 
-Meta tokens are stored only in the app-data credential file, with owner-only permissions on Unix.
+Meta tokens are stored only in the app-data credential file, with owner-only
+permissions on Unix and sealed with user-scope DPAPI on Windows, where the
+file also inherits the user-profile ACL (the owning user, SYSTEM, and
+Administrators).
 AISStream keys use that file or the gitignored local `.env` development file.
 Neither is intentionally written to preferences, SQLite, logs, diagnostics,
 screenshots, or Git.

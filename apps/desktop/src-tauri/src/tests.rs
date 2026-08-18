@@ -318,6 +318,46 @@ async fn local_secret_store_round_trips_without_os_vault_access() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_credentials_rest_encrypted_and_migrate_from_plaintext() {
+    let directory = std::env::temp_dir().join(format!("tenders-secret-test-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("credentials.json");
+
+    // A pre-DPAPI plaintext file still loads…
+    std::fs::write(&path, br#"{"whatsappToken":"legacy-token"}"#).unwrap();
+    let store = LocalSecretStore::new(path.clone());
+    assert_eq!(
+        store.whatsapp_token().await.unwrap().as_deref(),
+        Some("legacy-token")
+    );
+
+    // …and the next write re-envelopes the whole file without losing fields.
+    store
+        .store_aisstream_key("stream-key-value".into())
+        .await
+        .unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        raw.contains("dpapiCiphertext"),
+        "credentials must rest as a DPAPI envelope"
+    );
+    assert!(
+        !raw.contains("legacy-token") && !raw.contains("stream-key-value"),
+        "secrets must not rest in plaintext"
+    );
+    assert_eq!(
+        store.whatsapp_token().await.unwrap().as_deref(),
+        Some("legacy-token")
+    );
+    assert_eq!(
+        store.aisstream_key().await.unwrap().as_deref(),
+        Some("stream-key-value")
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 #[tokio::test]
 async fn credential_removal_gates_survive_a_runtime_restart() {
     let store = Store::in_memory().await.unwrap();

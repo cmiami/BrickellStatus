@@ -11,7 +11,7 @@
     <div>
       <h2 id="desktop-heading">Desktop notices</h2>
       <p>Native local notifications remain available when messaging is not configured or is offline.</p>
-      <small>Best-effort submission: macOS does not return a reliable displayed or read receipt.</small>
+      <small>Best-effort submission: the OS does not return a reliable displayed or read receipt.</small>
     </div>
     <span class="status-word" data-state={output?.state ?? 'offline'}>{output?.state ?? 'offline'}</span>
   </header>

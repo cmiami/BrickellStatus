@@ -25,7 +25,11 @@ futures = "0.3.31"
 image = { version = "0.25.8", default-features = false, features = ["png"] }
 jiff = { version = "0.2.32", features = ["serde"] }
 libsqlite3-sys = { version = "=0.37.0", features = ["bundled"] }
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "query", "gzip", "brotli"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "json", "query", "gzip", "brotli"] }
+# Provider-free rustls: the default aws-lc-sys provider needs a CMake/C build
+# that does not cross-compile to windows-msvc, so the desktop app installs
+# ring as the process-wide default at startup and every client resolves it.
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 scraper = "0.27.0"
 serialport = "4.9.0"
 serde = { version = "1.0.228", features = ["derive"] }

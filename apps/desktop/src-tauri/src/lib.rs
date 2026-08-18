@@ -7,7 +7,6 @@ use std::{
     collections::BTreeMap,
     fs,
     future::Future,
-    process::Command,
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicU32, AtomicU64, Ordering},
@@ -54,7 +53,7 @@ use sha2::{Digest, Sha256};
 use tauri::{
     AppHandle, Emitter, Manager, RunEvent, State, WindowEvent,
     menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::TrayIconBuilder,
+    tray::{TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_notification::NotificationExt;
 use tenders_storage::{IncidentRecord, OutboxLease, OutboxRecord, Store};
@@ -2180,7 +2179,13 @@ fn install_tray(app: &mut tauri::App) -> tauri::Result<()> {
             &quit_item,
         ],
     )?;
+    // macOS recolors the monochrome template glyph to match the menu bar;
+    // everywhere else the colored mark is required or the icon disappears
+    // against a dark taskbar.
+    #[cfg(target_os = "macos")]
     let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
+    #[cfg(not(target_os = "macos"))]
+    let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(tray_icon)
         .icon_as_template(cfg!(target_os = "macos"))
@@ -2188,6 +2193,13 @@ fn install_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .tooltip("Tender’s Log · E213 disconnected")
         .menu(&menu)
         .show_menu_on_left_click(true)
+        .on_tray_icon_event(|tray, event| {
+            // Double-click is only emitted on Windows, where it is the
+            // convention for opening a tray app's window.
+            if matches!(event, TrayIconEvent::DoubleClick { .. }) {
+                show_main_window(tray.app_handle());
+            }
+        })
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_OPEN_ID => show_main_window(app),
             MENU_QUIT_ID => {
@@ -2599,16 +2611,16 @@ fn open_external_url(url: String) -> Result<(), String> {
     if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
         return Err("Only credential-free HTTPS links can open outside the app.".into());
     }
-    Command::new("open")
-        .arg(parsed.as_str())
-        .spawn()
-        .map(|_| ())
+    tauri_plugin_opener::open_url(parsed.as_str(), None::<&str>)
         .map_err(|error| format!("The system browser could not open this link: {error}"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let _ = dotenvy::dotenv();
+    // Every TLS client in the process resolves the default rustls provider;
+    // it must be installed before the first collector builds a client.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

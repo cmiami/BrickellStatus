@@ -19,7 +19,11 @@ const outputDirectory = resolve(
   repositoryRoot,
   'apps/desktop/src-tauri/resources/licenses'
 );
-const cargoTargets = ['aarch64-apple-darwin', 'x86_64-apple-darwin'];
+const cargoTargets = [
+  'aarch64-apple-darwin',
+  'x86_64-apple-darwin',
+  'x86_64-pc-windows-msvc'
+];
 const candidateName = /^(licen[cs]e|copying|notice|copyright|patents|ofl)([._-].*)?$/i;
 const maxLicenseBytes = 2 * 1024 * 1024;
 

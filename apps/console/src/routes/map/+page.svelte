@@ -280,7 +280,7 @@
       stageResult(
         {
           id: `device:${position.timestamp}`,
-          label: 'This Mac’s location',
+          label: 'This computer’s location',
           latitude: Number(position.coords.latitude.toFixed(5)),
           longitude: Number(position.coords.longitude.toFixed(5)),
           timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
@@ -295,7 +295,7 @@
             : error.message
           : error instanceof Error
             ? error.message
-            : 'This Mac could not provide a location.';
+            : 'This computer could not provide a location.';
       searchError = message;
     } finally {
       locating = false;
@@ -388,7 +388,7 @@
         <button class="location-action" onclick={useDeviceLocation} disabled={locating}>
           <LocateFixed size={20} strokeWidth={1.5} aria-hidden="true" />
           <span>
-            <strong>{locating ? 'Asking this Mac' : 'Locate this Mac once'}</strong>
+            <strong>{locating ? 'Asking this computer' : 'Locate this computer once'}</strong>
             <small>Uses the OS permission prompt. No passive or background tracking.</small>
           </span>
         </button>
@@ -406,7 +406,7 @@
         <aside class="network-disclosure" aria-label="Location network disclosure">
           <Network size={17} strokeWidth={1.5} aria-hidden="true" />
           <div>
-            <strong>What leaves this Mac</strong>
+            <strong>What leaves this computer</strong>
             <p>
               Search text goes to Open-Meteo geocoding; the visible map requests OpenFreeMap tiles. After you save,
               enabled weather sends this point to Open-Meteo and enabled U.S. official alerts send it to NWS.

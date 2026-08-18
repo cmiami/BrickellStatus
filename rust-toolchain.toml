@@ -2,3 +2,6 @@
 channel = "1.97.1"
 components = ["clippy", "rustfmt"]
 profile = "minimal"
+# The Windows executable and NSIS installer are cross-compiled from macOS;
+# see docs/WINDOWS_RELEASE.md.
+targets = ["x86_64-pc-windows-msvc"]

@@ -44,7 +44,8 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.icns"
+      "icons/icon.icns",
+      "icons/icon.ico"
     ],
     "resources": {
       "resources/licenses/": "licenses/",
@@ -54,6 +55,22 @@
     "category": "Utility",
     "shortDescription": "A configurable personal signal console.",
     "longDescription": "Tender's Log monitors user-selected signals, predicts Brickell Avenue Bridge openings, and routes trusted updates to desktop, WhatsApp, and a Heltec E213 display.",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "allowDowngrades": false,
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "license": "../../../LICENSE-MIT",
+        "languages": ["English"],
+        "displayLanguageSelector": false,
+        "compression": "lzma",
+        "startMenuFolder": "Tender's Log"
+      }
+    },
     "macOS": {
       "minimumSystemVersion": "12.0",
       "hardenedRuntime": true,

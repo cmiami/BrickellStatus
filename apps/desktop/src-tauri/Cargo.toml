@@ -28,8 +28,13 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# Present only to install the ring process-default CryptoProvider in run().
+rustls.workspace = true
 tauri = { version = "2.11.5", features = ["tray-icon", "image-png"] }
 tauri-plugin-notification = "2.3.3"
+# Only the Rust-side open_url free function is used; the plugin is never
+# registered, so no JS invoke surface or capability is added.
+tauri-plugin-opener = "2.5.4"
 tauri-plugin-single-instance = "2.4.3"
 tokio.workspace = true
 tracing.workspace = true
@@ -37,6 +42,14 @@ tracing-subscriber.workspace = true
 tenders-storage = { path = "../../../crates/storage" }
 url.workspace = true
 uuid.workspace = true
+
+# DPAPI keeps credentials.json unreadable off this machine and user account.
+# All three crates are already in Cargo.lock transitively, so this section
+# adds no new supply-chain surface.
+[target.'cfg(windows)'.dependencies]
+base64 = "0.22.1"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+zeroize.workspace = true
 
 [features]
 default = ["custom-protocol"]

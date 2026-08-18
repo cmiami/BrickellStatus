@@ -11,7 +11,7 @@ description = "Normalized public-feed and optional secret-backed signal collecto
 # changes; switched off, this crate is the parsers and the `HttpFetcher` trait
 # alone, which is what a Cloudflare Worker needs — it supplies its own fetch.
 default = ["native"]
-native = ["dep:reqwest", "dep:tokio", "dep:tokio-tungstenite", "dep:tokio-util"]
+native = ["dep:reqwest", "dep:rustls", "dep:tokio", "dep:tokio-tungstenite", "dep:tokio-util"]
 
 [dependencies]
 async-trait.workspace = true
@@ -20,6 +20,7 @@ feed-rs.workspace = true
 futures.workspace = true
 jiff.workspace = true
 reqwest = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
 scraper.workspace = true
 serde.workspace = true
 serde_json.workspace = true

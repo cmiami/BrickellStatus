@@ -160,6 +160,9 @@ impl SafeHttpFetcher {
                 "system proxies are not supported by the safe collector client".into(),
             ));
         }
+        // reqwest's provider-free rustls refuses to build a client until a
+        // process-default CryptoProvider exists; installing is idempotent.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let mut builder = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
