@@ -2,8 +2,11 @@
 
 Tender's Log currently ships two **unsigned** disk images:
 
-- `arm64` for Apple Silicon Macs;
-- `x86_64` for Intel Macs.
+- `Tenders-Log_<version>_macos-arm64.dmg` for Apple Silicon Macs;
+- `Tenders-Log_<version>_macos-x86_64.dmg` for Intel Macs.
+
+Only the disk images are attached to a GitHub release; size reports and
+checksums remain as internal workflow artifacts.
 
 The project does not import a Developer ID certificate, submit builds to Apple,
 or read signing/notarization secrets. This is intentional for the initial

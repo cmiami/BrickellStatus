@@ -20,9 +20,9 @@ expected, and it takes about twenty seconds.
 
 ### macOS
 
-1. Download the DMG for your Mac from [Releases](../../releases) — `arm64` for
-   Apple Silicon, `x86_64` for Intel. Open it and drag **Tender's Log** onto the
-   **Applications** folder beside it.
+1. Download the DMG for your Mac from [Releases](../../releases) —
+   `macos-arm64` for Apple Silicon, `macos-x86_64` for Intel. Open it and drag
+   **Tender's Log** onto the **Applications** folder beside it.
 2. Launch it from Applications. macOS says it *"cannot be opened because Apple
    cannot check it for malicious software"*.
 3. Click **Done**. **Do not click "Move to Trash"** — that deletes the app and
@@ -38,7 +38,7 @@ app again, then go back to Privacy & Security.
 
 ### Windows
 
-1. Download `Tenders-Log_<version>_x64-setup.exe` from
+1. Download `Tenders-Log_<version>_windows-x64-setup.exe` from
    [Releases](../../releases) and run it.
 2. SmartScreen says *"Windows protected your PC"*. Click **More info**, confirm
    the app name, then click **Run anyway**. Do not disable SmartScreen

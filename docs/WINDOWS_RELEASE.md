@@ -2,7 +2,8 @@
 
 Tender's Log ships one **unsigned** Windows artifact:
 
-- `Tenders-Log_<version>_x64-setup.exe`, an NSIS installer for x64 Windows 10/11.
+- `Tenders-Log_<version>_windows-x64-setup.exe`, an NSIS installer for x64
+  Windows 10/11.
 
 The project holds no Authenticode certificate and submits nothing to
 Microsoft, matching the unsigned macOS policy in
@@ -93,8 +94,8 @@ Run this against the exact installer the release will ship, inside an x64
 Windows 11 VM.
 
 1. **Integrity** — copy the setup exe in via a shared folder;
-   `certutil -hashfile "Tenders-Log_<version>_x64-setup.exe" SHA256` matches
-   the hash the build printed.
+   `certutil -hashfile "Tenders-Log_<version>_windows-x64-setup.exe" SHA256`
+   matches the hash the build printed.
 2. **SmartScreen** — "Windows protected your PC" → **More info** → **Run
    anyway**. Never disable SmartScreen globally.
 3. **Install** — per-user, no UAC prompt; app in
@@ -142,9 +143,10 @@ The Windows leg lives in
 macOS DMGs and runs under the same triggers and version-tag verification. It
 cross-compiles on a **macOS** runner — the same toolchain as the local build —
 enforces the size budget, and attaches
-`Tenders-Log_<version>_x64-setup.exe` with its SHA-256 to the GitHub release.
-A manual `workflow_dispatch` run uploads workflow artifacts without creating a
-release.
+`Tenders-Log_<version>_windows-x64-setup.exe` to the GitHub release. Only the
+installer becomes a release asset; the SHA-256 and size report remain as
+internal workflow artifacts. A manual `workflow_dispatch` run uploads workflow
+artifacts without creating a release.
 
 CI's `windows-native` job (in [`ci.yml`](../.github/workflows/ci.yml)) is the
 complement: it runs `cargo test --workspace` on a real Windows runner, because

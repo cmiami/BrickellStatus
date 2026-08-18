@@ -147,10 +147,10 @@ jobs:
             exit 1
           fi
           mkdir -p dist
-          output="dist/Tenders-Log_${VERSION}_${ARCH}.dmg"
+          output="dist/Tenders-Log_${VERSION}_macos-${ARCH}.dmg"
           cp "$dmg" "$output"
           node apps/console/scripts/check-macos-artifact-size.mjs "$bundle_root" \
-            | tee "dist/Tenders-Log_${VERSION}_${ARCH}.sizes.txt"
+            | tee "dist/Tenders-Log_${VERSION}_macos-${ARCH}.sizes.txt"
           (cd dist && shasum -a 256 "$(basename "$output")" > "$(basename "$output").sha256")
 
       - name: Upload workflow artifact
@@ -255,10 +255,10 @@ jobs:
             exit 1
           fi
           mkdir -p dist
-          output="dist/Tenders-Log_${VERSION}_x64-setup.exe"
+          output="dist/Tenders-Log_${VERSION}_windows-x64-setup.exe"
           cp "$installer" "$output"
           node apps/console/scripts/check-windows-artifact-size.mjs "$release_root" \
-            | tee "dist/Tenders-Log_${VERSION}_x64-setup.sizes.txt"
+            | tee "dist/Tenders-Log_${VERSION}_windows-x64-setup.sizes.txt"
           (cd dist && shasum -a 256 "$(basename "$output")" > "$(basename "$output").sha256")
 
       - name: Upload workflow artifact
@@ -285,6 +285,8 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Only the installers become release assets. Size reports and checksums
+      # stay behind as workflow artifacts for the release engineer.
       - name: Create or update the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -292,9 +294,9 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+            gh release upload "$GITHUB_REF_NAME" dist/*.dmg dist/*-setup.exe --clobber --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$GITHUB_REF_NAME" dist/* \
+            gh release create "$GITHUB_REF_NAME" dist/*.dmg dist/*-setup.exe \
               --repo "$GITHUB_REPOSITORY" \
               --title "Tender's Log $GITHUB_REF_NAME" \
               --generate-notes
