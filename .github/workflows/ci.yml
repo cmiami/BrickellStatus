@@ -155,7 +155,11 @@ jobs:
       - name: Build E213 firmware
         run: python firmware/e213/scripts/bundle_firmware.py
 
+      # Bash, because PowerShell reports only the last command's exit code:
+      # a failing bundle step would pass here and surface later as cargo
+      # complaining that a generated resource path does not exist.
       - name: Prepare remaining generated Tauri inputs
+        shell: bash
         run: |
           npm --prefix apps/console run licenses:bundle
           npm --prefix apps/console run build

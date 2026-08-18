@@ -32,7 +32,11 @@ function runJson(command, args, cwd = repositoryRoot) {
     cwd,
     env: process.env,
     encoding: 'utf8',
-    maxBuffer: 128 * 1024 * 1024
+    maxBuffer: 128 * 1024 * 1024,
+    // Node refuses to spawn a .cmd shim directly on Windows and fails with
+    // EINVAL. Every argument here is a literal, so the shell cannot be fed
+    // anything it should not receive.
+    shell: process.platform === 'win32' && command.endsWith('.cmd')
   });
   if (result.error || result.status !== 0) {
     const detail = result.stderr?.trim() || result.error?.message || 'unknown failure';
