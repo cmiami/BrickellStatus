@@ -12,11 +12,13 @@
 
 ---
 
-## The app is unsigned. macOS will refuse to open it the first time.
+## The app is unsigned. Your OS will refuse to open it the first time.
 
-There is no Apple Developer certificate behind these builds, so Gatekeeper blocks
-them until you approve the app by hand. This is expected, and it takes about
-twenty seconds:
+There is no code-signing certificate behind these builds, so macOS Gatekeeper
+and Windows SmartScreen block them until you approve the app by hand. This is
+expected, and it takes about twenty seconds.
+
+### macOS
 
 1. Download the DMG for your Mac from [Releases](../../releases) — `arm64` for
    Apple Silicon, `x86_64` for Intel. Open it and drag **Tender's Log** onto the
@@ -33,6 +35,17 @@ twenty seconds:
 
 If step 4 shows nothing, the launch in step 2 did not register — try opening the
 app again, then go back to Privacy & Security.
+
+### Windows
+
+1. Download `Tenders-Log_<version>_x64-setup.exe` from
+   [Releases](../../releases) and run it.
+2. SmartScreen says *"Windows protected your PC"*. Click **More info**, confirm
+   the app name, then click **Run anyway**. Do not disable SmartScreen
+   globally — this approval is for this one installer.
+3. The installer runs per-user: no administrator prompt, and the app lands in
+   your Start Menu. Windows 11 already ships the WebView2 runtime the app uses;
+   on a machine without it, the installer fetches it automatically.
 
 ---
 
@@ -54,7 +67,9 @@ through the same policy, so adding a channel does not turn the app into a
 notification casino.
 
 Everything runs on your machine. There is no account, no server, and no
-telemetry. Secrets stay in the OS keychain and are never written to preferences.
+telemetry. Secrets live in a private per-user credential file — sealed to your
+Windows account with DPAPI, held owner-only on macOS — and are never written to
+preferences.
 
 > **Proof-of-concept, August 2026.** FL511 bridge history is accumulating and the
 > prediction weights are calibrated against only a few hours of it, so treat the
@@ -79,7 +94,12 @@ npm --prefix apps/console run tauri:dev      # console + desktop shell
 cargo test --workspace                       # Rust tests
 npm --prefix apps/console test               # console tests
 npm --prefix apps/console run tauri:build:mac  # unsigned DMG
+npm --prefix apps/console run tauri:build:win  # unsigned Windows installer, cross-compiled
 ```
+
+The Windows executable and NSIS installer are cross-compiled from macOS — no
+Windows machine involved except for testing. The one-time toolchain setup and
+the QA protocol live in [`docs/WINDOWS_RELEASE.md`](docs/WINDOWS_RELEASE.md).
 
 `desktop:prepare` generates the three inputs the Tauri build needs — bundled
 license texts, the E213 firmware bundle, and the compiled frontend — and runs

@@ -30,7 +30,10 @@ Required versions are intentionally pinned where reproducibility matters:
 - Node.js 24 or newer;
 - npm `11.18.0` exactly;
 - Xcode Command Line Tools for a macOS desktop build;
-- PlatformIO only for E213 firmware work.
+- PlatformIO only for E213 firmware work;
+- `brew install nsis llvm` plus `cargo install --locked cargo-xwin` only for
+  cross-building the Windows installer (see
+  [`docs/WINDOWS_RELEASE.md`](docs/WINDOWS_RELEASE.md)).
 
 ```sh
 git clone https://github.com/cmiami/PuenteGonorrea.git
@@ -69,8 +72,10 @@ For E213 changes, build both supported panel environments listed in
 on physical hardware; a successful compile is not a physical delivery test.
 
 For macOS release work, follow [`docs/MACOS_RELEASE.md`](docs/MACOS_RELEASE.md)
-and include the measured DMG size. Release artifacts must remain at or below
-the repository's 25 MiB limit.
+and include the measured DMG size. For Windows release work, follow
+[`docs/WINDOWS_RELEASE.md`](docs/WINDOWS_RELEASE.md) and include the measured
+installer size. Release artifacts must remain at or below the repository's
+25 MiB limit.
 
 ## Product contracts worth defending
 

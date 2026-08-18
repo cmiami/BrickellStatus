@@ -51,6 +51,7 @@
       "resources/licenses/": "licenses/",
       "resources/firmware/": "firmware/"
     },
+    "licenseFile": "../../../LICENSE-MIT",
     "copyright": "Copyright \u00a9 2026 PuenteGonorrea contributors",
     "category": "Utility",
     "shortDescription": "A configurable personal signal console.",
@@ -64,7 +65,6 @@
       "nsis": {
         "installMode": "currentUser",
         "installerIcon": "icons/icon.ico",
-        "license": "../../../LICENSE-MIT",
         "languages": ["English"],
         "displayLanguageSelector": false,
         "compression": "lzma",

@@ -22,11 +22,13 @@
     "tauri:dev": "node ./scripts/tauri.mjs dev",
     "tauri:build": "node ./scripts/tauri.mjs build",
     "tauri:build:mac": "node ./scripts/build-macos-dmg.mjs",
+    "tauri:build:win": "node ./scripts/build-windows-installer.mjs",
     "assets:mac": "node ./scripts/generate-macos-assets.mjs",
     "licenses:bundle": "node ./scripts/generate-license-bundle.mjs",
     "firmware:bundle": "python3 ../../firmware/e213/scripts/bundle_firmware.py --skip-build",
     "desktop:prepare": "npm run licenses:bundle && npm run firmware:bundle && npm run build",
     "size:mac": "node ./scripts/check-macos-artifact-size.mjs",
+    "size:win": "node ./scripts/check-windows-artifact-size.mjs",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest"

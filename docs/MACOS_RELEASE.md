@@ -99,9 +99,13 @@ delivery, or E213 rotation. Use the Tender's Log menu-bar item to see the
 current USB/BLE state and choose **Open Tender's Log** or **Quit Tender's
 Log**. Only the explicit Quit action stops the background runtime.
 
+The Windows installer has its own document mirroring this one:
+[`WINDOWS_RELEASE.md`](WINDOWS_RELEASE.md). It is cross-compiled from macOS,
+so both platforms release from the same workflow and toolchain family.
+
 ## Release workflow
 
-`.github/workflows/release-macos.yml` runs only in either of these cases:
+`.github/workflows/release-desktop.yml` runs only in either of these cases:
 
 - a version tag such as `v0.1.0` is pushed;
 - a maintainer starts it manually with `workflow_dispatch`.

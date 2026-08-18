@@ -1,6 +1,15 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -95,6 +104,36 @@ if (process.platform === 'darwin') {
   process.env.PATH = `${llvmBin}${delimiter}${process.env.PATH}`;
   process.env.XWIN_ACCEPT_LICENSE ??= '1';
   crossArguments.push('--runner', 'cargo-xwin');
+
+  // Tauri's NSIS shortcut helpers single-quote their COM parameters, so the
+  // apostrophe in "Tender's Log.lnk" terminates the quote early and splits
+  // one macro argument into four ("requires 4 parameter(s), passed 7").
+  // The bundler regenerates utils.nsh on every build and runs makensis
+  // immediately, so the only window to re-quote with NSIS backticks is a
+  // makensis shim on PATH. Remove when the upstream template is fixed.
+  const realMakensis = captured('/bin/sh', ['-c', 'command -v makensis']);
+  const shimDirectory = mkdtempSync(join(tmpdir(), 'tenders-log-makensis-'));
+  const shim = join(shimDirectory, 'makensis');
+  writeFileSync(
+    shim,
+    [
+      '#!/bin/sh',
+      'for argument in "$@"; do',
+      '  case "$argument" in',
+      '    *.nsi)',
+      '      helpers="$(dirname "$argument")/utils.nsh"',
+      '      if [ -f "$helpers" ]; then',
+      `        sed -i '' -e "/\\\${I[A-Za-z]*::/ s/ '\\(.*\\)'[[:space:]]*$/ \\\`\\1\\\`/" "$helpers"`,
+      '      fi',
+      '      ;;',
+      '  esac',
+      'done',
+      `exec "${realMakensis}" "$@"`,
+      ''
+    ].join('\n')
+  );
+  chmodSync(shim, 0o755);
+  process.env.PATH = `${shimDirectory}${delimiter}${process.env.PATH}`;
 } else if (process.platform !== 'win32') {
   throw new Error('The Windows installer builds on macOS (cross) or Windows (native) only.');
 }

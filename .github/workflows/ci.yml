@@ -22,7 +22,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The firmware build id is derived from history; see release-macos.yml.
+          # The firmware build id is derived from history; see release-desktop.yml.
           # CI builds the same bundle, so it needs the same history to stamp the
           # same identity and to exercise the manifest/image agreement test.
           fetch-depth: 0
@@ -97,3 +97,73 @@ jobs:
         run: >-
           npm --prefix apps/console run tauri:build --
           --no-bundle --no-sign --ci
+
+  # The only pre-release signal that the Rust code actually *runs* on Windows:
+  # the release installer is cross-compiled on macOS, and cross-compilation
+  # proves compilation, not behavior (the DPAPI secret-store tests, for one,
+  # execute nowhere else). Mirrors the quality job's generated-input setup.
+  windows-native:
+    name: Windows native tests
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/console/package-lock.json
+
+      - name: Use the locked npm release
+        run: npm install --global npm@11.18.0
+
+      - name: Install JavaScript dependencies
+        run: npm --prefix apps/console ci
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-${{ runner.os }}-${{ hashFiles('firmware/e213/platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio==6.1.18
+
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          rustup run 1.97.1 rustc --version
+
+      # The firmware:bundle npm script hardcodes `python3`, which Windows
+      # runners do not reliably alias, so the bundler is invoked directly.
+      - name: Build E213 firmware
+        run: python firmware/e213/scripts/bundle_firmware.py
+
+      - name: Prepare remaining generated Tauri inputs
+        run: |
+          npm --prefix apps/console run licenses:bundle
+          npm --prefix apps/console run build
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ci-windows-native
+
+      - name: Test Rust workspace
+        run: cargo test --workspace

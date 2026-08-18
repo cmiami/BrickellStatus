@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, lstatSync } from 'node:fs';
+import { appendFileSync, existsSync, lstatSync, readdirSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -10,7 +10,6 @@ const releaseDirectory = resolve(
 );
 
 function firstEntry(directory, suffix) {
-  const { readdirSync } = require('node:fs');
   const entries = readdirSync(directory, { withFileTypes: true })
     .filter((entry) => entry.name.endsWith(suffix))
     .map((entry) => join(directory, entry.name))
