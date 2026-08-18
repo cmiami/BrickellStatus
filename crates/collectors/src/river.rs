@@ -108,21 +108,25 @@ const TRUNK: [Waypoint; 12] = [
     (25.8085, -80.2550),       // Palmer Lake / upper river
 ];
 
-/// Northern entrance: mouth → ICW leg off Bayfront (surveyed live from an
-/// on-channel transit at ≈ −80.1825) → Dodge Island west end → Main Channel →
-/// Government Cut jetties.
+/// Northern entrance: mouth → north-east across the bay → the gap between the
+/// mainland and Dodge Island's west end → Main Channel along the island's
+/// north face → Government Cut jetties. Traced from the harbor chart and
+/// awaiting calibration from recorded inbound tracks.
 const NORTH_APPROACH: [Waypoint; 6] = [
-    (25.7710, -80.1849),
-    (25.7690, -80.1824),
-    (25.7663, -80.1830),
-    (25.7725, -80.1795),
-    (25.7705, -80.1700),
-    (25.7635, -80.1330),
+    (25.7710, -80.1849), // mouth at Brickell Point
+    (25.7748, -80.1832), // Bayfront, turning for the port
+    (25.7779, -80.1799), // between the mainland and Dodge Island's west end
+    (25.7793, -80.1665), // Main Channel, north of Dodge Island
+    (25.7707, -80.1487), // turn seaward off the island's east end
+    (25.7645, -80.1330), // Government Cut jetties
 ];
 
-/// Southern entrance: mouth → ICW toward the Rickenbacker.
-const SOUTH_APPROACH: [Waypoint; 4] = [
-    (25.7710, -80.1849),
+/// Southern entrance: mouth → the ICW leg past Brickell Key (surveyed live
+/// from an on-channel transit at ≈ −80.1825) → toward the Rickenbacker.
+const SOUTH_APPROACH: [Waypoint; 6] = [
+    (25.7710, -80.1849), // mouth at Brickell Point
+    (25.7690, -80.1824), // Bayfront ICW (surveyed)
+    (25.7663, -80.1830), // abeam Brickell Key (surveyed)
     (25.7620, -80.1845),
     (25.7520, -80.1810),
     (25.7460, -80.1700),
@@ -382,6 +386,40 @@ const TRUNK_STATIONS: [Station; 11] = [
 /// North approach marks, named from the charted route the leg follows.
 const NORTH_APPROACH_STATIONS: [Station; 6] = [
     station("River mouth", StationKind::Mouth, None, 25.7710, -80.1849),
+    station("Bayfront", StationKind::Waypoint, None, 25.7748, -80.1832),
+    station(
+        "Port entrance",
+        StationKind::Waypoint,
+        None,
+        25.7779,
+        -80.1799,
+    ),
+    station(
+        "Main Channel",
+        StationKind::Waypoint,
+        None,
+        25.7793,
+        -80.1665,
+    ),
+    station(
+        "Cut approach",
+        StationKind::Waypoint,
+        None,
+        25.7707,
+        -80.1487,
+    ),
+    station(
+        "Government Cut",
+        StationKind::Waypoint,
+        None,
+        25.7645,
+        -80.1330,
+    ),
+];
+
+/// South approach marks along the ICW toward the Rickenbacker.
+const SOUTH_APPROACH_STATIONS: [Station; 6] = [
+    station("River mouth", StationKind::Mouth, None, 25.7710, -80.1849),
     station(
         "Bayfront ICW",
         StationKind::Waypoint,
@@ -396,32 +434,6 @@ const NORTH_APPROACH_STATIONS: [Station; 6] = [
         25.7663,
         -80.1830,
     ),
-    station(
-        "Dodge Island",
-        StationKind::Waypoint,
-        None,
-        25.7725,
-        -80.1795,
-    ),
-    station(
-        "Main Channel",
-        StationKind::Waypoint,
-        None,
-        25.7705,
-        -80.1700,
-    ),
-    station(
-        "Government Cut",
-        StationKind::Waypoint,
-        None,
-        25.7635,
-        -80.1330,
-    ),
-];
-
-/// South approach marks along the ICW toward the Rickenbacker.
-const SOUTH_APPROACH_STATIONS: [Station; 4] = [
-    station("River mouth", StationKind::Mouth, None, 25.7710, -80.1849),
     station("Claughton", StationKind::Waypoint, None, 25.7620, -80.1845),
     station("ICW south", StationKind::Waypoint, None, 25.7520, -80.1810),
     station(
@@ -552,6 +564,35 @@ mod tests {
         // Mid-bay, well off any channel.
         let bay = project(25.7560, -80.1600);
         assert!(!bay.in_corridor(), "offset {}", bay.offset_meters);
+    }
+
+    #[test]
+    fn the_north_entrance_runs_between_the_mainland_and_dodge_island() {
+        // Inbound through the gap at the island's west end, then along the
+        // Main Channel: this is the water the north approach exists to cover.
+        for (latitude, longitude) in [(25.7772, -80.1817), (25.7786, -80.1740)] {
+            let fix = project(latitude, longitude);
+            assert_eq!(fix.branch, RiverBranch::NorthApproach);
+            assert!(
+                fix.in_corridor(),
+                "north entrance at {latitude},{longitude} sits {} m off the corridor",
+                fix.offset_meters
+            );
+        }
+
+        // Dodge Island itself is land; the corridor must not cover it.
+        let island = project(25.7765, -80.1690);
+        assert!(
+            !island.in_corridor(),
+            "Dodge Island projected into the corridor at offset {}",
+            island.offset_meters
+        );
+
+        // The surveyed ICW leg past Brickell Key runs south of the mouth, so
+        // it belongs to the southern approach rather than the northern one.
+        let brickell_key = project(25.7663, -80.1830);
+        assert_eq!(brickell_key.branch, RiverBranch::SouthApproach);
+        assert!(brickell_key.in_corridor());
     }
 
     #[test]
