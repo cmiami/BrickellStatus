@@ -33,6 +33,7 @@ pub fn channel_card(
         ChannelKindDto::Official => ChannelKind::OfficialAlert,
         ChannelKindDto::Hurricane => ChannelKind::Tropical,
         ChannelKindDto::News => ChannelKind::News,
+        ChannelKindDto::Sports => ChannelKind::Sports,
         ChannelKindDto::Earthquake => ChannelKind::Earthquake,
         ChannelKindDto::Markets => ChannelKind::Markets,
         ChannelKindDto::System => ChannelKind::Custom {
@@ -262,7 +263,10 @@ pub fn interrupt_allows(
     }
     match channel.interrupt_preset {
         InterruptPreset::Off | InterruptPreset::Custom => false,
-        InterruptPreset::Meaningful => channel.kind != ChannelKindDto::System,
+        InterruptPreset::Meaningful => !matches!(
+            channel.kind,
+            ChannelKindDto::System | ChannelKindDto::Sports
+        ),
         InterruptPreset::Recommended => match channel.kind {
             ChannelKindDto::Bridge => matches!(
                 snapshot.decision.state,
@@ -276,7 +280,10 @@ pub fn interrupt_allows(
                 .and_then(|preference| preference.scope.get("breakingOnly"))
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
-            ChannelKindDto::System => false,
+            // No score, trade, or draft pick is worth taking over the screen,
+            // whatever the preset. Sports earns its rotation slot and stops
+            // there.
+            ChannelKindDto::System | ChannelKindDto::Sports => false,
             ChannelKindDto::Weather
             | ChannelKindDto::Official
             | ChannelKindDto::Hurricane
@@ -290,6 +297,7 @@ pub fn interrupt_allows(
             }
             ChannelKindDto::Weather
             | ChannelKindDto::News
+            | ChannelKindDto::Sports
             | ChannelKindDto::Markets
             | ChannelKindDto::System => false,
         },

@@ -480,6 +480,7 @@ mod tests {
                 ChannelKind::OfficialAlert,
                 ChannelKind::Tropical,
                 ChannelKind::News,
+                ChannelKind::Sports,
                 ChannelKind::Earthquake,
                 ChannelKind::Markets,
             ]

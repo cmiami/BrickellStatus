@@ -1,8 +1,7 @@
 <script lang="ts">
-  import SwitchField from '$lib/components/SwitchField.svelte';
   import type { ChannelPreference } from '$lib/types';
   import FeedCatalogPicker from './FeedCatalogPicker.svelte';
-  import { scopeBool, scopeList, setScope, type ChannelChange } from './scope';
+  import { scopeList, setScope, type ChannelChange } from './scope';
 
   let { channel, onchannelchange }: { channel: ChannelPreference; onchannelchange: ChannelChange } = $props();
 
@@ -15,8 +14,8 @@
   }
 </script>
 
-<div class="news-scope">
-  <FeedCatalogPicker {channel} {onchannelchange} kind="news" />
+<div class="sports-scope">
+  <FeedCatalogPicker {channel} {onchannelchange} kind="sports" />
 
   <div class="topic-fields">
     <label class="field">
@@ -25,12 +24,9 @@
         value={scopeList(channel, 'topics').join(', ')}
         maxlength="500"
         oninput={(event) => commas(event, 'topics')}
-        placeholder="Miami, transit, weather"
+        placeholder="Dolphins, Heat, draft"
       />
-      <!-- The old default shipped a keyword list, which quietly hid most of
-           what a reader had just subscribed to. Blank is the honest default and
-           the note has to say what filling this in costs. -->
-      <small class="field-note">Comma-separated. Leave blank to see everything from the feeds above; adding a word hides every item that does not contain it.</small>
+      <small class="field-note">Comma-separated. Leave blank to see everything from the feeds above; a league feed narrowed to one team name is how you follow that team.</small>
     </label>
     <label class="field">
       <span>Exclude keywords</span>
@@ -38,22 +34,17 @@
         value={scopeList(channel, 'excludeTopics').join(', ')}
         maxlength="500"
         oninput={(event) => commas(event, 'excludeTopics')}
-        placeholder="opinion, sponsored"
+        placeholder="odds, betting, promo code"
       />
-      <small class="field-note">Items containing any of these are dropped.</small>
+      <!-- Every sports desk we ship runs betting promotions in the same feed as
+           its reporting, so this is the field most readers will actually use. -->
+      <small class="field-note">Items containing any of these are dropped. Useful for the odds and promo posts publishers file alongside reporting.</small>
     </label>
   </div>
-
-  <SwitchField
-    checked={scopeBool(channel, 'breakingOnly', false)}
-    label="Breaking labels only"
-    description="Require the publisher title or categories to identify the item as breaking."
-    onchange={(enabled) => setScope(channel, onchannelchange, 'breakingOnly', enabled)}
-  />
 </div>
 
 <style>
-  .news-scope {
+  .sports-scope {
     display: grid;
     gap: 14px;
   }

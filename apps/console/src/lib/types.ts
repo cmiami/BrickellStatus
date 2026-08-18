@@ -70,7 +70,16 @@ export interface ChannelPriority {
 
 export interface ChannelSnapshot {
   id: string;
-  kind: 'bridge' | 'weather' | 'official' | 'hurricane' | 'news' | 'earthquake' | 'markets' | 'system';
+  kind:
+    | 'bridge'
+    | 'weather'
+    | 'official'
+    | 'hurricane'
+    | 'news'
+    | 'sports'
+    | 'earthquake'
+    | 'markets'
+    | 'system';
   title: string;
   sourceLabel: string;
   availability: Availability;

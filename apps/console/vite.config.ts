@@ -23,7 +23,11 @@ export default defineConfig({
     strictPort: true,
     host: host || '127.0.0.1',
     hmr: host ? { protocol: 'ws', host, port: 1421 } : undefined,
-    watch: { ignored: ['**/src-tauri/**'] }
+    watch: { ignored: ['**/src-tauri/**'] },
+    // The shipped feed catalog lives beside the Rust crate that embeds it, so
+    // both sides read one file and cannot drift. It sits outside the console
+    // root, which the dev server would otherwise refuse to serve.
+    fs: { allow: ['..', '../../crates/runtime/catalog'] }
   },
   envPrefix: ['VITE_', 'TAURI_'],
   test: {

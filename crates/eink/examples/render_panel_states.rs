@@ -269,10 +269,40 @@ fn render_panel(panel: PanelModel, out: &std::path::Path) {
                     ChannelKind::News,
                     ChannelUrgency::Routine,
                     ChannelAvailability::Current,
-                    "Miami Herald",
+                    "Headlines",
                     "Commission delays vote",
-                    "Brickell zoning / 2 hr ago",
-                    "Read later",
+                    "Brickell zoning decision pushed to next month",
+                    // The action line carries the publisher. It used to read
+                    // "Headline only. Open the story for detail." on every card.
+                    "Miami Herald",
+                ),
+            ),
+            (
+                // Proof for the accent fold: every one of these letters used to
+                // render as a blank, and the country feeds are full of them.
+                "news / accented".into(),
+                card(
+                    panel,
+                    ChannelKind::News,
+                    ChannelUrgency::Routine,
+                    ChannelAvailability::Current,
+                    "Venezuela",
+                    "Sismo de magnitud 4 se sintió en La Guaira",
+                    "Sin daños reportados en la zona costera",
+                    "Efecto Cocuyo",
+                ),
+            ),
+            (
+                "sports / roster move".into(),
+                card(
+                    panel,
+                    ChannelKind::Sports,
+                    ChannelUrgency::Routine,
+                    ChannelAvailability::Current,
+                    "Miami teams",
+                    "Dolphins bring back Seth Coleman-Lyles",
+                    "Roster move / 40 min ago",
+                    "The Phinsider",
                 ),
             ),
             (

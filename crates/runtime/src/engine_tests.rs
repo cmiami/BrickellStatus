@@ -1733,6 +1733,12 @@ fn stale_feed_item_cannot_activate_beside_a_fresh_feed() {
             "https://stale.example/feed"
         ]),
     );
+    // Stated here rather than inherited: the shipped default no longer filters
+    // by topic, and this test is about staleness, not about what the default
+    // happens to be.
+    channel
+        .scope
+        .insert("topics".into(), json!(["Miami", "transportation"]));
 
     let mut state = PersistedRuntimeState {
         active_sources: BTreeMap::from([
@@ -1816,6 +1822,11 @@ fn partial_source_loss_cannot_look_like_a_trustworthy_resolution() {
         "feeds".into(),
         json!(["https://match.example/feed", "https://quiet.example/feed"]),
     );
+    // Stated here rather than inherited: the shipped default no longer filters
+    // by topic, and this test needs one source to match and one to stay quiet.
+    preferences.profile.channels[4]
+        .scope
+        .insert("topics".into(), json!(["Miami", "transportation"]));
     let mut state = PersistedRuntimeState {
         active_sources: BTreeMap::from([
             ("rss.match".into(), "news.local".into()),
@@ -2175,7 +2186,10 @@ fn news_signal_exposes_publisher_content_and_replacement_identity() {
         signal.detail,
         "The downtown ramp closes at 6 PM for emergency repairs."
     );
-    assert_eq!(signal.action, "Headline only. Open the story for detail.");
+    // The action line names the publisher that filed the item. It used to be a
+    // fixed sentence on every card, which the panel cut to "OPEN THE S>" and
+    // which told the reader nothing either way.
+    assert_eq!(signal.action, "Fixture feed");
     assert_eq!(signal.severity.as_deref(), Some("Breaking"));
 
     let mut replacement = news_item(

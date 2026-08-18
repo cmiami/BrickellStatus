@@ -38,6 +38,9 @@ fn channel_urgency(
         // worth showing, not worth stepping in front of weather you are about
         // to walk into.
         ChannelKindDto::News => UrgencyDto::HeadsUp,
+        // A trade, a draft pick, or a final score is worth a rotation slot and
+        // nothing more. Sports never interrupts.
+        ChannelKindDto::Sports => UrgencyDto::Routine,
         // Rain already falling in this quarter-hour changes a decision you are
         // about to make; rain later today does not.
         ChannelKindDto::Weather => {
@@ -378,15 +381,34 @@ fn channel_signal(
                 40,
             ),
         ),
+        // The action line used to read "Headline only. Open the story for
+        // detail." on every single card, which fits the panel as
+        // "HEADLINE ONLY. OPEN THE S>" and tells the reader nothing they had
+        // not already worked out. The publisher is the one fact the line can
+        // carry that the headline above it does not, and the parser has had it
+        // all along.
         ChannelKindDto::News => (
             signal_text(
                 item.summary.as_deref(),
                 "A current publisher item matches this channel's topic rules.",
                 360,
             ),
-            "Headline only. Open the story for detail.".into(),
+            item_publisher(item),
             Some(if news_item_is_breaking(item) {
                 "Breaking".into()
+            } else {
+                "Routine".into()
+            }),
+        ),
+        ChannelKindDto::Sports => (
+            signal_text(
+                item.summary.as_deref(),
+                "A current item matches this channel's leagues and teams.",
+                360,
+            ),
+            item_publisher(item),
+            Some(if sports_item_is_transaction(item) {
+                "Roster move".into()
             } else {
                 "Routine".into()
             }),
@@ -512,6 +534,15 @@ fn signal_priority(
                 0.0
             }
         }
+        // A completed transaction outranks a preview or a recap: it is the one
+        // sports item that is news rather than commentary.
+        ChannelKindDto::Sports => {
+            if sports_item_is_transaction(item) {
+                1.0
+            } else {
+                0.0
+            }
+        }
         ChannelKindDto::Earthquake => item
             .attributes
             .get("magnitude")
@@ -586,7 +617,12 @@ fn channel_material_item_matches(
         ChannelKindDto::Weather => weather_item_activation_score(item, channel, now_ms).is_some(),
         ChannelKindDto::Official => official_alert_matches_scope(item, channel, now_ms),
         ChannelKindDto::Hurricane => atlantic_cyclone(item) && cyclone_is_local(item, channel),
-        ChannelKindDto::News => news_item_matches_scope(item, channel, now_ms),
+        // Sports arrives over the same syndication collector as news, so it
+        // reuses the same topic, age, and exclusion gates rather than growing a
+        // second copy of them that could drift.
+        ChannelKindDto::News | ChannelKindDto::Sports => {
+            news_item_matches_scope(item, channel, now_ms)
+        }
         ChannelKindDto::Earthquake => earthquake_matches_scope(item, channel, now_ms),
         ChannelKindDto::Markets => market_quote_view(item).is_some_and(|quote| {
             quote.change_percent.abs() >= scope_f64(channel, "movePercent", 5.0)
@@ -646,6 +682,20 @@ fn great_circle_km(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     2.0 * EARTH_RADIUS_KM * a.sqrt().clamp(0.0, 1.0).asin()
 }
 
+/// The publisher a syndicated item came from, for the card's action line.
+///
+/// `SourceLink.name` is resolved by the parser from the feed's own title, so a
+/// catalog entry and a hand-typed URL both name themselves honestly. The
+/// fallback only fires for a feed that states no title at all.
+fn item_publisher(item: &CollectorItem) -> String {
+    let name = item.source.name.trim();
+    if name.is_empty() {
+        "Syndicated feed".into()
+    } else {
+        name.to_owned()
+    }
+}
+
 fn news_item_is_breaking(item: &CollectorItem) -> bool {
     if item.title.to_ascii_lowercase().contains("breaking")
         || item
@@ -662,6 +712,54 @@ fn news_item_is_breaking(item: &CollectorItem) -> bool {
         .flatten()
         .filter_map(Value::as_str)
         .any(|category| category.to_ascii_lowercase().contains("breaking"))
+}
+
+/// Whether a sports item reports a roster move rather than commentary about
+/// one.
+///
+/// Word-bounded on purpose. The news matcher next door tests raw substrings, so
+/// its `transit` rule also fires on `transitional`; here `sign` would otherwise
+/// match `design` and `assignment`, and a preview column would outrank the
+/// trade it speculates about.
+fn sports_item_is_transaction(item: &CollectorItem) -> bool {
+    const TRANSACTION_WORDS: &[&str] = &[
+        "acquire",
+        "acquired",
+        "acquires",
+        "claim",
+        "claimed",
+        "draft",
+        "drafted",
+        "drafts",
+        "extension",
+        "release",
+        "released",
+        "signing",
+        "signs",
+        "trade",
+        "traded",
+        "trades",
+        "waived",
+        "waivers",
+    ];
+
+    let matches = |value: &str| {
+        value
+            .to_ascii_lowercase()
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|word| TRANSACTION_WORDS.contains(&word))
+    };
+
+    matches(&item.title)
+        || item.summary.as_deref().is_some_and(matches)
+        || item
+            .attributes
+            .get("categories")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .any(matches)
 }
 
 /// Returns a deterministic ranking score only when this particular forecast
@@ -1764,6 +1862,24 @@ fn channel_summary(
                 ("Nothing new".into(), false)
             } else {
                 (format!("{count} recent item(s) in rotation"), true)
+            }
+        }
+        ChannelKindDto::Sports => {
+            let matching = items
+                .iter()
+                .filter(|item| news_item_matches_scope(item, channel, now_ms))
+                .collect::<Vec<_>>();
+            let moves = matching
+                .iter()
+                .filter(|item| sports_item_is_transaction(item))
+                .count();
+            match (matching.len(), moves) {
+                (0, _) => ("Nothing new".into(), false),
+                (total, 0) => (format!("{total} recent item(s) in rotation"), true),
+                (total, moves) => (
+                    format!("{total} recent item(s) in rotation · {moves} roster move(s)"),
+                    true,
+                ),
             }
         }
         ChannelKindDto::Earthquake => {

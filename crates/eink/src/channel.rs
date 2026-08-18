@@ -26,6 +26,8 @@ pub enum ChannelKind {
     Tropical,
     /// User-selected news and RSS sources.
     News,
+    /// User-selected leagues, teams, and transaction desks.
+    Sports,
     /// Earthquake observations and rules.
     Earthquake,
     /// User-selected market watch items.
@@ -47,6 +49,7 @@ impl ChannelKind {
             Self::OfficialAlert => "OFFICIAL ALERT",
             Self::Tropical => "TROPICAL",
             Self::News => "NEWS",
+            Self::Sports => "SPORTS",
             Self::Earthquake => "EARTHQUAKE",
             Self::Markets => "MARKETS",
             Self::Custom { label, .. } => label,
@@ -60,6 +63,7 @@ impl ChannelKind {
             Self::OfficialAlert => "AL",
             Self::Tropical => "TS",
             Self::News => "NW",
+            Self::Sports => "SP",
             Self::Earthquake => "EQ",
             Self::Markets => "MK",
             Self::Custom { code, .. } => code,
@@ -287,22 +291,66 @@ fn validate_text(value: &str, field: &'static str, maximum: usize) -> Result<(),
     Ok(())
 }
 
+/// A Latin letter carrying a diacritic, folded to the ASCII base the panel
+/// faces can actually draw.
+///
+/// Dropping these to a space is worse than dropping the accent: "se sintió en
+/// La Guaira" became "SE SINTI EN LA GUAIRA", and a reader cannot recover the
+/// missing letter. Every Spanish, French, and Portuguese feed we carry hits
+/// this on an ordinary day.
+///
+/// Every replacement is ASCII, and that is load-bearing. `wrap` slices by byte
+/// offset while counting characters, so it is only sound while everything
+/// downstream of here is single-byte.
+fn fold_latin(character: char) -> Option<&'static str> {
+    Some(match character {
+        'À'..='Å' | 'à'..='å' | 'Ā'..='ą' => "A",
+        'Æ' | 'æ' => "AE",
+        'Ç' | 'ç' | 'Ć'..='č' => "C",
+        'Ð' | 'ð' | 'Ď'..='đ' => "D",
+        'È'..='Ë' | 'è'..='ë' | 'Ē'..='ě' => "E",
+        'Ĝ'..='ģ' => "G",
+        'Ĥ'..='ħ' => "H",
+        'Ì'..='Ï' | 'ì'..='ï' | 'Ĩ'..='ı' => "I",
+        'Ĳ' | 'ĳ' => "IJ",
+        'Ĵ' | 'ĵ' => "J",
+        'Ķ'..='ĸ' => "K",
+        'Ĺ'..='ł' => "L",
+        'Ñ' | 'ñ' | 'Ń'..='ň' => "N",
+        'Ò'..='Ö' | 'Ø' | 'ò'..='ö' | 'ø' | 'Ō'..='ő' => "O",
+        'Œ' | 'œ' => "OE",
+        'Ŕ'..='ř' => "R",
+        'Ś'..='š' => "S",
+        'ß' => "SS",
+        'Þ' | 'þ' => "TH",
+        'Ţ'..='ŧ' => "T",
+        'Ù'..='Ü' | 'ù'..='ü' | 'Ũ'..='ų' => "U",
+        'Ŵ' | 'ŵ' => "W",
+        'Ý' | 'ý' | 'ÿ' | 'Ŷ'..='Ÿ' => "Y",
+        'Ź'..='ž' => "Z",
+        _ => return None,
+    })
+}
+
 pub(crate) fn display_ascii(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| match character {
-            '\u{2018}' | '\u{2019}' => '\'',
-            '\u{201c}' | '\u{201d}' => '"',
-            '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2212}' => '-',
-            '\u{2022}' | '\u{00b7}' => '/',
-            value if value.is_ascii_graphic() => value.to_ascii_uppercase(),
-            value if value.is_whitespace() => ' ',
-            _ => ' ',
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut folded = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\u{2018}' | '\u{2019}' => folded.push('\''),
+            '\u{201c}' | '\u{201d}' => folded.push('"'),
+            '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2212}' => folded.push('-'),
+            '\u{2022}' | '\u{00b7}' => folded.push('/'),
+            character if character.is_ascii_graphic() => {
+                folded.push(character.to_ascii_uppercase());
+            }
+            character if character.is_whitespace() => folded.push(' '),
+            character => match fold_latin(character) {
+                Some(replacement) => folded.push_str(replacement),
+                None => folded.push(' '),
+            },
+        }
+    }
+    folded.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn compact_age(age_seconds: u64) -> String {
@@ -334,6 +382,51 @@ mod tests {
     #[test]
     fn a_complete_card_validates() {
         assert_eq!(valid_card().validate(), Ok(()));
+    }
+
+    #[test]
+    fn accented_headlines_keep_every_letter() {
+        // Real headlines pulled from the Venezuelan, Colombian, Haitian, and
+        // Cuban feeds this build ships. Folding to a space used to leave a hole
+        // where the letter was, and a reader cannot guess it back.
+        for (raw, expected) in [
+            (
+                "Sismo de magnitud 4 se sintió en La Guaira",
+                "SISMO DE MAGNITUD 4 SE SINTIO EN LA GUAIRA",
+            ),
+            (
+                "El Niño trajo una sequía histórica a la región",
+                "EL NINO TRAJO UNA SEQUIA HISTORICA A LA REGION",
+            ),
+            (
+                "Piratage du site des impôts : le gouvernement détaille",
+                "PIRATAGE DU SITE DES IMPOTS : LE GOUVERNEMENT DETAILLE",
+            ),
+            (
+                "La Defensa Civil desmiente alerta",
+                "LA DEFENSA CIVIL DESMIENTE ALERTA",
+            ),
+        ] {
+            assert_eq!(display_ascii(raw), expected);
+        }
+    }
+
+    #[test]
+    fn folded_panel_copy_is_always_single_byte() {
+        // `wrap` slices by byte offset while counting characters. That is only
+        // sound while nothing downstream of `display_ascii` is multi-byte, so a
+        // fold that ever let a non-ASCII character through would panic on a
+        // character boundary rather than merely look wrong.
+        let sampler = "àáâãäåæçèéêëìíîïñòóôõöøùúûüýÿßœšžłğđŧůř";
+        let folded = display_ascii(sampler);
+        assert!(folded.is_ascii(), "fold leaked a multi-byte char: {folded}");
+        for character in sampler.chars() {
+            assert!(
+                fold_latin(character).is_some(),
+                "U+{:04X} '{character}' has no ASCII base and would print as a hole",
+                character as u32,
+            );
+        }
     }
 
     #[test]
