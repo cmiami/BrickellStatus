@@ -1,17 +1,17 @@
 [package]
-name = "bridgestatus-runtime"
+name = "brickellstatus-runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Tauri-ready application engine for Tender's Log"
+description = "Tauri-ready application engine for BrickellStatus"
 
 [dependencies]
 async-trait.workspace = true
-bridgestatus-collectors = { path = "../collectors" }
-bridgestatus-model = { path = "../model" }
-bridgestatus-policy = { path = "../policy" }
-tenders-storage = { path = "../storage" }
+brickellstatus-collectors = { path = "../collectors" }
+brickellstatus-model = { path = "../model" }
+brickellstatus-policy = { path = "../policy" }
+brickellstatus-storage = { path = "../storage" }
 futures.workspace = true
 jiff.workspace = true
 reqwest.workspace = true

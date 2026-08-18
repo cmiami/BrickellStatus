@@ -1,9 +1,9 @@
 [package]
-name = "bridgestatus-eink"
+name = "brickellstatus-eink"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
-description = "Tender's Log monochrome renderer and E213 USB/BLE transport"
+description = "BrickellStatus monochrome renderer and E213 USB/BLE transport"
 
 [features]
 # Talking to a physical panel. On by default so every existing consumer is

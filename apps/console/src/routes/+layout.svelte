@@ -34,7 +34,7 @@
 </script>
 
 <svelte:head>
-  <title>Tender’s Log · PuenteGonorrea</title>
+  <title>BrickellStatus · BrickellStatus</title>
 </svelte:head>
 
 <a class="skip-link" href="#main-content">Skip to content</a>

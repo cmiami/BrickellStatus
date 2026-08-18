@@ -8,7 +8,7 @@
 //! boundary does not make the public state oscillate.
 
 use crate::{BrickellSchedule, ScheduleError, ScheduleStatus};
-use bridgestatus_model::{
+use brickellstatus_model::{
     Availability, AvailabilityStatus, BridgeControllerState, BridgeObservation,
     BridgeOperatingMode, BridgeState, Confidence, EtaRangeMinutes, Observation, ObservationId,
     OutboundProgressStage, SourceId, TimestampMillis, Urgency, VesselMovement,

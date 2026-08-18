@@ -6,7 +6,7 @@
 //! vessels, tugs with tows, and emergencies are exceptions, so this module
 //! describes *ordinary* eligibility and never claims an opening is impossible.
 
-use bridgestatus_model::{BridgeOperatingMode, TimestampMillis};
+use brickellstatus_model::{BridgeOperatingMode, TimestampMillis};
 use jiff::{
     Timestamp,
     civil::{Date, Weekday},

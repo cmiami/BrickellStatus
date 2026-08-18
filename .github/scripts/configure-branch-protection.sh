@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repository="${1:-cmiami/PuenteGonorrea}"
+repository="${1:-cmiami/BrickellStatus}"
 branch="main"
 required_check="Rust, console, and Tauri shell"
 

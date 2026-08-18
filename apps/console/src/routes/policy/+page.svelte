@@ -146,7 +146,7 @@
 </script>
 
 <svelte:head>
-  <title>Policy · Tender’s Log</title>
+  <title>Policy · BrickellStatus</title>
   <meta name="description" content="Configure interruption thresholds, quiet hours, and policy presets." />
 </svelte:head>
 

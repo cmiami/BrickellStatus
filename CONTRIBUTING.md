@@ -1,4 +1,4 @@
-# Contributing to PuenteGonorrea
+# Contributing to BrickellStatus
 
 Thanks for helping build a calmer signal desk. The bar is simple: preserve the
 truth of the evidence, preserve the user's right to silence, and leave the
@@ -36,8 +36,8 @@ Required versions are intentionally pinned where reproducibility matters:
   [`docs/WINDOWS_RELEASE.md`](docs/WINDOWS_RELEASE.md)).
 
 ```sh
-git clone https://github.com/cmiami/PuenteGonorrea.git
-cd PuenteGonorrea
+git clone https://github.com/cmiami/BrickellStatus.git
+cd BrickellStatus
 npm --prefix apps/console ci
 cargo test --workspace
 npm --prefix apps/console run check
@@ -99,7 +99,7 @@ installer size. Release artifacts must remain at or below the repository's
 
 ## Interface changes
 
-Tender's Log is a ruled, daylight instrument rather than a generic dashboard.
+BrickellStatus is a ruled, daylight instrument rather than a generic dashboard.
 Read [`PRODUCT.md`](PRODUCT.md) and [`DESIGN.md`](DESIGN.md) before changing its
 surface. Preserve keyboard access, visible focus, reduced-motion behavior,
 plain-language state labels, and monochrome-safe meaning. Include screenshots

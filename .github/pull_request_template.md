@@ -1,6 +1,6 @@
 ## What changes
 
-<!-- Lead with the user-visible result and why it belongs in Tender's Log. -->
+<!-- Lead with the user-visible result and why it belongs in BrickellStatus. -->
 
 ## Evidence and failure behavior
 

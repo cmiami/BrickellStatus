@@ -137,7 +137,7 @@ fn delivery_test_request(preferences: &AppPreferences, _snapshot: &AppSnapshot) 
             },
         },
         notice: Notice {
-            subject: "TEST ONLY — Tender's Log delivery check".into(),
+            subject: "TEST ONLY — BrickellStatus delivery check".into(),
             state: NoticeState::Unknown,
             road_meaning:
                 "This verifies the configured WhatsApp route. It does not report a live bridge or weather condition."
@@ -146,7 +146,7 @@ fn delivery_test_request(preferences: &AppPreferences, _snapshot: &AppSnapshot) 
             eta: None,
             confidence_percent: None,
             evidence: vec!["TEST MESSAGE · LIVE ALERT STATE OMITTED".into()],
-            source_label: "Tender's Log route test".into(),
+            source_label: "BrickellStatus route test".into(),
             source_age_seconds: 0,
         },
         created_at_millis: now_ms,
@@ -975,7 +975,7 @@ fn delivery_request_for_channel(
             } else {
                 Vec::new()
             },
-            source_label: nonempty_or(&channel.source_label, "Tender's Log"),
+            source_label: nonempty_or(&channel.source_label, "BrickellStatus"),
             source_age_seconds: channel.age_seconds,
         },
         created_at_millis: now_ms,

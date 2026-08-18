@@ -1,10 +1,10 @@
 [package]
-name = "tenders-storage"
+name = "brickellstatus-storage"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Durable SQLite repositories and transactional outbox for Tender's Log"
+description = "Durable SQLite repositories and transactional outbox for BrickellStatus"
 
 [dependencies]
 libsqlite3-sys.workspace = true

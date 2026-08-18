@@ -1,25 +1,25 @@
 [package]
-name = "puente-gonorrea-desktop"
+name = "brickellstatus-desktop"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Tender's Log desktop and tray application"
-default-run = "puente-gonorrea-desktop"
+description = "BrickellStatus desktop and tray application"
+default-run = "brickellstatus-desktop"
 
 [lib]
-name = "puente_gonorrea_desktop_lib"
+name = "brickellstatus_desktop_lib"
 crate-type = ["cdylib", "rlib", "staticlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
-bridgestatus-collectors = { path = "../../../crates/collectors" }
-bridgestatus-projection = { path = "../../../crates/projection" }
-bridgestatus-delivery = { path = "../../../crates/delivery" }
-bridgestatus-eink = { path = "../../../crates/eink" }
-bridgestatus-runtime = { path = "../../../crates/runtime" }
+brickellstatus-collectors = { path = "../../../crates/collectors" }
+brickellstatus-projection = { path = "../../../crates/projection" }
+brickellstatus-delivery = { path = "../../../crates/delivery" }
+brickellstatus-eink = { path = "../../../crates/eink" }
+brickellstatus-runtime = { path = "../../../crates/runtime" }
 dotenvy.workspace = true
 jiff.workspace = true
 espflash.workspace = true
@@ -39,7 +39,7 @@ tauri-plugin-single-instance = "2.4.3"
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-tenders-storage = { path = "../../../crates/storage" }
+brickellstatus-storage = { path = "../../../crates/storage" }
 url.workspace = true
 uuid.workspace = true
 

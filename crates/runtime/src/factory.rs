@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use bridgestatus_collectors::{
+use brickellstatus_collectors::{
     AisStreamApiKey, AisStreamCollector, AisStreamConfig, AisStreamSubscription, BbPilotsCollector,
     BbPilotsConfig, BridgeRelation, CollectContext, Collector, CollectorBatch, CollectorError,
     Fl511BridgeCollector, Fl511Config, NhcCurrentStormsCollector, NhcRssCollector,
@@ -743,7 +743,7 @@ fn short_hash(value: &str) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
-    use bridgestatus_collectors::{
+    use brickellstatus_collectors::{
         CollectorHealth, CollectorItem, HealthState, ItemKind, SourceLink,
     };
     use serde_json::json;
@@ -770,7 +770,7 @@ mod tests {
     fn every_polled_collector_declares_a_rate_slower_than_the_engine_tick() {
         let preferences = AppPreferences::default();
         let registrations = CredentialFreeCollectorFactory::new(
-            "PuenteGonorrea fixture (+https://example.invalid)",
+            "BrickellStatus fixture (+https://example.invalid)",
         )
         .unwrap()
         .build(&preferences)
@@ -804,7 +804,7 @@ mod tests {
     #[test]
     fn bridge_channel_registers_fl511_fast_and_the_pilots_board_slow() {
         let registrations = CredentialFreeCollectorFactory::new(
-            "PuenteGonorrea fixture (+https://example.invalid)",
+            "BrickellStatus fixture (+https://example.invalid)",
         )
         .unwrap()
         .build(&AppPreferences::default())
@@ -927,7 +927,7 @@ mod tests {
         assert!(!without_secret.iter().any(|id| id.starts_with("aisstream.")));
 
         let factory = CredentialFreeCollectorFactory::new(
-            "PuenteGonorrea fixture (+https://example.invalid)",
+            "BrickellStatus fixture (+https://example.invalid)",
         )
         .unwrap()
         .with_aisstream_key(Some("fixture-aisstream-secret".into()))
@@ -975,7 +975,7 @@ mod tests {
             .scope
             .insert("useFl511".into(), json!(false));
         let ids = CredentialFreeCollectorFactory::new(
-            "PuenteGonorrea fixture (+https://example.invalid)",
+            "BrickellStatus fixture (+https://example.invalid)",
         )
         .unwrap()
         .with_aisstream_key(Some("fixture-aisstream-secret".into()))
@@ -1026,7 +1026,7 @@ mod tests {
             3
         );
         let registrations = CredentialFreeCollectorFactory::new(
-            "PuenteGonorrea fixture (+https://example.invalid)",
+            "BrickellStatus fixture (+https://example.invalid)",
         )
         .unwrap()
         .build(&preferences)
@@ -1160,7 +1160,9 @@ mod tests {
                     observed_at: None,
                     starts_at: None,
                     ends_at: None,
-                    location: Some(bridgestatus_collectors::Location::point(42.3601, -71.0589)),
+                    location: Some(brickellstatus_collectors::Location::point(
+                        42.3601, -71.0589,
+                    )),
                     source: SourceLink {
                         name: "Fixture".into(),
                         url: None,

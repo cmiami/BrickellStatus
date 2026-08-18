@@ -79,7 +79,7 @@ pub struct SafeHttpFetcher {
 impl Default for SafeHttpFetcher {
     fn default() -> Self {
         Self::new(
-            "PuenteGonorrea/0.1 (+https://github.com/cmiami/PuenteGonorrea)",
+            "BrickellStatus/0.1 (+https://github.com/cmiami/BrickellStatus)",
             FetchLimits::default(),
         )
         .expect("the built-in HTTP client configuration is valid")

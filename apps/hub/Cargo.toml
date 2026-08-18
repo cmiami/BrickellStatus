@@ -1,10 +1,10 @@
 [package]
-name = "puente-gonorrea-hub"
+name = "brickellstatus-hub"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Optional always-on Tender's Log hub"
+description = "Optional always-on BrickellStatus hub"
 
 [dependencies]
 anyhow.workspace = true

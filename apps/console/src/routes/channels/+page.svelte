@@ -108,7 +108,7 @@
   );
 </script>
 
-<svelte:head><title>Channels · Tender’s Log</title></svelte:head>
+<svelte:head><title>Channels · BrickellStatus</title></svelte:head>
 
 <section class="page-sheet channels-page">
   <header class="page-heading-row">

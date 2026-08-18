@@ -1,6 +1,6 @@
 //! Cross-format contract smoke tests.
 
-use bridgestatus_model::{
+use brickellstatus_model::{
     Availability, AvailabilityStatus, BridgeControllerState, BridgeObservation, ChannelId,
     Observation, ObservationId, SourceId, TimestampMillis,
 };

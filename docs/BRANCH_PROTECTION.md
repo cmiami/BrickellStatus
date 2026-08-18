@@ -33,7 +33,7 @@ committed and pushed to `main`, authenticate `gh` as a repository
 administrator and run:
 
 ```sh
-bash .github/scripts/configure-branch-protection.sh cmiami/PuenteGonorrea
+bash .github/scripts/configure-branch-protection.sh cmiami/BrickellStatus
 ```
 
 The script follows GitHub's [protected-branch REST
@@ -51,7 +51,7 @@ token, grant repository **Administration: write** and **Contents: read**.
 Read the resulting rule without mutating it:
 
 ```sh
-gh api repos/cmiami/PuenteGonorrea/branches/main/protection \
+gh api repos/cmiami/BrickellStatus/branches/main/protection \
   --jq '{checks: .required_status_checks, reviews: .required_pull_request_reviews, admins: .enforce_admins, conversations: .required_conversation_resolution, force_pushes: .allow_force_pushes, deletions: .allow_deletions}'
 ```
 

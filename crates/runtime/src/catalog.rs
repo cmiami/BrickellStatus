@@ -146,7 +146,7 @@ pub fn catalog() -> &'static FeedCatalog {
 mod tests {
     use std::collections::BTreeSet;
 
-    use bridgestatus_collectors::validate_public_url;
+    use brickellstatus_collectors::validate_public_url;
     use url::Url;
 
     use super::*;

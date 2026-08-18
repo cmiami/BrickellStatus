@@ -60,7 +60,7 @@
     if (requirement?.state !== 'required') return '';
     switch (requirement.reason.kind) {
       case 'notResponding':
-        return 'A board is connected but is not running Tender’s Log firmware.';
+        return 'A board is connected but is not running BrickellStatus firmware.';
       case 'wrongBoard':
         return `This board is an ${PANEL_GEOMETRY[requirement.reason.board].label}, and it is running the build for the other panel.`;
       default:

@@ -301,7 +301,7 @@ const legalBlocks = [...blocks.entries()]
 const report = [
   '# Bundled dependency license texts',
   '',
-  'Generated from the locked dependency graphs for the Tender’s Log desktop app.',
+  'Generated from the locked dependency graphs for the BrickellStatus desktop app.',
   'Identical legal texts are stored once and every covered package is listed.',
   'Build-only npm packages are intentionally included so the report errs toward notice retention.',
   '',

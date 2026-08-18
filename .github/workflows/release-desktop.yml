@@ -147,10 +147,10 @@ jobs:
             exit 1
           fi
           mkdir -p dist
-          output="dist/Tenders-Log_${VERSION}_macos-${ARCH}.dmg"
+          output="dist/BrickellStatus_${VERSION}_macos-${ARCH}.dmg"
           cp "$dmg" "$output"
           node apps/console/scripts/check-macos-artifact-size.mjs "$bundle_root" \
-            | tee "dist/Tenders-Log_${VERSION}_macos-${ARCH}.sizes.txt"
+            | tee "dist/BrickellStatus_${VERSION}_macos-${ARCH}.sizes.txt"
           (cd dist && shasum -a 256 "$(basename "$output")" > "$(basename "$output").sha256")
 
       - name: Upload workflow artifact
@@ -255,10 +255,10 @@ jobs:
             exit 1
           fi
           mkdir -p dist
-          output="dist/Tenders-Log_${VERSION}_windows-x64-setup.exe"
+          output="dist/BrickellStatus_${VERSION}_windows-x64-setup.exe"
           cp "$installer" "$output"
           node apps/console/scripts/check-windows-artifact-size.mjs "$release_root" \
-            | tee "dist/Tenders-Log_${VERSION}_windows-x64-setup.sizes.txt"
+            | tee "dist/BrickellStatus_${VERSION}_windows-x64-setup.sizes.txt"
           (cd dist && shasum -a 256 "$(basename "$output")" > "$(basename "$output").sha256")
 
       - name: Upload workflow artifact
@@ -297,6 +297,6 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" dist/*.dmg dist/*-setup.exe \
               --repo "$GITHUB_REPOSITORY" \
-              --title "Tender's Log $GITHUB_REF_NAME" \
+              --title "BrickellStatus $GITHUB_REF_NAME" \
               --generate-notes
           fi

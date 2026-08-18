@@ -311,7 +311,7 @@ void drawWaitingScreen() {
   display->setTextColor(BLACK);
   display->setTextSize(2);
   display->setCursor(14, 18);
-  display->print("Tender's Log");
+  display->print("BrickellStatus");
   display->setTextSize(1);
   display->setCursor(15, 53);
   display->print("READY / USB + BLE");

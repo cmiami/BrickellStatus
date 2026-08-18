@@ -3,8 +3,8 @@
 <plist version="1.0">
 <dict>
   <key>NSBluetoothAlwaysUsageDescription</key>
-  <string>Tender's Log uses Bluetooth to send status frames to your configured E213 display.</string>
+  <string>BrickellStatus uses Bluetooth to send status frames to your configured E213 display.</string>
   <key>NSLocationWhenInUseUsageDescription</key>
-  <string>Tender's Log uses one location sample only when you choose Use this Mac's location to configure weather and official-alert areas.</string>
+  <string>BrickellStatus uses one location sample only when you choose Use this Mac's location to configure weather and official-alert areas.</string>
 </dict>
 </plist>

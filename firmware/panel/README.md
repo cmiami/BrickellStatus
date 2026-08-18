@@ -1,4 +1,4 @@
-# Tender's Log — Heltec e-paper panel firmware
+# BrickellStatus — Heltec e-paper panel firmware
 
 This firmware turns a Heltec Vision Master board into a host-driven, one-bit
 status display. The Rust host renders the complete image and sends it over

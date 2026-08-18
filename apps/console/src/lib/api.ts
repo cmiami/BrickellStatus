@@ -28,7 +28,7 @@ async function invoke<T>(command: string, args?: Record<string, unknown>): Promi
 function desktopInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!tauriAvailable()) {
     return Promise.reject(
-      new Error('The live Tender’s Log backend is unavailable. Open the desktop application.')
+      new Error('The live BrickellStatus backend is unavailable. Open the desktop application.')
     );
   }
   return invoke<T>(command, args);

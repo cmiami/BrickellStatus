@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/readme-hero.svg" alt="PuenteGonorrea — Tender's Log advance warning and personal signal console" width="100%" />
+  <img src="docs/assets/readme-hero.svg" alt="BrickellStatus — BrickellStatus advance warning and personal signal console" width="100%" />
 </p>
 
 <p align="center">
@@ -22,13 +22,13 @@ expected, and it takes about twenty seconds.
 
 1. Download the DMG for your Mac from [Releases](../../releases) —
    `macos-arm64` for Apple Silicon, `macos-x86_64` for Intel. Open it and drag
-   **Tender's Log** onto the **Applications** folder beside it.
+   **BrickellStatus** onto the **Applications** folder beside it.
 2. Launch it from Applications. macOS says it *"cannot be opened because Apple
    cannot check it for malicious software"*.
 3. Click **Done**. **Do not click "Move to Trash"** — that deletes the app and
    you start over.
 4. Open **System Settings → Privacy & Security** and scroll to the **Security**
-   section. A line names Tender's Log as blocked. Click **Open Anyway** and
+   section. A line names BrickellStatus as blocked. Click **Open Anyway** and
    authenticate.
 5. Launch the app again and click **Open** on the last prompt. macOS remembers
    the decision; you only do this once per version.
@@ -38,7 +38,7 @@ app again, then go back to Privacy & Security.
 
 ### Windows
 
-1. Download `Tenders-Log_<version>_windows-x64-setup.exe` from
+1. Download `BrickellStatus_<version>_windows-x64-setup.exe` from
    [Releases](../../releases) and run it.
 2. SmartScreen says *"Windows protected your PC"*. Click **More info**, confirm
    the app name, then click **Run anyway**. Do not disable SmartScreen
@@ -51,7 +51,7 @@ app again, then go back to Privacy & Security.
 
 ## What it is
 
-**PuenteGonorrea** is the repository. **Tender's Log** is the app inside it: a
+**BrickellStatus** is the repository. **BrickellStatus** is the app inside it: a
 local-first desktop console that watches the Miami River, decides whether
 anything deserves your attention, and says so once — on screen, on a 2.13-inch
 e-paper display, via native notification, or over WhatsApp.

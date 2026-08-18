@@ -2,7 +2,7 @@
 
 use std::{fs, path::PathBuf};
 
-use bridgestatus_eink::{
+use brickellstatus_eink::{
     ChannelAvailability, ChannelCard, ChannelKind, ChannelSource, ChannelUrgency, PanelModel,
     render_channel_card, save_preview_png, save_scaled_preview_png,
 };

@@ -115,14 +115,19 @@ if (process.platform === 'darwin') {
   process.env.XWIN_ACCEPT_LICENSE ??= '1';
   crossArguments.push('--runner', 'cargo-xwin');
 
-  // Tauri's NSIS shortcut helpers single-quote their COM parameters, so the
-  // apostrophe in "Tender's Log.lnk" terminates the quote early and splits
-  // one macro argument into four ("requires 4 parameter(s), passed 7").
-  // The bundler regenerates utils.nsh on every build and runs makensis
+  // Tauri's NSIS shortcut helpers single-quote their COM parameters, so an
+  // apostrophe in the shortcut name terminates the quote early and splits one
+  // macro argument into four ("requires 4 parameter(s), passed 7"). The
+  // bundler regenerates utils.nsh on every build and runs makensis
   // immediately, so the only window to re-quote with NSIS backticks is a
-  // makensis shim on PATH. Remove when the upstream template is fixed.
+  // makensis shim on PATH.
+  //
+  // The product name no longer contains an apostrophe, so this no longer has
+  // anything to defuse and is a candidate for deletion. It is kept because the
+  // rename could not exercise the Windows cross-build to prove that — drop it
+  // once a release has built an installer without it.
   const realMakensis = captured('/bin/sh', ['-c', 'command -v makensis']);
-  const shimDirectory = mkdtempSync(join(tmpdir(), 'tenders-log-makensis-'));
+  const shimDirectory = mkdtempSync(join(tmpdir(), 'brickellstatus-makensis-'));
   const shim = join(shimDirectory, 'makensis');
   writeFileSync(
     shim,

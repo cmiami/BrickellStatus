@@ -1,4 +1,4 @@
-//! Explainable policy and prediction for BridgeStatus.
+//! Explainable policy and prediction for BrickellStatus.
 
 mod bridge;
 mod priority;

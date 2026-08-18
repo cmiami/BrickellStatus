@@ -1,6 +1,6 @@
 //! Generates the checked-in likely-opening e-paper design preview.
 
-use bridgestatus_eink::{
+use brickellstatus_eink::{
     EtaRange, Evidence, Freshness, LiveSnapshot, RenderConfig, SnapshotState, render_snapshot,
     save_preview_png, save_scaled_preview_png,
 };

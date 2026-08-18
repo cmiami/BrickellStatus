@@ -1,12 +1,12 @@
 [package]
-name = "bridgestatus-policy"
+name = "brickellstatus-policy"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
 description = "Explainable signal policy and Brickell bridge prediction"
 
 [dependencies]
-bridgestatus-model = { path = "../model" }
+brickellstatus-model = { path = "../model" }
 jiff = { version = "=0.2.35", features = ["serde"] }
 serde.workspace = true
 thiserror.workspace = true
