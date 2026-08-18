@@ -99,8 +99,8 @@ After that explicit first launch, the app opens normally for that user.
 
 Closing the main window hides it; it does not stop collection, prediction,
 delivery, or E213 rotation. Use the BrickellStatus menu-bar item to see the
-current USB/BLE state and choose **Open BrickellStatus** or **Quit Tender's
-Log**. Only the explicit Quit action stops the background runtime.
+current USB/BLE state and choose **Open BrickellStatus** or **Quit
+BrickellStatus**. Only the explicit Quit action stops the background runtime.
 
 The Windows installer has its own document mirroring this one:
 [`WINDOWS_RELEASE.md`](WINDOWS_RELEASE.md). It is cross-compiled from macOS,
