@@ -1445,7 +1445,7 @@ fn classify_corridor_fix(
     // bridge exists).
     let committed = match fix.branch {
         RiverBranch::River => true,
-        RiverBranch::NorthApproach | RiverBranch::SouthApproach => {
+        RiverBranch::NorthApproach | RiverBranch::GovernmentCut | RiverBranch::SouthApproach => {
             distance_meters <= 1_600.0
                 || vessel_static.and_then(|value| value.ship_type) == Some(36)
         }

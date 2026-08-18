@@ -23,8 +23,11 @@
 pub enum RiverBranch {
     /// The river trunk from Palmer Lake down through the mouth.
     River,
-    /// Government Cut / Main Channel / ICW leg approaching from the north.
+    /// Main Channel along the north face of Dodge Island, out to the ICW.
     NorthApproach,
+    /// The seaward passage: mouth → south of Dodge Island → Government Cut →
+    /// the jetties. This is the way out to sea, and the busiest of the three.
+    GovernmentCut,
     /// ICW leg approaching from the Rickenbacker to the south.
     SouthApproach,
 }
@@ -34,6 +37,7 @@ impl RiverBranch {
         match self {
             Self::River => "river",
             Self::NorthApproach => "north_approach",
+            Self::GovernmentCut => "government_cut",
             Self::SouthApproach => "south_approach",
         }
     }
@@ -48,6 +52,11 @@ impl RiverBranch {
         match self {
             Self::River => 120.0,
             Self::NorthApproach | Self::SouthApproach => 150.0,
+            // Wider than the others because it is two kinds of water joined:
+            // an open bay crossing where traffic spreads, and a dredged cut
+            // where it does not. Recorded tracks hold within this; the figure
+            // should come down once enough of them are logged to justify it.
+            Self::GovernmentCut => 220.0,
         }
     }
 }
@@ -110,15 +119,56 @@ const TRUNK: [Waypoint; 12] = [
 
 /// Northern entrance: mouth → north-east across the bay → the gap between the
 /// mainland and Dodge Island's west end → Main Channel along the island's
-/// north face → Government Cut jetties. Traced from the harbor chart and
-/// awaiting calibration from recorded inbound tracks.
-const NORTH_APPROACH: [Waypoint; 6] = [
+/// north face → out to the ICW.
+///
+/// This used to turn south-east off the island's east end and run to the
+/// Government Cut jetties, which drew the corridor straight across Dodge
+/// Island — 0 m offset over the terminals, well inside the 150 m half-width.
+/// The island is land and the jetties belong to the cut, which is its own
+/// branch below. The one test guarding against this sampled a point 280 m
+/// clear of the offending leg, so it never caught it.
+///
+/// It stops at the north-west edge of the Dodge cut because that is where the
+/// charted tracing stops being trustworthy. No recorded track runs the Main
+/// Channel east of here yet — every moving hull in the log took the cut — and
+/// a leg carried on by eye grazed the island's north quay at 0 m offset. It
+/// should be extended when traffic is observed on it, not before.
+const NORTH_APPROACH: [Waypoint; 4] = [
     (25.7710, -80.1849), // mouth at Brickell Point
     (25.7748, -80.1832), // Bayfront, turning for the port
     (25.7779, -80.1799), // between the mainland and Dodge Island's west end
-    (25.7793, -80.1665), // Main Channel, north of Dodge Island
-    (25.7707, -80.1487), // turn seaward off the island's east end
-    (25.7645, -80.1330), // Government Cut jetties
+    (25.7793, -80.1665), // Main Channel, north-west edge of the Dodge cut
+];
+
+/// The seaward passage, and the busiest water here: mouth → south of Dodge
+/// Island → Government Cut → the jetties.
+///
+/// Every point from `-80.1841` east is a recorded AIS position rather than a
+/// chart tracing. The eastern half is the median latitude of moving traffic
+/// per 0.001° of longitude, from vessels running reciprocal 115°/295° headings
+/// through the cut. The western half is the mid-bay run, which is sparser — a
+/// handful of hulls over one session — and is the part most likely to move as
+/// more tracks are logged.
+///
+/// It is one branch rather than two because the vessels say so: one hull was
+/// recorded from `-80.1841` at the bayfront through to `-80.1524` at the cut
+/// entrance without leaving the water this line describes.
+const GOVERNMENT_CUT: [Waypoint; 11] = [
+    (25.7710, -80.1849), // mouth at Brickell Point
+    (25.7741, -80.1841), // bayfront, turning seaward
+    (25.7725, -80.1825), // standing east across the bay
+    (25.7722, -80.1747), // mid-bay, south of Dodge Island
+    (25.7664, -80.1608), // the southward dogleg the tracks all take
+    (25.7712, -80.1520), // joining the cut at its western end
+    (25.7697, -80.1480), // Government Cut, north of Fisher Island
+    (25.7687, -80.1460), //
+    (25.7671, -80.1430), //
+    (25.7646, -80.1400), // last recorded fix on the outbound run
+    // Beyond the tracks. Carried on at the bearing the cut already holds
+    // between -80.1520 and -80.1400, which lands on the jetties where the
+    // chart puts them — agreement worth noting, but this point is still the
+    // one to correct first when a hull is recorded running out past it.
+    (25.7607, -80.1330), // the jetties, and open water beyond
 ];
 
 /// Southern entrance: mouth → the ICW leg past Brickell Key (surveyed live
@@ -142,6 +192,7 @@ pub fn project(latitude: f64, longitude: f64) -> RiverFix {
     let mouth_s = -mouth_to_bridge_meters();
     let trunk = project_polyline(latitude, longitude, &TRUNK);
     let north = project_polyline(latitude, longitude, &NORTH_APPROACH);
+    let cut = project_polyline(latitude, longitude, &GOVERNMENT_CUT);
     let south = project_polyline(latitude, longitude, &SOUTH_APPROACH);
 
     // Trunk arc-length runs mouth → upriver; shift so Brickell is zero. A
@@ -163,6 +214,12 @@ pub fn project(latitude: f64, longitude: f64) -> RiverFix {
         offset_meters: north.offset_meters,
         bridgeward_bearing_degrees: segment_bearing(&NORTH_APPROACH, north.segment_index, false),
     };
+    let cut = RiverFix {
+        branch: RiverBranch::GovernmentCut,
+        s_meters: mouth_s - cut.arc_meters,
+        offset_meters: cut.offset_meters,
+        bridgeward_bearing_degrees: segment_bearing(&GOVERNMENT_CUT, cut.segment_index, false),
+    };
     let south = RiverFix {
         branch: RiverBranch::SouthApproach,
         s_meters: mouth_s - south.arc_meters,
@@ -171,7 +228,7 @@ pub fn project(latitude: f64, longitude: f64) -> RiverFix {
     };
 
     let mut best = river;
-    for candidate in [north, south] {
+    for candidate in [north, cut, south] {
         if candidate.offset_meters < best.offset_meters {
             best = candidate;
         }
@@ -384,7 +441,7 @@ const TRUNK_STATIONS: [Station; 11] = [
 ];
 
 /// North approach marks, named from the charted route the leg follows.
-const NORTH_APPROACH_STATIONS: [Station; 6] = [
+const NORTH_APPROACH_STATIONS: [Station; 4] = [
     station("River mouth", StationKind::Mouth, None, 25.7710, -80.1849),
     station("Bayfront", StationKind::Waypoint, None, 25.7748, -80.1832),
     station(
@@ -401,20 +458,28 @@ const NORTH_APPROACH_STATIONS: [Station; 6] = [
         25.7793,
         -80.1665,
     ),
+];
+
+/// Government Cut marks along the seaward passage.
+const GOVERNMENT_CUT_STATIONS: [Station; 6] = [
+    station("River mouth", StationKind::Mouth, None, 25.7710, -80.1849),
+    station("Bayfront", StationKind::Waypoint, None, 25.7741, -80.1841),
+    station("Mid-bay", StationKind::Waypoint, None, 25.7722, -80.1747),
     station(
-        "Cut approach",
+        "Cut entrance",
         StationKind::Waypoint,
         None,
-        25.7707,
-        -80.1487,
+        25.7712,
+        -80.1520,
     ),
     station(
         "Government Cut",
         StationKind::Waypoint,
         None,
-        25.7645,
-        -80.1330,
+        25.7646,
+        -80.1400,
     ),
+    station("Jetties", StationKind::Waypoint, None, 25.7607, -80.1330),
 ];
 
 /// South approach marks along the ICW toward the Rickenbacker.
@@ -450,7 +515,7 @@ const SOUTH_APPROACH_STATIONS: [Station; 6] = [
 /// Published from the same constants `project` runs on, so the water a map
 /// highlights is by construction the water a fix is tested against: the two
 /// can never drift into disagreeing about what is being tracked.
-pub fn corridor_geometry() -> [CorridorBranch; 3] {
+pub fn corridor_geometry() -> [CorridorBranch; 4] {
     [
         CorridorBranch {
             id: RiverBranch::River.as_str(),
@@ -465,6 +530,13 @@ pub fn corridor_geometry() -> [CorridorBranch; 3] {
             corridor_offset_meters: RiverBranch::NorthApproach.corridor_offset_meters(),
             centerline: &NORTH_APPROACH,
             stations: &NORTH_APPROACH_STATIONS,
+        },
+        CorridorBranch {
+            id: RiverBranch::GovernmentCut.as_str(),
+            label: "Government Cut",
+            corridor_offset_meters: RiverBranch::GovernmentCut.corridor_offset_meters(),
+            centerline: &GOVERNMENT_CUT,
+            stations: &GOVERNMENT_CUT_STATIONS,
         },
         CorridorBranch {
             id: RiverBranch::SouthApproach.as_str(),
@@ -556,9 +628,11 @@ mod tests {
         assert!(inbound.in_corridor(), "offset {}", inbound.offset_meters);
         assert!(inbound.s_meters < -600.0 && inbound.s_meters > -2_000.0);
 
-        // Out by the Government Cut jetties: far seaward on the north branch.
+        // Out by the jetties: far seaward, and on the cut rather than the Main
+        // Channel. The jetties are south of Dodge Island; the north branch
+        // used to claim them, which is what dragged it across the island.
         let entering = project(25.7640, -80.1360);
-        assert_eq!(entering.branch, RiverBranch::NorthApproach);
+        assert_eq!(entering.branch, RiverBranch::GovernmentCut);
         assert!(entering.s_meters < -4_500.0);
 
         // Mid-bay, well off any channel.
@@ -580,12 +654,41 @@ mod tests {
             );
         }
 
-        // Dodge Island itself is land; the corridor must not cover it.
-        let island = project(25.7765, -80.1690);
+        // No channel centerline may run through Dodge Island, which is land.
+        //
+        // This used to be a single point at 25.7765,-80.1690, and it sat 280 m
+        // clear of the leg that actually crossed the island — so it passed
+        // while the north approach ran over the terminals at 0 m offset. One
+        // sample cannot guard a polygon.
+        //
+        // The box is the terminal ground in the island's middle, held off both
+        // shorelines: the Main Channel runs along the north quay and the cut
+        // along the south, so a corridor *edge* is supposed to lap the berths.
+        // What must never happen is a centerline crossing the land between
+        // them, which is what this measures. 25.7750,-80.1576 — inside this
+        // box — is where the old north approach sat at 0 m offset.
+        let mut nearest = f64::MAX;
+        let mut worst = (0.0, 0.0);
+        let mut latitude = 25.7750;
+        while latitude <= 25.7780 {
+            let mut longitude = -80.1650;
+            while longitude <= -80.1500 {
+                let fix = project(latitude, longitude);
+                if fix.offset_meters < nearest {
+                    nearest = fix.offset_meters;
+                    worst = (latitude, longitude);
+                }
+                longitude += 0.0005;
+            }
+            latitude += 0.0005;
+        }
         assert!(
-            !island.in_corridor(),
-            "Dodge Island projected into the corridor at offset {}",
-            island.offset_meters
+            nearest > 150.0,
+            "a centerline passes within {:.0} m of the middle of Dodge Island, \
+             nearest at {:.4},{:.4}",
+            nearest,
+            worst.0,
+            worst.1
         );
 
         // The surveyed ICW leg past Brickell Key runs south of the mouth, so
@@ -598,7 +701,7 @@ mod tests {
     #[test]
     fn published_geometry_is_the_geometry_fixes_are_tested_against() {
         let branches = corridor_geometry();
-        assert_eq!(branches.len(), 3);
+        assert_eq!(branches.len(), 4);
 
         // Every published waypoint must project onto its own branch at
         // effectively zero offset. If a centerline were ever published from a
@@ -620,6 +723,7 @@ mod tests {
             let matching = [
                 RiverBranch::River,
                 RiverBranch::NorthApproach,
+                RiverBranch::GovernmentCut,
                 RiverBranch::SouthApproach,
             ]
             .into_iter()
