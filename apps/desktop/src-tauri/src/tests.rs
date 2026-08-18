@@ -358,6 +358,41 @@ async fn windows_credentials_rest_encrypted_and_migrate_from_plaintext() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn a_sealed_file_this_account_cannot_open_does_not_lock_the_store() {
+    let directory = std::env::temp_dir().join(format!("tenders-secret-test-{}", Uuid::now_v7()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("credentials.json");
+    // Shaped like an envelope this machine did not write, as a file restored
+    // from a backup or carried from another account would be.
+    std::fs::write(
+        &path,
+        br#"{"dpapiCiphertext":"bm90LWEtcmVhbC1kcGFwaS1ibG9i"}"#,
+    )
+    .unwrap();
+    let store = LocalSecretStore::new(path.clone());
+
+    // Reading reports no secrets rather than an error...
+    assert_eq!(store.whatsapp_token().await.unwrap(), None);
+
+    // ...and writing still succeeds, which it cannot if reading errors first.
+    store
+        .store_whatsapp_token("replacement-token".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.whatsapp_token().await.unwrap().as_deref(),
+        Some("replacement-token")
+    );
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        raw.contains("dpapiCiphertext") && !raw.contains("replacement-token"),
+        "the recovered file must be re-sealed, not left plaintext"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 #[tokio::test]
 async fn credential_removal_gates_survive_a_runtime_restart() {
     let store = Store::in_memory().await.unwrap();

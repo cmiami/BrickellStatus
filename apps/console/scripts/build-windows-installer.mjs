@@ -134,7 +134,14 @@ if (process.platform === 'darwin') {
   );
   chmodSync(shim, 0o755);
   process.env.PATH = `${shimDirectory}${delimiter}${process.env.PATH}`;
-} else if (process.platform !== 'win32') {
+} else if (process.platform === 'win32') {
+  // The apostrophe workaround above is a macOS shell shim. Releases are built
+  // by cross-compiling, so a native build is untested and carries no fix.
+  console.warn(
+    'Native Windows build: if makensis fails inside the shortcut macros, that is the ' +
+      "known apostrophe-in-product-name issue. Cross-build from macOS instead."
+  );
+} else {
   throw new Error('The Windows installer builds on macOS (cross) or Windows (native) only.');
 }
 

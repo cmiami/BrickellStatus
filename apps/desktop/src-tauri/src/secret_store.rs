@@ -111,10 +111,26 @@ fn decode_secrets(bytes: &[u8]) -> Result<LocalSecrets, String> {
     // LocalSecrets. A pre-DPAPI plaintext file lands in the fallback and is
     // re-enveloped by the next write.
     if let Ok(envelope) = serde_json::from_slice::<DpapiEnvelope>(bytes) {
-        let ciphertext = base64::engine::general_purpose::STANDARD
+        // A sealed file that this account cannot open — restored from a
+        // backup, carried to another machine, or written before a credential
+        // reset — is unrecoverable by definition. Reporting the failure would
+        // also fail every *write*, which reads first, leaving no way back in;
+        // so the tokens are treated as absent and the next write re-seals.
+        let opened = base64::engine::general_purpose::STANDARD
             .decode(envelope.dpapi_ciphertext)
-            .map_err(|error| format!("Local credential file is invalid: {error}"))?;
-        let mut plaintext = dpapi::unprotect(&ciphertext)?;
+            .map_err(|error| error.to_string())
+            .and_then(|ciphertext| dpapi::unprotect(&ciphertext));
+        let mut plaintext = match opened {
+            Ok(plaintext) => plaintext,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "sealed credential file could not be opened by this account; \
+                     continuing without stored secrets"
+                );
+                return Ok(LocalSecrets::default());
+            }
+        };
         let secrets = serde_json::from_slice(&plaintext)
             .map_err(|error| format!("Local credential file is invalid: {error}"));
         plaintext.zeroize();

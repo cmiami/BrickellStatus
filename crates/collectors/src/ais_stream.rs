@@ -725,6 +725,12 @@ async fn run_connection(
     state: &Arc<RwLock<StreamState>>,
     cancellation: &CancellationToken,
 ) -> ConnectionExit {
+    // tungstenite's rustls connector resolves the process-default provider,
+    // falling back to whichever one the rustls crate features name. That
+    // fallback panics if a future dependency ever enables aws-lc-rs alongside
+    // ring, so name the provider here rather than inherit an ambiguity.
+    // Installing is idempotent.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let websocket_config = WebSocketConfig::default()
         .read_buffer_size(16 * 1024)
         .write_buffer_size(4 * 1024)
