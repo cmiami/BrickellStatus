@@ -5,6 +5,7 @@
   import MarketScopeEditor from './channel-scope/MarketScopeEditor.svelte';
   import NewsScopeEditor from './channel-scope/NewsScopeEditor.svelte';
   import OfficialScopeEditor from './channel-scope/OfficialScopeEditor.svelte';
+  import SportsScopeEditor from './channel-scope/SportsScopeEditor.svelte';
   import WeatherScopeEditor from './channel-scope/WeatherScopeEditor.svelte';
   import type { ChannelChange } from './channel-scope/scope';
   import type { AisSettings, AlertArea, ChannelPreference, UnitSystem } from '$lib/types';
@@ -37,6 +38,8 @@
     <HurricaneScopeEditor {channel} {onchannelchange} />
   {:else if channel.kind === 'news'}
     <NewsScopeEditor {channel} {onchannelchange} />
+  {:else if channel.kind === 'sports'}
+    <SportsScopeEditor {channel} {onchannelchange} />
   {:else if channel.kind === 'earthquake'}
     <EarthquakeScopeEditor {channel} {onchannelchange} />
   {:else if channel.kind === 'markets'}

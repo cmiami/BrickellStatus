@@ -2006,7 +2006,12 @@ fn source_label(kind: ChannelKindDto, _channel: &ChannelPreference) -> &'static 
         ChannelKindDto::Weather => "Open-Meteo",
         ChannelKindDto::Official => "National Weather Service",
         ChannelKindDto::Hurricane => "National Hurricane Center",
+        // Kept per-kind. The card's action line now names the publisher that
+        // filed the item, which is the honest per-feed answer; this label
+        // describes the whole channel's provenance, where a single name would
+        // be a lie as soon as a second feed is ticked.
         ChannelKindDto::News => "Configured RSS/Atom",
+        ChannelKindDto::Sports => "Configured sports feeds",
         ChannelKindDto::Earthquake => "U.S. Geological Survey",
         ChannelKindDto::Markets => "Yahoo Finance chart",
         ChannelKindDto::System => "Local runtime",

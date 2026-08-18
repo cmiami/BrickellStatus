@@ -1011,6 +1011,7 @@ fn material_channel_state(channel: &ChannelSnapshot, snapshot: &AppSnapshot) -> 
             ChannelKindDto::Official
             | ChannelKindDto::Hurricane
             | ChannelKindDto::News
+            | ChannelKindDto::Sports
             | ChannelKindDto::Earthquake => {
                 format!("active:{}", delivered_signal_material(channel))
             }

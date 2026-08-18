@@ -191,6 +191,7 @@ pub enum ChannelKindDto {
     Official,
     Hurricane,
     News,
+    Sports,
     Earthquake,
     Markets,
     System,

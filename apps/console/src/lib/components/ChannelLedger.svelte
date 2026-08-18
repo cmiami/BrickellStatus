@@ -8,6 +8,7 @@
     Newspaper,
     RadioTower,
     Send,
+    Trophy,
     Waves
   } from '@lucide/svelte';
   import type { ChannelSnapshot, OutputSnapshot } from '$lib/types';
@@ -40,6 +41,7 @@
     if (kind === 'official') return Landmark;
     if (kind === 'hurricane') return Waves;
     if (kind === 'news') return Newspaper;
+    if (kind === 'sports') return Trophy;
     if (kind === 'markets') return ChartNoAxesCombined;
     return BellRing;
   };

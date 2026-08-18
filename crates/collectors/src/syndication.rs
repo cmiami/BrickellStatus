@@ -124,6 +124,10 @@ pub fn parse_syndication(
         .or_else(|| feed_url.host_str())
         .unwrap_or("RSS/Atom feed")
         .to_owned();
+    // An explicitly configured name is the user's word and outranks anything
+    // we could infer from the items.
+    let unaggregate = is_google_news(feed_url)
+        && configured_source_name.is_none_or(|name| name.trim().is_empty());
 
     feed.entries
         .into_iter()
@@ -152,6 +156,17 @@ pub fn parse_syndication(
                 .map(|title| plain_text(&title.content, 300))
                 .filter(|title| !title.is_empty())
                 .unwrap_or_else(|| "Untitled update".into());
+            // Lift the publisher out of the headline and into the field built
+            // to hold it. The card prints the source on its own line, so
+            // leaving it appended would show the name twice and cost the
+            // headline the characters.
+            let (title, item_source_name) = match unaggregate
+                .then(|| split_aggregated_title(&title))
+                .flatten()
+            {
+                Some((headline, publisher)) => (headline.to_owned(), publisher.to_owned()),
+                None => (title, source_name.clone()),
+            };
             let summary = entry
                 .summary
                 .as_ref()
@@ -197,13 +212,62 @@ pub fn parse_syndication(
                 ends_at: None,
                 location: None,
                 source: SourceLink {
-                    name: source_name.clone(),
+                    name: item_source_name,
                     url: link.or_else(|| Some(feed_url.clone())),
                 },
                 attributes,
             })
         })
         .collect()
+}
+
+/// Whether this feed is a Google News edition or search.
+///
+/// Google News is an aggregator, so its feed title is the query rather than a
+/// publisher, and every headline carries the real publisher appended after a
+/// spaced hyphen. Left alone, six Miami team feeds would all attribute
+/// themselves to "Google News" and burn a quarter of a 36-character panel line
+/// repeating the publisher the card already has a slot for.
+fn is_google_news(feed_url: &Url) -> bool {
+    feed_url
+        .host_str()
+        .is_some_and(|host| host == "news.google.com")
+}
+
+/// Splits `Headline - Publisher` into its two halves.
+///
+/// This has to be a judgement rather than a lookup: feed-rs 2.4 does not
+/// surface the RSS `<source>` element, so the publisher Google states per item
+/// never reaches us and the title is the only place the name appears.
+///
+/// The risk being managed is a headline that contains a spaced hyphen of its
+/// own — "Butler on the ruthless standard - and what it cost him" must come
+/// back whole. What separates the two is how the tail opens: a masthead is a
+/// name ("Miami Herald") or a domain ("heavy.com"), while a continuing clause
+/// starts mid-sentence in lower case. When the tail does not look like a name,
+/// nothing is split and the headline keeps every word.
+fn split_aggregated_title(title: &str) -> Option<(&str, &str)> {
+    const MAX_PUBLISHER_WORDS: usize = 6;
+    const MAX_PUBLISHER_CHARS: usize = 48;
+
+    let (headline, publisher) = title.rsplit_once(" - ")?;
+    let (headline, publisher) = (headline.trim(), publisher.trim());
+    if headline.is_empty() || publisher.is_empty() {
+        return None;
+    }
+    if publisher.chars().count() > MAX_PUBLISHER_CHARS
+        || publisher.split_whitespace().count() > MAX_PUBLISHER_WORDS
+        || publisher.ends_with(['.', '?', '!', ','])
+    {
+        return None;
+    }
+    let opens_like_a_name = publisher
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_uppercase() || character.is_numeric());
+    // A bare domain is a masthead too, and those are conventionally lower case.
+    let reads_like_a_domain = publisher.contains('.') && !publisher.contains(' ');
+    (opens_like_a_name || reads_like_a_domain).then_some((headline, publisher))
 }
 
 fn safe_link(value: &str) -> Option<Url> {
@@ -259,6 +323,78 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].source.name, "Configured name");
         assert_eq!(items[0].attributes["authors"], json!(["Signals Desk"]));
+    }
+
+    #[test]
+    fn google_news_items_are_attributed_to_the_publisher_that_filed_them() {
+        let url = Url::parse(
+            "https://news.google.com/rss/search?q=%22Miami+Heat%22&hl=en-US&gl=US&ceid=US:en",
+        )
+        .unwrap();
+        let items = parse_syndication(
+            include_bytes!("../fixtures/google-news-search.xml"),
+            None,
+            &url,
+            10,
+        )
+        .unwrap();
+        assert_eq!(items.len(), 4);
+
+        // The suffix moves out of the headline and into the source field the
+        // card already prints on its own line.
+        assert_eq!(
+            items[0].title,
+            "Heat just got intriguing Klay Thompson update they desperately needed"
+        );
+        assert_eq!(items[0].source.name, "All U Can Heat");
+        assert_eq!(items[2].title, "What is next for the roster?");
+        assert_eq!(items[2].source.name, "Miami Herald");
+
+        // A headline with no publisher suffix keeps every word, and falls back
+        // to the feed's own name rather than losing its tail to the split.
+        assert_eq!(
+            items[3].title,
+            "Butler on the ruthless standard - and what it cost him"
+        );
+        assert_eq!(items[3].source.name, "\"Miami Heat\" - Google News");
+
+        // Nothing is left attributed to the aggregator itself.
+        assert!(
+            items[..3]
+                .iter()
+                .all(|item| item.source.name != "Google News"),
+            "an aggregator name is not a publisher"
+        );
+    }
+
+    #[test]
+    fn a_configured_name_outranks_the_aggregator_split() {
+        let url = Url::parse("https://news.google.com/rss/search?q=test").unwrap();
+        let items = parse_syndication(
+            include_bytes!("../fixtures/google-news-search.xml"),
+            Some("My sports desk"),
+            &url,
+            10,
+        )
+        .unwrap();
+        assert!(
+            items
+                .iter()
+                .all(|item| item.source.name == "My sports desk")
+        );
+        // The headline keeps its suffix, because the user asked for one name
+        // and splitting would contradict it.
+        assert!(items[0].title.ends_with(" - All U Can Heat"));
+    }
+
+    #[test]
+    fn ordinary_feeds_keep_hyphenated_headlines_intact() {
+        // The split is aggregator-only. A publisher feed whose headline happens
+        // to contain " - " must not lose its tail.
+        let url = Url::parse("https://example.com/feed.xml").unwrap();
+        let items = parse_syndication(include_bytes!("../fixtures/sample-rss.xml"), None, &url, 10)
+            .unwrap();
+        assert_eq!(items[0].source.name, "Miami Signals");
     }
 
     #[test]

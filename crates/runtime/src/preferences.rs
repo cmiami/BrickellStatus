@@ -8,7 +8,21 @@ use crate::{
     AisSettings, AlertArea, AlertAreaSource, AppPreferences, ChannelKindDto, ChannelPreference,
     DestinationIdDto, DisplaySettings, DisplayTransport, InterruptPreset, PolicyProfile,
     ProfilePreset, QuietHours, SurfacePresence, WhatsAppRecipientConsent, WhatsAppSettings,
+    catalog::catalog,
 };
+
+/// Resolve shipped catalog entries to their URLs, for seeding a default channel.
+///
+/// An id that is not in the catalog is dropped rather than seeded as a broken
+/// URL; `every_seeded_default_is_a_real_catalog_entry` fails the build if that
+/// ever happens, so it cannot pass silently.
+fn catalog_urls(entry_ids: &[&str]) -> Vec<String> {
+    entry_ids
+        .iter()
+        .filter_map(|id| catalog().entry_url(id))
+        .map(str::to_owned)
+        .collect()
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
 pub enum PreferencesError {
@@ -172,7 +186,11 @@ pub fn default_channel_preferences() -> Vec<ChannelPreference> {
         ChannelPreference {
             id: "news.local".into(),
             kind: ChannelKindDto::News,
-            title: "Local news".into(),
+            // The id stays `news.local` — the console's policy presets address
+            // it by that name — but the channel is no longer local-only, and
+            // the panel prints this title under a header that already says
+            // NEWS.
+            title: "Headlines".into(),
             enabled: true,
             presence: SurfacePresence::Rotation,
             interrupt_preset: InterruptPreset::Off,
@@ -181,15 +199,24 @@ pub fn default_channel_preferences() -> Vec<ChannelPreference> {
             max_items: 3,
             rotation_seconds: 24,
             scope: BTreeMap::from([
+                // Seeded from the catalog by id rather than by repeating URL
+                // literals here, so a feed that moves is corrected in one file.
+                // The three Miami desks are the original shipped set; the two
+                // wire feeds give a first run something to show before anyone
+                // opens the picker.
                 (
                     "feeds".into(),
-                    json!([
-                        "https://www.miamidade.gov/global/rss-news.page",
-                        "https://wsvn.com/feed/",
-                        "https://www.local10.com/arc/outboundfeeds/rss/?outputType=xml"
-                    ]),
+                    json!(catalog_urls(&[
+                        "bbc.world",
+                        "npr.news",
+                        "miamidade.gov",
+                        "wsvn.all",
+                        "local10.all",
+                    ])),
                 ),
-                ("topics".into(), json!(["Miami", "transportation"])),
+                // No topic filter. A topic list here silently hides everything
+                // the user just ticked but did not think to name.
+                ("topics".into(), json!([])),
                 ("excludeTopics".into(), json!([])),
                 ("breakingOnly".into(), json!(false)),
             ]),
@@ -226,6 +253,40 @@ pub fn default_channel_preferences() -> Vec<ChannelPreference> {
                 ("symbols".into(), json!(["AMD"])),
                 ("movePercent".into(), json!(5)),
                 ("pollSeconds".into(), json!(300)),
+            ]),
+        },
+        // Last in the array, and the array is the rotation order. An optional
+        // channel that ships off should not sit between two that ship on.
+        ChannelPreference {
+            id: "sports.miami".into(),
+            kind: ChannelKindDto::Sports,
+            // Not "Sports": the card header already says SPORTS, and a title
+            // line repeating it spends a row of a 122-pixel panel saying
+            // nothing.
+            title: "Miami teams".into(),
+            enabled: false,
+            presence: SurfacePresence::Rotation,
+            interrupt_preset: InterruptPreset::Off,
+            destinations: vec![DestinationIdDto::Epaper],
+            // A trade stays worth reading for the rest of the day, unlike a
+            // rain warning. News runs 180; sports has no reason to be that
+            // impatient.
+            max_age_minutes: 720,
+            max_items: 3,
+            rotation_seconds: 20,
+            scope: BTreeMap::from([
+                (
+                    "feeds".into(),
+                    json!(catalog_urls(&[
+                        "cbs.nfl",
+                        "dolphins.phinsider",
+                        "heat.gnews",
+                        "pfr.all",
+                    ])),
+                ),
+                ("topics".into(), json!([])),
+                ("excludeTopics".into(), json!([])),
+                ("breakingOnly".into(), json!(false)),
             ]),
         },
     ]
@@ -507,6 +568,42 @@ fn validate_channel(
         validate_earthquake_scope(channel)?;
     } else if channel.kind == ChannelKindDto::Markets {
         validate_markets_scope(channel)?;
+    } else if matches!(channel.kind, ChannelKindDto::News | ChannelKindDto::Sports) {
+        validate_syndication_scope(channel)?;
+    }
+    Ok(())
+}
+
+/// Bounds for the two kinds fed by RSS/Atom.
+///
+/// This checks shape and size only, and deliberately does not judge the feed
+/// URLs themselves. `validate_preferences` runs on **load** as well as save
+/// (`engine.rs`), so a rule here is a rule about whether an existing install
+/// still starts. Someone who pasted an `http://` feed into the old free-text
+/// box must not find the app refusing to open.
+///
+/// URL quality is enforced where it costs nothing: the picker checks before it
+/// will add a feed and says which rule the address broke, and the collector
+/// factory skips and logs anything unusable rather than failing the build. The
+/// fetcher remains the actual boundary — it re-resolves DNS and re-checks every
+/// redirect hop regardless of what got stored.
+fn validate_syndication_scope(channel: &ChannelPreference) -> Result<(), PreferencesError> {
+    const MAX_FEEDS: usize = 40;
+
+    let Some(feeds) = channel.scope.get("feeds") else {
+        return Ok(());
+    };
+    let feeds = feeds.as_array().ok_or_else(|| {
+        PreferencesError::Invalid(format!("{}.scope.feeds must be an array", channel.id))
+    })?;
+    if feeds.len() > MAX_FEEDS {
+        return invalid(format!(
+            "{} may subscribe to at most {MAX_FEEDS} feeds",
+            channel.id
+        ));
+    }
+    if feeds.iter().any(|feed| !feed.is_string()) {
+        return invalid(format!("{}.scope.feeds must hold strings", channel.id));
     }
     Ok(())
 }
@@ -720,7 +817,7 @@ mod tests {
             value["profile"]["channels"][1]["scope"]["areaIds"][0],
             "area.miami"
         );
-        assert_eq!(value["profile"]["channels"].as_array().unwrap().len(), 7);
+        assert_eq!(value["profile"]["channels"].as_array().unwrap().len(), 8);
         validate_preferences(&AppPreferences::default()).unwrap();
     }
 
@@ -805,6 +902,102 @@ mod tests {
         assert!(!market.enabled);
         assert_eq!(market.scope["symbols"], json!(["AMD"]));
         assert_eq!(market.scope["pollSeconds"], json!(300));
+        validate_preferences(&preferences).unwrap();
+    }
+
+    #[test]
+    fn every_seeded_default_is_a_real_catalog_entry() {
+        // `catalog_urls` drops an id it cannot find, so a typo there would ship
+        // a channel quietly missing a feed rather than failing loudly.
+        let preferences = AppPreferences::default();
+        let catalog = catalog();
+        let mut seeded = 0;
+        for channel in &preferences.profile.channels {
+            if !matches!(channel.kind, ChannelKindDto::News | ChannelKindDto::Sports) {
+                continue;
+            }
+            let feeds = channel.scope["feeds"].as_array().unwrap();
+            assert!(!feeds.is_empty(), "{} seeded no feeds", channel.id);
+            for feed in feeds {
+                let url = feed.as_str().unwrap();
+                assert!(
+                    catalog.label_for_url(url).is_some(),
+                    "{} seeds {url}, which is not in the catalog",
+                    channel.id
+                );
+                seeded += 1;
+            }
+        }
+        assert_eq!(seeded, 9, "news seeds five feeds and sports seeds four");
+    }
+
+    #[test]
+    fn the_sports_channel_ships_off_and_never_interrupts() {
+        let preferences = AppPreferences::default();
+        let sports = preferences
+            .profile
+            .channels
+            .iter()
+            .find(|channel| channel.kind == ChannelKindDto::Sports)
+            .expect("a sports channel ships");
+        assert_eq!(sports.id, "sports.miami");
+        assert!(!sports.enabled);
+        assert_eq!(sports.interrupt_preset, InterruptPreset::Off);
+        validate_preferences(&preferences).unwrap();
+    }
+
+    #[test]
+    fn syndication_feeds_are_bounded_by_shape_and_count() {
+        let mut preferences = AppPreferences::default();
+
+        preferences.profile.channels[4]
+            .scope
+            .insert("feeds".into(), json!("https://a.example/feed"));
+        assert!(
+            validate_preferences(&preferences).is_err(),
+            "feeds is a list"
+        );
+
+        preferences.profile.channels[4]
+            .scope
+            .insert("feeds".into(), json!([42]));
+        assert!(
+            validate_preferences(&preferences).is_err(),
+            "feeds holds strings"
+        );
+
+        let too_many = (0..41)
+            .map(|index| format!("https://example.com/{index}"))
+            .collect::<Vec<_>>();
+        preferences.profile.channels[4]
+            .scope
+            .insert("feeds".into(), json!(too_many));
+        assert!(validate_preferences(&preferences).is_err(), "41 exceeds 40");
+
+        preferences.profile.channels[4].scope.insert(
+            "feeds".into(),
+            json!(["https://a.example/feed", "https://b.example/feed"]),
+        );
+        validate_preferences(&preferences).unwrap();
+    }
+
+    #[test]
+    fn a_stored_feed_the_fetcher_would_refuse_still_lets_the_app_start() {
+        // This runs on load, not just on save. Someone who pasted an http feed
+        // into the old free-text box has one sitting in their stored
+        // preferences right now, and refusing it here would mean the app no
+        // longer opens for them. The factory skips it and the picker will not
+        // let another one in.
+        let mut preferences = AppPreferences::default();
+        preferences.profile.channels[4].scope.insert(
+            "feeds".into(),
+            json!([
+                "http://insecure.example/feed",
+                "not a url at all",
+                "",
+                "https://good.example/feed",
+            ]),
+        );
         validate_preferences(&preferences).unwrap();
     }
 

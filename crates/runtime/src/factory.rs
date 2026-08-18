@@ -338,25 +338,47 @@ impl CollectorFactory for CredentialFreeCollectorFactory {
                     )
                     .with_minimum_interval(DEFAULT_POLL_INTERVAL),
                 );
-            } else if channel.kind == ChannelKindDto::News {
+            } else if matches!(channel.kind, ChannelKindDto::News | ChannelKindDto::Sports) {
+                // One unusable feed used to abort the whole build, which failed
+                // `save_preferences` outright: a single mistyped character in
+                // one feed blocked every other setting on the page from being
+                // saved. Skip the bad entry, keep the good ones polling, and
+                // let the editor show which one is wrong.
+                // The registration id is derived from the feed, so a repeated
+                // feed would otherwise collide with itself.
+                let mut seen = BTreeSet::new();
                 for feed in string_array(channel.scope.get("feeds")) {
-                    if feed == "User-configured RSS" || feed.trim().is_empty() {
+                    if feed.trim().is_empty() || !seen.insert(feed) {
                         continue;
                     }
-                    let url = Url::parse(feed).map_err(|error| {
-                        RuntimeError::Configuration(format!(
-                            "{} contains an invalid RSS/Atom URL: {error}",
-                            channel.id
-                        ))
-                    })?;
+                    let Ok(url) = Url::parse(feed) else {
+                        tracing::warn!(
+                            channel = %channel.id,
+                            feed = %redacted_feed(feed),
+                            "skipping a feed that is not a URL",
+                        );
+                        continue;
+                    };
                     let mut config = SyndicationConfig::new(url);
                     config.max_items = channel.max_items;
                     config.user_agent = self.user_agent.clone();
+                    let collector = match SyndicationCollector::new(config) {
+                        Ok(collector) => collector,
+                        Err(error) => {
+                            tracing::warn!(
+                                channel = %channel.id,
+                                feed = %redacted_feed(feed),
+                                %error,
+                                "skipping a feed the fetcher will not accept",
+                            );
+                            continue;
+                        }
+                    };
                     registrations.push(
                         CollectorRegistration::new(
                             format!("rss.{}.{}", short_hash(&channel.id), short_hash(feed)),
                             &channel.id,
-                            Arc::new(SyndicationCollector::new(config)?),
+                            Arc::new(collector),
                         )
                         .with_minimum_interval(DEFAULT_POLL_INTERVAL),
                     );
@@ -697,6 +719,18 @@ fn market_label(symbol: &str) -> &str {
     }
 }
 
+/// A rejected feed string reduced to something safe to write to a log.
+///
+/// Whatever the user pasted is still in this string, and a URL we refused to
+/// accept is exactly the kind that might carry a credential. Log the host when
+/// it parses and a short prefix when it does not.
+fn redacted_feed(feed: &str) -> String {
+    match Url::parse(feed) {
+        Ok(url) => url.host_str().unwrap_or("unknown host").to_owned(),
+        Err(_) => feed.chars().take(24).collect(),
+    }
+}
+
 fn short_hash(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
     digest[..8]
@@ -828,9 +862,41 @@ mod tests {
     }
 
     #[test]
+    fn one_unusable_feed_cannot_stop_the_others_from_polling() {
+        // The whole build used to abort on the first bad URL, and because
+        // `save_preferences` calls this, a single mistyped character blocked
+        // saving every unrelated setting on the page.
+        let mut preferences = AppPreferences::default();
+        preferences.profile.channels[4].scope.insert(
+            "feeds".into(),
+            json!([
+                "https://good-one.example/feed",
+                "http://insecure.example/feed",
+                "not a url at all",
+                "https://127.0.0.1/feed",
+                "",
+                "https://good-two.example/feed",
+                "https://good-two.example/feed",
+            ]),
+        );
+
+        let ids = collector_ids(&preferences);
+        let feeds = ids
+            .iter()
+            .filter(|id| id.starts_with("rss."))
+            .filter(|id| !id.contains("hurricane"))
+            .count();
+        // Two usable feeds registered; the repeat, the blank, the non-URL, the
+        // plain-http one, and the loopback one are all skipped.
+        assert_eq!(feeds, 2);
+    }
+
+    #[test]
     fn defaults_build_only_the_enabled_credential_free_sources() {
         let ids = collector_ids(&AppPreferences::default());
-        assert_eq!(ids.len(), 9);
+        // Five seeded news feeds rather than three, and the sports channel
+        // ships disabled so it registers nothing at all.
+        assert_eq!(ids.len(), 11);
         assert!(ids.iter().any(|id| id == "fl511.bridge.brickell"));
         assert!(ids.iter().any(|id| id == "bbpilots.bridge.brickell"));
         assert!(
@@ -846,7 +912,7 @@ mod tests {
             ids.iter()
                 .any(|id| id == "nhc.atlantic_rss.hurricane.atlantic")
         );
-        assert_eq!(ids.iter().filter(|id| id.starts_with("rss.")).count(), 3);
+        assert_eq!(ids.iter().filter(|id| id.starts_with("rss.")).count(), 5);
         assert!(!ids.iter().any(|id| id.starts_with("usgs.")));
         assert!(!ids.iter().any(|id| id.starts_with("aisstream.")));
     }

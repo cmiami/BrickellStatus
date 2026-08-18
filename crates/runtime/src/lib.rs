@@ -4,12 +4,14 @@
 //! Tauri. Desktop commands can hold an [`std::sync::Arc<RuntimeEngine>`] as
 //! managed state and expose its narrow APIs.
 
+mod catalog;
 mod dto;
 mod engine;
 mod factory;
 mod location_search;
 mod preferences;
 
+pub use catalog::{CatalogEntry, CatalogGroup, CatalogSection, FeedCatalog, catalog};
 pub use dto::*;
 pub use engine::{
     AisStreamKeyChange, CollectorFactory, CollectorRegistration, RefreshReport, RuntimeConfig,

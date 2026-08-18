@@ -1,0 +1,267 @@
+{
+  "schemaVersion": 1,
+  "verifiedOn": "2026-08-18",
+  "sections": [
+    {
+      "id": "news.breaking",
+      "kind": "news",
+      "label": "Breaking and world",
+      "groups": [
+        {
+          "id": "news.breaking.wire",
+          "label": "Wire and international desks",
+          "entries": [
+            { "id": "bbc.world", "label": "BBC News / World", "url": "https://feeds.bbci.co.uk/news/world/rss.xml" },
+            { "id": "bbc.top", "label": "BBC News / Top stories", "url": "https://feeds.bbci.co.uk/news/rss.xml" },
+            { "id": "npr.news", "label": "NPR / News", "url": "https://feeds.npr.org/1001/rss.xml" },
+            { "id": "npr.world", "label": "NPR / World", "url": "https://feeds.npr.org/1004/rss.xml" },
+            { "id": "aljazeera.all", "label": "Al Jazeera", "url": "https://www.aljazeera.com/xml/rss/all.xml" },
+            { "id": "guardian.world", "label": "The Guardian / World", "url": "https://www.theguardian.com/world/rss" },
+            { "id": "dw.all", "label": "Deutsche Welle", "url": "https://rss.dw.com/rdf/rss-en-all" },
+            { "id": "france24.en", "label": "France 24", "url": "https://www.france24.com/en/rss" },
+            { "id": "sky.world", "label": "Sky News / World", "url": "https://feeds.skynews.com/feeds/rss/world.xml" }
+          ]
+        },
+        {
+          "id": "news.breaking.us",
+          "label": "United States",
+          "entries": [
+            { "id": "abc.top", "label": "ABC News / Top stories", "url": "https://abcnews.go.com/abcnews/topstories" },
+            { "id": "cbs.main", "label": "CBS News", "url": "https://www.cbsnews.com/latest/rss/main" },
+            { "id": "nbc.top", "label": "NBC News / Top stories", "url": "https://feeds.nbcnews.com/nbcnews/public/news" },
+            { "id": "gnews.us", "label": "Google News / Top stories", "url": "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en" },
+            { "id": "wsj.world", "label": "Wall Street Journal / World", "url": "https://feeds.content.dowjones.io/public/rss/RSSWorldNews" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "news.topical",
+      "kind": "news",
+      "label": "Science, technology and business",
+      "groups": [
+        {
+          "id": "news.topical.all",
+          "label": "Desks that rarely carry politics",
+          "entries": [
+            { "id": "bbc.science", "label": "BBC / Science and environment", "url": "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml" },
+            { "id": "bbc.tech", "label": "BBC / Technology", "url": "https://feeds.bbci.co.uk/news/technology/rss.xml" },
+            { "id": "bbc.business", "label": "BBC / Business", "url": "https://feeds.bbci.co.uk/news/business/rss.xml" },
+            { "id": "cnbc.top", "label": "CNBC / US top news", "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html" },
+            { "id": "nasa.all", "label": "NASA", "url": "https://www.nasa.gov/feed/" },
+            { "id": "arstechnica.all", "label": "Ars Technica", "url": "https://feeds.arstechnica.com/arstechnica/index" },
+            { "id": "hn.front", "label": "Hacker News", "url": "https://news.ycombinator.com/rss" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "news.miami",
+      "kind": "news",
+      "label": "Miami and South Florida",
+      "groups": [
+        {
+          "id": "news.miami.all",
+          "label": "Local desks",
+          "entries": [
+            { "id": "wsvn.all", "label": "WSVN 7 News", "url": "https://wsvn.com/feed/" },
+            { "id": "local10.all", "label": "Local 10 / WPLG", "url": "https://www.local10.com/arc/outboundfeeds/rss/?outputType=xml" },
+            { "id": "miamidade.gov", "label": "Miami-Dade County", "url": "https://www.miamidade.gov/global/rss-news.page" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "news.country",
+      "kind": "news",
+      "label": "By country",
+      "note": "The five most common countries of origin among Miami-Dade residents.",
+      "groups": [
+        {
+          "id": "news.country.cuba",
+          "label": "Cuba",
+          "entries": [
+            { "id": "cibercuba.all", "label": "CiberCuba", "url": "https://www.cibercuba.com/rss.xml", "note": "Spanish" },
+            { "id": "14ymedio.all", "label": "14ymedio", "url": "https://www.14ymedio.com/rss/", "note": "Spanish" },
+            { "id": "gnews.cu", "label": "Google News Cuba", "url": "https://news.google.com/rss?hl=es-419&gl=CU&ceid=CU:es", "note": "Spanish" }
+          ]
+        },
+        {
+          "id": "news.country.colombia",
+          "label": "Colombia",
+          "entries": [
+            { "id": "eltiempo.co", "label": "El Tiempo", "url": "https://www.eltiempo.com/rss/colombia.xml", "note": "Spanish" },
+            { "id": "semana.all", "label": "Semana", "url": "https://www.semana.com/arc/outboundfeeds/rss/?outputType=xml", "note": "Spanish" },
+            { "id": "gnews.co", "label": "Google News Colombia", "url": "https://news.google.com/rss?hl=es-419&gl=CO&ceid=CO:es", "note": "Spanish" }
+          ]
+        },
+        {
+          "id": "news.country.haiti",
+          "label": "Haiti",
+          "entries": [
+            { "id": "lenouvelliste.all", "label": "Le Nouvelliste", "url": "https://lenouvelliste.com/feed", "note": "French" },
+            { "id": "gnews.ht", "label": "Google News Haiti", "url": "https://news.google.com/rss?hl=fr&gl=HT&ceid=HT:fr", "note": "French" }
+          ]
+        },
+        {
+          "id": "news.country.nicaragua",
+          "label": "Nicaragua",
+          "note": "Google News has no Nicaraguan edition; it serves a generic Spanish one.",
+          "entries": [
+            { "id": "confidencial.all", "label": "Confidencial", "url": "https://confidencial.digital/feed/", "note": "Spanish" }
+          ]
+        },
+        {
+          "id": "news.country.venezuela",
+          "label": "Venezuela",
+          "entries": [
+            { "id": "efectococuyo.all", "label": "Efecto Cocuyo", "url": "https://efectococuyo.com/feed/", "note": "Spanish" },
+            { "id": "talcual.all", "label": "TalCual", "url": "https://talcualdigital.com/feed/", "note": "Spanish" },
+            { "id": "elnacional.all", "label": "El Nacional", "url": "https://www.elnacional.com/feed/", "note": "Spanish" },
+            { "id": "gnews.ve", "label": "Google News Venezuela", "url": "https://news.google.com/rss?hl=es-419&gl=VE&ceid=VE:es", "note": "Spanish" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sports.sport",
+      "kind": "sports",
+      "label": "By sport",
+      "groups": [
+        {
+          "id": "sports.sport.nfl",
+          "label": "Pro football / NFL",
+          "entries": [
+            { "id": "cbs.nfl", "label": "CBS Sports / NFL", "url": "https://www.cbssports.com/rss/headlines/nfl/" },
+            { "id": "yahoo.nfl", "label": "Yahoo Sports / NFL", "url": "https://sports.yahoo.com/nfl/rss.xml" },
+            { "id": "pft.all", "label": "Pro Football Talk", "url": "https://profootballtalk.nbcsports.com/feed/" }
+          ]
+        },
+        {
+          "id": "sports.sport.nba",
+          "label": "Pro basketball / NBA",
+          "entries": [
+            { "id": "cbs.nba", "label": "CBS Sports / NBA", "url": "https://www.cbssports.com/rss/headlines/nba/" },
+            { "id": "yahoo.nba", "label": "Yahoo Sports / NBA", "url": "https://sports.yahoo.com/nba/rss.xml" }
+          ]
+        },
+        {
+          "id": "sports.sport.soccer",
+          "label": "Soccer",
+          "entries": [
+            { "id": "cbs.soccer", "label": "CBS Sports / Soccer", "url": "https://www.cbssports.com/rss/headlines/soccer/" },
+            { "id": "yahoo.soccer", "label": "Yahoo Sports / Soccer", "url": "https://sports.yahoo.com/soccer/rss.xml" },
+            { "id": "guardian.football", "label": "The Guardian / Football", "url": "https://www.theguardian.com/football/rss" }
+          ]
+        },
+        {
+          "id": "sports.sport.mlb",
+          "label": "Baseball / MLB",
+          "entries": [
+            { "id": "cbs.mlb", "label": "CBS Sports / MLB", "url": "https://www.cbssports.com/rss/headlines/mlb/" },
+            { "id": "yahoo.mlb", "label": "Yahoo Sports / MLB", "url": "https://sports.yahoo.com/mlb/rss.xml" }
+          ]
+        },
+        {
+          "id": "sports.sport.nhl",
+          "label": "Hockey / NHL",
+          "entries": [
+            { "id": "cbs.nhl", "label": "CBS Sports / NHL", "url": "https://www.cbssports.com/rss/headlines/nhl/" },
+            { "id": "yahoo.nhl", "label": "Yahoo Sports / NHL", "url": "https://sports.yahoo.com/nhl/rss.xml" }
+          ]
+        },
+        {
+          "id": "sports.sport.cfb",
+          "label": "College football",
+          "entries": [
+            { "id": "cbs.cfb", "label": "CBS Sports / College football", "url": "https://www.cbssports.com/rss/headlines/college-football/" },
+            { "id": "yahoo.cfb", "label": "Yahoo Sports / College football", "url": "https://sports.yahoo.com/college-football/rss.xml" }
+          ]
+        },
+        {
+          "id": "sports.sport.cbb",
+          "label": "College basketball",
+          "entries": [
+            { "id": "cbs.cbb", "label": "CBS Sports / College basketball", "url": "https://www.cbssports.com/rss/headlines/college-basketball/" }
+          ]
+        },
+        {
+          "id": "sports.sport.motorsport",
+          "label": "Motorsport / NASCAR and F1",
+          "entries": [
+            { "id": "cbs.nascar", "label": "CBS Sports / NASCAR", "url": "https://www.cbssports.com/rss/headlines/nascar/" },
+            { "id": "motorsport.f1", "label": "Motorsport.com / Formula 1", "url": "https://www.motorsport.com/rss/f1/news/" },
+            { "id": "formula1.all", "label": "Formula1.com", "url": "https://www.formula1.com/en/latest/all.xml" }
+          ]
+        },
+        {
+          "id": "sports.sport.golf",
+          "label": "Golf",
+          "entries": [
+            { "id": "cbs.golf", "label": "CBS Sports / Golf", "url": "https://www.cbssports.com/rss/headlines/golf/" },
+            { "id": "yahoo.golf", "label": "Yahoo Sports / Golf", "url": "https://sports.yahoo.com/golf/rss.xml" }
+          ]
+        },
+        {
+          "id": "sports.sport.tennis",
+          "label": "Tennis",
+          "entries": [
+            { "id": "cbs.tennis", "label": "CBS Sports / Tennis", "url": "https://www.cbssports.com/rss/headlines/tennis/" },
+            { "id": "yahoo.tennis", "label": "Yahoo Sports / Tennis", "url": "https://sports.yahoo.com/tennis/rss.xml" }
+          ]
+        },
+        {
+          "id": "sports.sport.combat",
+          "label": "MMA and combat sports",
+          "entries": [
+            { "id": "cbs.mma", "label": "CBS Sports / MMA", "url": "https://www.cbssports.com/rss/headlines/mma/" }
+          ]
+        },
+        {
+          "id": "sports.sport.general",
+          "label": "General sports desk",
+          "entries": [
+            { "id": "bbc.sport", "label": "BBC Sport", "url": "https://feeds.bbci.co.uk/sport/rss.xml" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sports.transactions",
+      "kind": "sports",
+      "label": "Drafts and trades",
+      "note": "Dedicated transaction desks: signings, trades, draft picks, waivers.",
+      "groups": [
+        {
+          "id": "sports.transactions.all",
+          "label": "Transaction desks",
+          "entries": [
+            { "id": "pfr.all", "label": "Pro Football Rumors / NFL", "url": "https://www.profootballrumors.com/feed" },
+            { "id": "hoopsrumors.all", "label": "Hoops Rumors / NBA", "url": "https://www.hoopsrumors.com/feed" },
+            { "id": "mlbtr.all", "label": "MLB Trade Rumors", "url": "https://www.mlbtraderumors.com/feed" },
+            { "id": "phr.all", "label": "Pro Hockey Rumors / NHL", "url": "https://www.prohockeyrumors.com/feed" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sports.miami",
+      "kind": "sports",
+      "label": "Miami teams",
+      "groups": [
+        {
+          "id": "sports.miami.all",
+          "label": "South Florida clubs",
+          "entries": [
+            { "id": "dolphins.phinsider", "label": "Miami Dolphins / The Phinsider", "url": "https://www.thephinsider.com/rss/index.xml" },
+            { "id": "heat.gnews", "label": "Miami Heat", "url": "https://news.google.com/rss/search?q=%22Miami+Heat%22&hl=en-US&gl=US&ceid=US:en" },
+            { "id": "marlins.gnews", "label": "Miami Marlins", "url": "https://news.google.com/rss/search?q=%22Miami+Marlins%22&hl=en-US&gl=US&ceid=US:en" },
+            { "id": "panthers.litterbox", "label": "Florida Panthers / Litter Box Cats", "url": "https://www.litterboxcats.com/rss/index.xml" },
+            { "id": "intermiami.gnews", "label": "Inter Miami CF", "url": "https://news.google.com/rss/search?q=%22Inter+Miami%22&hl=en-US&gl=US&ceid=US:en" },
+            { "id": "canes.gnews", "label": "Miami Hurricanes", "url": "https://news.google.com/rss/search?q=%22Miami+Hurricanes%22&hl=en-US&gl=US&ceid=US:en" }
+          ]
+        }
+      ]
+    }
+  ]
+}
