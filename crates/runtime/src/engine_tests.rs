@@ -799,7 +799,7 @@ async fn snapshot_publishes_the_tracked_corridor_whenever_ais_is_running() {
         .expect("the trunk is always published");
     assert!(river.centerline.len() >= 2);
     assert_eq!(river.corridor_offset_meters, 120.0);
-    assert_eq!(corridor.branches.len(), 3);
+    assert_eq!(corridor.branches.len(), 4);
 
     // Stations are what a diagram names, and the target must be findable by
     // FL511's own key so its live state can be joined to it.
@@ -823,15 +823,17 @@ async fn snapshot_publishes_the_tracked_corridor_whenever_ais_is_running() {
         .find(|station| station.bridge_key.as_deref() == Some("sw_2_ave"))
         .unwrap();
     assert!(sw2.s_meters > 0.0);
+    // Government Cut is its own branch now. The north approach used to carry
+    // this mark, which is what dragged its centerline across Dodge Island.
     let cut = corridor
         .branches
         .iter()
-        .find(|branch| branch.id == "north_approach")
+        .find(|branch| branch.id == "government_cut")
         .unwrap()
         .stations
         .iter()
         .find(|station| station.label == "Government Cut")
-        .expect("the north approach names its seaward marks");
+        .expect("the cut names its seaward marks");
     assert!(cut.s_meters < 0.0);
 }
 
@@ -851,7 +853,7 @@ async fn corridor_is_published_even_when_the_ais_channel_is_switched_off() {
 
     let corridor = engine.get_snapshot().await.unwrap().river_corridor;
     assert!(!corridor.ais_live, "no AIS source is running here");
-    assert_eq!(corridor.branches.len(), 3);
+    assert_eq!(corridor.branches.len(), 4);
     assert!(
         corridor
             .branches
@@ -2957,7 +2959,10 @@ async fn a_channel_shipped_after_this_install_still_arrives() {
         .iter()
         .find(|channel| channel.kind == ChannelKindDto::News)
         .unwrap();
-    assert_eq!(news.title, "My own headlines", "edits must survive adoption");
+    assert_eq!(
+        news.title, "My own headlines",
+        "edits must survive adoption"
+    );
     assert_eq!(news.scope["feeds"], json!(["https://example.com/mine.xml"]));
 }
 

@@ -168,7 +168,7 @@ export interface VesselTrack {
   /** Signed channel metres to the span: positive upriver, negative seaward. */
   sMeters?: number;
   /** Which charted branch the fix projected onto. */
-  branch?: 'river' | 'north_approach' | 'south_approach';
+  branch?: 'river' | 'north_approach' | 'government_cut' | 'south_approach';
   /** Broadcast identity, present only when the vessel has sent a static report. */
   callSign?: string;
   imoNumber?: number;
