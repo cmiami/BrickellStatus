@@ -21,6 +21,9 @@ const TARGET = 'x86_64-pc-windows-msvc';
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, '../../..');
 const tauriWrapper = join(scriptDirectory, 'tauri.mjs');
+const version = JSON.parse(
+  readFileSync(join(repositoryRoot, 'apps/console/package.json'), 'utf8')
+).version;
 
 const rawArguments = process.argv.slice(2);
 const buildArguments = rawArguments.filter(
@@ -67,13 +70,20 @@ function available(command, arguments_) {
   return !result.error && result.status === 0;
 }
 
-function firstEntry(directory, suffix) {
+// Named by version rather than by being the only file present: the bundle
+// directory keeps every installer ever built there, so after a version bump
+// the previous release's artifact is still sitting beside this one.
+function versionedEntry(directory, version, suffix) {
   const entries = readdirSync(directory, { withFileTypes: true })
-    .filter((entry) => entry.name.endsWith(suffix))
+    .filter(
+      (entry) => entry.isFile() && entry.name.endsWith(suffix) && entry.name.includes(`_${version}_`)
+    )
     .map((entry) => join(directory, entry.name))
     .sort();
   if (entries.length !== 1) {
-    throw new Error(`Expected one ${suffix} in ${directory}; found ${entries.length}.`);
+    throw new Error(
+      `Expected one ${version} ${suffix} in ${directory}; found ${entries.length}.`
+    );
   }
   return entries[0];
 }
@@ -159,7 +169,7 @@ run(process.execPath, [
 ]);
 
 const nsisDirectory = join(repositoryRoot, 'target', TARGET, 'release', 'bundle', 'nsis');
-const installer = firstEntry(nsisDirectory, '-setup.exe');
+const installer = versionedEntry(nsisDirectory, version, '-setup.exe');
 const installerBytes = lstatSync(installer).size;
 const sha256 = createHash('sha256').update(readFileSync(installer)).digest('hex');
 
