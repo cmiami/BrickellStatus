@@ -371,6 +371,8 @@ export interface DisplayConnectionStatus {
   detail: string;
   lastFrameAt?: string;
   lastAckAt?: string;
+  /** The panel the connected board reported. Absent until one has spoken. */
+  panel?: PanelModel;
 }
 
 export interface DisplayDeviceCandidate {
@@ -400,6 +402,11 @@ export interface EinkPreview {
   png: number[];
 }
 
+/// Which e-paper board is attached. Reported by the board itself; never asked.
+export type PanelModel = 'e213' | 'e290';
+
+/// Which E213 panel controller a build carries. The one thing about the
+/// hardware that cannot be read back, and so the only thing ever remembered.
 export type PanelRevision = 'original' | 'v11';
 
 export type FlashRequirement =
@@ -410,23 +417,35 @@ export type FlashRequirement =
       state: 'required';
       reason:
         | { kind: 'notResponding' }
-        | { kind: 'buildMismatch'; device: string; bundled: string };
+        | { kind: 'buildMismatch'; device: string; bundled: string }
+        | { kind: 'wrongBoard'; board: PanelModel };
     };
 
 export interface FirmwareVariantSummary {
   id: string;
   label: string;
-  panelRevision: PanelRevision;
+  panel: PanelModel;
+  panelRevision?: PanelRevision;
   totalBytes: number;
 }
 
 export interface FirmwareStatus {
   port?: string;
   bundledBuild?: string;
+  /** The board that answered, when one has. */
+  board?: PanelModel;
+  /** The build to write to it, decided from what the board reported. */
+  recommendedVariantId?: string;
   variants: FirmwareVariantSummary[];
   requirement: FlashRequirement;
   unavailable?: string;
 }
+
+/** Device pixels each panel draws, for anything that has to state the size. */
+export const PANEL_GEOMETRY: Record<PanelModel, { width: number; height: number; label: string }> = {
+  e213: { width: 250, height: 122, label: 'E213' },
+  e290: { width: 296, height: 128, label: 'E290' }
+};
 
 // One observed radar composite, as a MapLibre raster template rather than as
 // imagery: the pixels are fetched by the map, straight from the tile host.

@@ -18,7 +18,7 @@ pub use usb::{
     discover_espressif_devices, discover_espressif_port,
 };
 
-/// Backward-compatible E213 GATT service UUID.
+/// Backward-compatible InkDock GATT service UUID, shared by every panel.
 pub const SERVICE_UUID: Uuid = Uuid::from_u128(0x8b7a0000_4f4b_4a9b_9d6e_1d0c1a2b3c4d);
 /// Host-to-board characteristic carrying INK1 packet chunks.
 pub const RX_UUID: Uuid = Uuid::from_u128(0x8b7a0001_4f4b_4a9b_9d6e_1d0c1a2b3c4d);
@@ -35,7 +35,7 @@ pub enum TransportKind {
     Ble,
 }
 
-/// Positive acknowledgement from the E213 firmware.
+/// Positive acknowledgement from the panel firmware.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransportReceipt {
     /// Physical path used for this write.
@@ -58,7 +58,7 @@ pub enum TransportError {
     /// Bluetooth is unavailable on this host.
     #[error("no Bluetooth adapter is available")]
     NoBleAdapter,
-    /// Scan did not find the configured E213.
+    /// Scan did not find a configured panel.
     #[error("BLE device {name:?} was not found")]
     NoBleDevice {
         /// Advertised compatibility name used for discovery.
@@ -89,7 +89,7 @@ pub enum TransportError {
         waiting_for: &'static str,
     },
     /// Firmware explicitly rejected the packet.
-    #[error("E213 rejected frame: {0}")]
+    #[error("panel rejected frame: {0}")]
     Nack(String),
     /// Requested path was not configured.
     #[error("{0:?} transport is not configured")]

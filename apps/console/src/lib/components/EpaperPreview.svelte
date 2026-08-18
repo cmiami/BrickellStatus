@@ -2,21 +2,33 @@
   import { onDestroy } from 'svelte';
 
   import { getEinkPreview } from '$lib/api';
-  import type { ChannelSnapshot, DecisionSnapshot, EvidenceStrip } from '$lib/types';
+  import {
+    PANEL_GEOMETRY,
+    type ChannelSnapshot,
+    type DecisionSnapshot,
+    type EvidenceStrip,
+    type PanelModel
+  } from '$lib/types';
 
   let {
     decision,
     channel,
     evidence = [],
     connected = false,
-    transport = 'auto'
+    transport = 'auto',
+    panel = 'e213'
   }: {
     decision: DecisionSnapshot;
     channel?: ChannelSnapshot;
     evidence?: EvidenceStrip[];
     connected?: boolean;
     transport?: string;
+    /** The board that answered. The bezel is that board's shape, not a
+     * nominal one, so the preview is the size the frame really is. */
+    panel?: PanelModel;
   } = $props();
+
+  const geometry = $derived(PANEL_GEOMETRY[panel]);
 
   let previewUrl = $state<string | null>(null);
   let previewError = $state<string | null>(null);
@@ -56,13 +68,16 @@
 
 <figure class="preview-figure">
   <figcaption>
-    <span>250 × 122 device pixels</span>
+    <span>{geometry.width} × {geometry.height} device pixels</span>
     <span class="status-word" data-state={connected ? 'ready' : 'unconfigured'}>
       {connected ? transport : 'Preview'}
     </span>
   </figcaption>
   <div class="epaper-bezel">
-    <div class="epaper-screen" role="img" aria-label={`Exact e-paper frame for ${frameSubject()}: ${frameState()}`}>
+    <div
+      class="epaper-screen"
+      style={`aspect-ratio: ${geometry.width} / ${geometry.height}`}
+      role="img" aria-label={`Exact e-paper frame for ${frameSubject()}: ${frameState()}`}>
       {#if previewUrl}
         <img src={previewUrl} alt="" />
       {:else if loading}
@@ -102,10 +117,12 @@
     box-shadow: 0 2px 1px rgba(17, 20, 24, 0.2), 0 12px 28px rgba(17, 20, 24, 0.13);
   }
 
+  /* The panel's own proportions arrive as an inline custom property, because
+     the two boards are not the same shape and a frame drawn for one must not be
+     stretched into the other's box. */
   .epaper-screen {
     display: grid;
     width: 100%;
-    aspect-ratio: 250 / 122;
     place-items: center;
     overflow: hidden;
     color: var(--graphite);

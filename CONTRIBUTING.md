@@ -30,7 +30,7 @@ Required versions are intentionally pinned where reproducibility matters:
 - Node.js 24 or newer;
 - npm `11.18.0` exactly;
 - Xcode Command Line Tools for a macOS desktop build;
-- PlatformIO only for E213 firmware work;
+- PlatformIO only for e-paper panel firmware work;
 - `brew install nsis llvm` plus `cargo install --locked cargo-xwin` only for
   cross-building the Windows installer (see
   [`docs/WINDOWS_RELEASE.md`](docs/WINDOWS_RELEASE.md)).
@@ -67,9 +67,10 @@ npm --prefix apps/console test
 npm --prefix apps/console run build
 ```
 
-For E213 changes, build both supported panel environments listed in
-[`firmware/e213/README.md`](firmware/e213/README.md). State whether you tested
-on physical hardware; a successful compile is not a physical delivery test.
+For firmware changes, build every panel environment listed in
+[`firmware/panel/README.md`](firmware/panel/README.md). State whether you tested
+on physical hardware, and on which board; a successful compile is not a physical
+delivery test, and the board-identification probe is only proven on a board.
 
 For macOS release work, follow [`docs/MACOS_RELEASE.md`](docs/MACOS_RELEASE.md)
 and include the measured DMG size. For Windows release work, follow

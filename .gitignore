@@ -34,8 +34,8 @@ state/
 config.local.toml
 
 # Firmware
-firmware/e213/.pio/
-firmware/e213/.vscode/
+firmware/panel/.pio/
+firmware/panel/.vscode/
 
 # macOS / editors
 .DS_Store

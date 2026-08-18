@@ -5,6 +5,10 @@
 //! state on one sheet, including the ones an ordinary run never produces —
 //! unconfigured channels, offline sources, and copy long enough to truncate.
 //!
+//! Every state is drawn for every panel, because the panels are the same
+//! instrument on different sheets and the only way to know that stayed true is
+//! to look at them side by side.
+//!
 //! ```sh
 //! cargo run -p bridgestatus-eink --example render_panel_states -- <directory>
 //! ```
@@ -13,8 +17,8 @@ use std::path::PathBuf;
 
 use bridgestatus_eink::{
     ChannelAvailability, ChannelCard, ChannelKind, ChannelSource, ChannelUrgency, EtaRange,
-    Evidence, Freshness, HEIGHT, LiveSnapshot, MonoFrame, RenderConfig, SnapshotState, SpanStatus,
-    WIDTH, render_channel_card, render_snapshot,
+    Evidence, Freshness, LiveSnapshot, MonoFrame, PanelModel, RenderConfig, SnapshotState,
+    SpanStatus, render_channel_card, render_snapshot,
 };
 use image::{GrayImage, Luma};
 
@@ -25,8 +29,11 @@ const GUTTER: u32 = 10;
 const COLUMNS: u32 = 3;
 
 fn sheet(frames: &[(String, MonoFrame)], path: PathBuf) {
-    let cell_w = u32::from(WIDTH) * SCALE;
-    let cell_h = u32::from(HEIGHT) * SCALE;
+    let panel = frames
+        .first()
+        .map_or(PanelModel::E213, |(_, frame)| frame.panel());
+    let cell_w = u32::from(panel.width()) * SCALE;
+    let cell_h = u32::from(panel.height()) * SCALE;
     let rows = (frames.len() as u32).div_ceil(COLUMNS);
     // Mid grey ground, so the panel's own white edge stays visible against it.
     let mut sheet = GrayImage::from_pixel(
@@ -55,7 +62,12 @@ fn sheet(frames: &[(String, MonoFrame)], path: PathBuf) {
     println!("wrote {}", path.display());
 }
 
-fn bridge(state: SnapshotState, eta: Option<EtaRange>, stale: bool) -> MonoFrame {
+fn bridge(
+    panel: PanelModel,
+    state: SnapshotState,
+    eta: Option<EtaRange>,
+    stale: bool,
+) -> MonoFrame {
     let age = if stale { 900 } else { 74 };
     let mut snapshot = LiveSnapshot::brickell(state, Freshness::new("AIS + FL511", age, 180));
     snapshot.eta = eta;
@@ -70,10 +82,16 @@ fn bridge(state: SnapshotState, eta: Option<EtaRange>, stale: bool) -> MonoFrame
         SpanStatus::new("2AV", true).opened_at("14:20"),
         SpanStatus::new("1ST", false),
     ];
-    render_snapshot(&snapshot, &RenderConfig::default()).expect("fixture snapshot is valid")
+    render_snapshot(&snapshot, &RenderConfig::default().for_panel(panel))
+        .expect("fixture snapshot is valid")
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one argument per card field, which is what a fixture is"
+)]
 fn card(
+    panel: PanelModel,
     kind: ChannelKind,
     urgency: ChannelUrgency,
     availability: ChannelAvailability,
@@ -82,16 +100,19 @@ fn card(
     detail: &str,
     action: &str,
 ) -> MonoFrame {
-    render_channel_card(&ChannelCard::new(
-        kind,
-        urgency,
-        availability,
-        title,
-        headline,
-        detail,
-        action,
-        ChannelSource::aged("Open-Meteo", 42),
-    ))
+    render_channel_card(
+        &ChannelCard::new(
+            kind,
+            urgency,
+            availability,
+            title,
+            headline,
+            detail,
+            action,
+            ChannelSource::aged("Open-Meteo", 42),
+        ),
+        panel,
+    )
     .expect("fixture card is valid")
 }
 
@@ -101,41 +122,76 @@ fn main() {
         .map_or_else(|| PathBuf::from("crates/eink/previews"), PathBuf::from);
     std::fs::create_dir_all(&out).expect("output directory is writable");
 
+    for panel in PanelModel::ALL {
+        render_panel(panel, &out);
+    }
+}
+
+/// Every state, drawn for one panel.
+fn render_panel(panel: PanelModel, out: &std::path::Path) {
+    let label = panel.label().to_lowercase();
+    println!("\n== {} ==", panel.label());
     println!("BRIDGE PANEL STATES");
     sheet(
         &[
-            ("clear".into(), bridge(SnapshotState::Clear, None, false)),
+            (
+                "clear".into(),
+                bridge(panel, SnapshotState::Clear, None, false),
+            ),
             (
                 "watch + eta range".into(),
-                bridge(SnapshotState::Watch, Some(EtaRange::new(6, 9)), false),
+                bridge(
+                    panel,
+                    SnapshotState::Watch,
+                    Some(EtaRange::new(6, 9)),
+                    false,
+                ),
             ),
             (
                 "likely + eta range".into(),
-                bridge(SnapshotState::Likely, Some(EtaRange::new(6, 9)), false),
+                bridge(
+                    panel,
+                    SnapshotState::Likely,
+                    Some(EtaRange::new(6, 9)),
+                    false,
+                ),
             ),
             (
                 "likely, single-minute eta".into(),
-                bridge(SnapshotState::Likely, Some(EtaRange::new(4, 4)), false),
+                bridge(
+                    panel,
+                    SnapshotState::Likely,
+                    Some(EtaRange::new(4, 4)),
+                    false,
+                ),
             ),
             (
                 "likely, no eta".into(),
-                bridge(SnapshotState::Likely, None, false),
+                bridge(panel, SnapshotState::Likely, None, false),
             ),
-            ("open".into(), bridge(SnapshotState::Open, None, false)),
+            (
+                "open".into(),
+                bridge(panel, SnapshotState::Open, None, false),
+            ),
             (
                 "offline".into(),
-                bridge(SnapshotState::Offline, None, false),
+                bridge(panel, SnapshotState::Offline, None, false),
             ),
             (
                 "clear + stale".into(),
-                bridge(SnapshotState::Clear, None, true),
+                bridge(panel, SnapshotState::Clear, None, true),
             ),
             (
                 "watch + stale".into(),
-                bridge(SnapshotState::Watch, Some(EtaRange::new(11, 18)), true),
+                bridge(
+                    panel,
+                    SnapshotState::Watch,
+                    Some(EtaRange::new(11, 18)),
+                    true,
+                ),
             ),
         ],
-        out.join("panel-states-bridge.png"),
+        out.join(format!("panel-states-bridge-{label}.png")),
     );
 
     println!("\nCHANNEL CARD STATES");
@@ -144,6 +200,7 @@ fn main() {
             (
                 "weather / routine".into(),
                 card(
+                    panel,
                     ChannelKind::Weather,
                     ChannelUrgency::Routine,
                     ChannelAvailability::Current,
@@ -156,6 +213,7 @@ fn main() {
             (
                 "weather / advisory".into(),
                 card(
+                    panel,
                     ChannelKind::Weather,
                     ChannelUrgency::Advisory,
                     ChannelAvailability::Current,
@@ -168,6 +226,7 @@ fn main() {
             (
                 "weather / urgent".into(),
                 card(
+                    panel,
                     ChannelKind::Weather,
                     ChannelUrgency::Urgent,
                     ChannelAvailability::Current,
@@ -180,6 +239,7 @@ fn main() {
             (
                 "official / critical".into(),
                 card(
+                    panel,
                     ChannelKind::OfficialAlert,
                     ChannelUrgency::Critical,
                     ChannelAvailability::Current,
@@ -192,6 +252,7 @@ fn main() {
             (
                 "tropical / urgent".into(),
                 card(
+                    panel,
                     ChannelKind::Tropical,
                     ChannelUrgency::Urgent,
                     ChannelAvailability::Current,
@@ -204,6 +265,7 @@ fn main() {
             (
                 "news / routine".into(),
                 card(
+                    panel,
                     ChannelKind::News,
                     ChannelUrgency::Routine,
                     ChannelAvailability::Current,
@@ -216,6 +278,7 @@ fn main() {
             (
                 "earthquake / advisory".into(),
                 card(
+                    panel,
                     ChannelKind::Earthquake,
                     ChannelUrgency::Advisory,
                     ChannelAvailability::Current,
@@ -228,6 +291,7 @@ fn main() {
             (
                 "markets / routine".into(),
                 card(
+                    panel,
                     ChannelKind::Markets,
                     ChannelUrgency::Routine,
                     ChannelAvailability::Current,
@@ -240,6 +304,7 @@ fn main() {
             (
                 "weather / stale".into(),
                 card(
+                    panel,
                     ChannelKind::Weather,
                     ChannelUrgency::Routine,
                     ChannelAvailability::Stale,
@@ -252,6 +317,7 @@ fn main() {
             (
                 "weather / offline".into(),
                 card(
+                    panel,
                     ChannelKind::Weather,
                     ChannelUrgency::Routine,
                     ChannelAvailability::Offline,
@@ -264,6 +330,7 @@ fn main() {
             (
                 "markets / unavailable".into(),
                 card(
+                    panel,
                     ChannelKind::Markets,
                     ChannelUrgency::Routine,
                     ChannelAvailability::Unavailable,
@@ -276,6 +343,7 @@ fn main() {
             (
                 "truncation stress".into(),
                 card(
+                    panel,
                     ChannelKind::OfficialAlert,
                     ChannelUrgency::Critical,
                     ChannelAvailability::Stale,
@@ -286,6 +354,6 @@ fn main() {
                 ),
             ),
         ],
-        out.join("panel-states-channels.png"),
+        out.join(format!("panel-states-channels-{label}.png")),
     );
 }

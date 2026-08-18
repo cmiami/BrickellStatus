@@ -1,0 +1,186 @@
+//! What a board says about itself when it boots.
+//!
+//! The firmware speaks one line on the wire:
+//!
+//! ```text
+//! READY INK1 296x128 4736 9f3c2ab E290
+//! ```
+//!
+//! Geometry, payload size, the build it was compiled from, and the board its
+//! boot-time probe found. That line is the whole of the host's device
+//! identification: nobody is asked which board is plugged in, and no preference
+//! records it, because the board is the only thing that actually knows.
+//!
+//! A build can also land on a board it cannot drive — the display library binds
+//! one pinout per image, and a fresh board is flashed before anything knows
+//! which one it is. That case is spoken plainly:
+//!
+//! ```text
+//! READY INK1 0x0 0 9f3c2ab E290 MISMATCH
+//! ```
+//!
+//! No geometry, because there is nothing this image can correctly draw; the
+//! board name, because that is what the app needs in order to write the build
+//! that belongs there.
+//!
+//! Older firmware stops after the payload size, and firmware built without git
+//! history stamps `unknown` for the build. Both are absences, never
+//! disagreements — a board that cannot name its build must not be reported as
+//! running the wrong one.
+
+use crate::PanelModel;
+
+/// What the firmware banner told us about the attached board.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DeviceBanner {
+    /// Whether `READY INK1` was seen at all.
+    pub saw_ready: bool,
+    /// Panel this firmware can draw for right now, from the geometry it
+    /// announced. Absent on a build sitting on the wrong board.
+    pub panel: Option<PanelModel>,
+    /// Board the firmware's probe actually found, whether or not it can drive
+    /// it. This is the identity a flash decision is made from.
+    pub board: Option<PanelModel>,
+    /// Whether the firmware reported that it cannot drive the board it is on.
+    pub mismatch: bool,
+    /// Build identity, when the firmware is new enough to report one.
+    pub build: Option<String>,
+}
+
+/// What the firmware stamps into its banner when it cannot name its own source
+/// revision. Treated as "no build id" on both sides of the comparison.
+pub const UNKNOWN_BUILD: &str = "unknown";
+
+impl DeviceBanner {
+    /// Reads a banner line emitted by the device.
+    pub fn parse(line: &str) -> Self {
+        let trimmed = line.trim();
+        if !(trimmed.contains("READY INK1") || trimmed == "READY") {
+            return Self::default();
+        }
+        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+        // `READY INK1 <w>x<h> <payload> <build> <board> [MISMATCH]`. What the
+        // firmware can draw is read from the geometry rather than from the
+        // name, because the geometry is what every frame must match.
+        let panel = tokens.get(2).and_then(|token| parse_dimensions(token));
+        let build = tokens
+            .get(4)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .filter(|value| !value.eq_ignore_ascii_case(UNKNOWN_BUILD))
+            .map(str::to_owned);
+        let board = tokens
+            .get(5)
+            .and_then(|name| PanelModel::from_label(name))
+            // Firmware old enough to omit the board name is firmware from
+            // before there was a second board, so what it draws is what it is.
+            .or(panel);
+        let mismatch = tokens
+            .get(6)
+            .is_some_and(|token| token.eq_ignore_ascii_case("MISMATCH"));
+        Self {
+            saw_ready: true,
+            panel,
+            board,
+            mismatch,
+            build,
+        }
+    }
+}
+
+/// Reads a `250x122` geometry token into the panel it describes.
+fn parse_dimensions(token: &str) -> Option<PanelModel> {
+    let (width, height) = token.split_once(['x', 'X'])?;
+    PanelModel::from_dimensions(width.parse().ok()?, height.parse().ok()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_banner_names_the_panel_by_its_geometry() {
+        let banner = DeviceBanner::parse("READY INK1 296x128 4736 9f3c2ab E290");
+        assert!(banner.saw_ready);
+        assert_eq!(banner.panel, Some(PanelModel::E290));
+        assert_eq!(banner.board, Some(PanelModel::E290));
+        assert!(!banner.mismatch);
+        assert_eq!(banner.build.as_deref(), Some("9f3c2ab"));
+    }
+
+    /// A build on the wrong board draws nothing and says which board it is on,
+    /// which is the whole of what the app needs to put that right.
+    #[test]
+    fn a_mismatched_build_names_the_board_it_landed_on() {
+        let banner = DeviceBanner::parse("READY INK1 0x0 0 9f3c2ab E290 MISMATCH");
+        assert!(banner.saw_ready);
+        assert_eq!(banner.panel, None, "nothing can be drawn on it yet");
+        assert_eq!(banner.board, Some(PanelModel::E290));
+        assert!(banner.mismatch);
+        assert_eq!(banner.build.as_deref(), Some("9f3c2ab"));
+    }
+
+    /// A board with no panel wired at all is not an E213 by default.
+    #[test]
+    fn a_board_with_no_panel_names_none() {
+        let banner = DeviceBanner::parse("READY INK1 0x0 0 9f3c2ab NONE MISMATCH");
+        assert_eq!(banner.panel, None);
+        assert_eq!(banner.board, None);
+        assert!(banner.mismatch);
+    }
+
+    /// Boards in service run firmware from before there was a board name to
+    /// print. What such a board draws is what it is.
+    #[test]
+    fn the_original_panel_still_parses_exactly_as_it_did() {
+        let banner = DeviceBanner::parse("READY INK1 250x122 3904 abc1234");
+        assert!(banner.saw_ready);
+        assert_eq!(banner.panel, Some(PanelModel::E213));
+        assert_eq!(banner.board, Some(PanelModel::E213));
+        assert!(!banner.mismatch);
+        assert_eq!(banner.build.as_deref(), Some("abc1234"));
+    }
+
+    /// Firmware old enough to omit its build id is working firmware, and its
+    /// geometry is still usable.
+    #[test]
+    fn an_older_banner_without_a_build_still_names_its_panel() {
+        let banner = DeviceBanner::parse("READY INK1 250x122 3904");
+        assert!(banner.saw_ready);
+        assert_eq!(banner.panel, Some(PanelModel::E213));
+        assert_eq!(banner.build, None);
+    }
+
+    #[test]
+    fn a_build_that_cannot_be_named_is_absent_rather_than_wrong() {
+        assert_eq!(
+            DeviceBanner::parse("READY INK1 250x122 3904 unknown").build,
+            None
+        );
+    }
+
+    /// A geometry this host cannot draw is not silently rounded to a panel it
+    /// can: the host would then send frames the board is bound to refuse.
+    #[test]
+    fn an_unknown_geometry_leaves_the_panel_unnamed() {
+        let banner = DeviceBanner::parse("READY INK1 400x300 15000 abc1234");
+        assert!(banner.saw_ready);
+        assert_eq!(banner.panel, None);
+    }
+
+    #[test]
+    fn a_bare_ready_is_a_board_that_said_almost_nothing() {
+        let banner = DeviceBanner::parse("READY");
+        assert!(banner.saw_ready);
+        assert_eq!(banner.panel, None);
+        assert_eq!(banner.build, None);
+    }
+
+    #[test]
+    fn unrelated_serial_chatter_is_not_a_banner() {
+        assert_eq!(
+            DeviceBanner::parse("ets Jul 29 2019 rst:0x1"),
+            DeviceBanner::default()
+        );
+    }
+}

@@ -2,17 +2,24 @@ use embedded_graphics::pixelcolor::BinaryColor;
 use thiserror::Error;
 
 use crate::{
-    ConfidenceBand, LiveSnapshot, MonoFrame, SnapshotState, SpanStatus,
+    ConfidenceBand, LiveSnapshot, MonoFrame, PanelModel, SnapshotState, SpanStatus,
     channel::display_ascii,
     model::SnapshotError,
-    panel_grid::{self, CONTENT_RIGHT, MARGIN_LEFT},
-    panel_rail::{self, CONTENT_WIDTH},
+    panel::{MARGIN_LEFT, PanelGrid},
+    panel_grid, panel_rail,
     render_primitives::{fill, fit, huge, label, line, text_width},
 };
 
 /// Small set of layout controls which remain stable across live snapshots.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenderConfig {
+    /// Panel this frame is being drawn for.
+    ///
+    /// Set from what the attached board reports about itself, never from a
+    /// stored preference: the geometry is a fact about the hardware in front of
+    /// the user, and asking them to confirm it is asking them to do the
+    /// firmware's job.
+    pub panel: PanelModel,
     /// Two-character mark shown at the top of the evidence rail.
     pub channel_code: String,
     /// Maximum evidence items collapsed into the one-line evidence strip.
@@ -24,10 +31,19 @@ pub struct RenderConfig {
 impl Default for RenderConfig {
     fn default() -> Self {
         Self {
+            panel: PanelModel::default(),
             channel_code: "BR".into(),
             maximum_evidence_items: 2,
             show_source_age: true,
         }
+    }
+}
+
+impl RenderConfig {
+    /// The same controls, aimed at another panel.
+    pub fn for_panel(mut self, panel: PanelModel) -> Self {
+        self.panel = panel;
+        self
     }
 }
 
@@ -38,11 +54,40 @@ impl Default for RenderConfig {
 const TITLE_BASELINE: i32 = 1;
 const TITLE_RULE_Y: i32 = 12;
 const BAND_TOP: i32 = 15;
-const BAND_HEIGHT: u32 = 43;
-const BAND_BOTTOM: i32 = BAND_TOP + BAND_HEIGHT as i32;
-const TIMING_BASELINE: i32 = BAND_BOTTOM + 3;
-const CONFIDENCE_BASELINE: i32 = TIMING_BASELINE + 22;
-const SPANS_BASELINE: i32 = CONFIDENCE_BASELINE + 12;
+/// Height of the state band on the smaller panel, and the floor on any panel.
+const BAND_MIN_HEIGHT: u32 = 43;
+
+/// The state band takes every row the larger panel adds.
+///
+/// This is the one band read from across a room, and when it inverts it is a
+/// black field carrying the whole message. Six more rows of field is a louder
+/// signal; six rows shared out as one-pixel margins between text lines is
+/// nothing anyone could see.
+fn band_height(grid: PanelGrid) -> u32 {
+    BAND_MIN_HEIGHT + u32::try_from(grid.extra_rows().max(0)).unwrap_or(0)
+}
+
+fn band_bottom(grid: PanelGrid) -> i32 {
+    BAND_TOP + band_height(grid) as i32
+}
+
+/// Rows the band gained, split above and below its contents so the word and the
+/// glyph stay optically centred instead of riding the top edge.
+fn band_slack(grid: PanelGrid) -> i32 {
+    grid.extra_rows().max(0) / 2
+}
+
+fn timing_baseline(grid: PanelGrid) -> i32 {
+    band_bottom(grid) + 3
+}
+
+fn confidence_baseline(grid: PanelGrid) -> i32 {
+    timing_baseline(grid) + 22
+}
+
+fn spans_baseline(grid: PanelGrid) -> i32 {
+    confidence_baseline(grid) + 12
+}
 
 /// Failure to turn a semantic snapshot into pixels.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -55,7 +100,7 @@ pub enum RenderError {
     EmptyChannelCode,
 }
 
-/// Renders a deterministic 250×122 one-bit status instrument.
+/// Renders a deterministic one-bit status instrument for the configured panel.
 pub fn render_snapshot(
     snapshot: &LiveSnapshot,
     config: &RenderConfig,
@@ -65,7 +110,7 @@ pub fn render_snapshot(
         return Err(RenderError::EmptyChannelCode);
     }
 
-    let mut frame = MonoFrame::white();
+    let mut frame = MonoFrame::white(config.panel);
     draw_title(&mut frame, snapshot);
     draw_state_band(&mut frame, snapshot);
     draw_timing(&mut frame, snapshot);
@@ -82,18 +127,20 @@ pub fn render_snapshot(
 /// absent: a driver deciding whether to turn does not care whether the answer
 /// came from a bridge controller or a vessel feed, only whether it is current.
 fn draw_title(frame: &mut MonoFrame, snapshot: &LiveSnapshot) {
+    let grid = frame.grid();
+    let characters = grid.characters_between(MARGIN_LEFT, grid.content_right(), 6);
     label(
         frame,
         MARGIN_LEFT,
         TITLE_BASELINE,
-        &fit(&snapshot.channel, 36),
+        &fit(&snapshot.channel, characters),
         BinaryColor::On,
     );
     line(
         frame,
         MARGIN_LEFT,
         TITLE_RULE_Y,
-        CONTENT_RIGHT,
+        grid.content_right(),
         TITLE_RULE_Y,
         BinaryColor::On,
     );
@@ -105,14 +152,15 @@ fn draw_title(frame: &mut MonoFrame, snapshot: &LiveSnapshot) {
 /// inverted, because a glance from across a room resolves a black rectangle
 /// long before it resolves a word.
 fn draw_state_band(frame: &mut MonoFrame, snapshot: &LiveSnapshot) {
+    let grid = frame.grid();
     let alerting = matches!(snapshot.state, SnapshotState::Open | SnapshotState::Likely);
     if alerting {
         fill(
             frame,
             0,
             BAND_TOP,
-            CONTENT_WIDTH,
-            BAND_HEIGHT,
+            grid.content_width(),
+            band_height(grid),
             BinaryColor::On,
         );
     }
@@ -122,20 +170,35 @@ fn draw_state_band(frame: &mut MonoFrame, snapshot: &LiveSnapshot) {
         BinaryColor::On
     };
 
+    // The glyph is anchored to the right of the content area, so the word takes
+    // whatever width is left. On the wider panel that is five more characters
+    // of state, which is the difference between a label and a sentence.
+    let bascule_x = grid.content_right() - BASCULE_BOX_WIDTH;
+    let slack = band_slack(grid);
+
     // The word carries the state and the drawing confirms it. Two encodings of
     // the same fact, because one of them reads at a distance and the other
     // reads at a glance.
-    let word = fit(snapshot.state.label(), 13);
-    huge(frame, 5, 26, &word, ink);
-    draw_bascule(frame, 150, 20, snapshot.state == SnapshotState::Open, ink);
+    let word = fit(
+        snapshot.state.label(),
+        grid.characters_between(5, bascule_x - 4, 10),
+    );
+    huge(frame, 5, 26 + slack, &word, ink);
+    draw_bascule(
+        frame,
+        bascule_x,
+        20 + slack,
+        snapshot.state == SnapshotState::Open,
+        ink,
+    );
 
     if !alerting {
         line(
             frame,
             MARGIN_LEFT,
-            BAND_BOTTOM,
-            CONTENT_RIGHT,
-            BAND_BOTTOM,
+            band_bottom(grid),
+            grid.content_right(),
+            band_bottom(grid),
             BinaryColor::On,
         );
     }
@@ -156,17 +219,22 @@ fn draw_timing(frame: &mut MonoFrame, snapshot: &LiveSnapshot) {
         (true, None) => "OPENING EXPECTED".into(),
         _ => snapshot.state.road_meaning().to_owned(),
     };
-    // 22 rather than 23: the bolding pass adds a pixel to the right of the last
-    // stem, and at the longest permitted string that reached into the rail.
-    let word = fit(&headline, 22);
-    let x = ((CONTENT_WIDTH as i32 - text_width(&word, 10)) / 2).max(2);
-    huge(frame, x, TIMING_BASELINE, &word, BinaryColor::On);
+    let grid = frame.grid();
+    // Budgeted from the content edge rather than the panel edge: the bolding
+    // pass adds a pixel to the right of the last stem, and at the longest
+    // permitted string that used to reach into the rail.
+    let word = fit(
+        &headline,
+        grid.characters_between(0, grid.content_right(), 10),
+    );
+    let x = ((grid.content_width() as i32 - text_width(&word, 10)) / 2).max(2);
+    huge(frame, x, timing_baseline(grid), &word, BinaryColor::On);
 
     if let Some(confidence) = snapshot.confidence_percent.filter(|_| predictive) {
         let band = ConfidenceBand::from_percent(confidence).label();
         let note = format!("{confidence}% {band}");
-        let x = ((CONTENT_WIDTH as i32 - text_width(&note, 6)) / 2).max(2);
-        label(frame, x, CONFIDENCE_BASELINE, &note, BinaryColor::On);
+        let x = ((grid.content_width() as i32 - text_width(&note, 6)) / 2).max(2);
+        label(frame, x, confidence_baseline(grid), &note, BinaryColor::On);
     }
 }
 
@@ -199,6 +267,11 @@ fn spans_to_draw(snapshot: &LiveSnapshot) -> Vec<&SpanStatus> {
 
 /// Height of the counterweight housings above the deck.
 const HOUSING_RISE: i32 = 7;
+
+/// Width of the box the bascule glyph is drawn in, including the air that keeps
+/// it off the rail. The glyph is a fixed drawing at a fixed size on both
+/// panels: it is a silhouette to be recognised, not a diagram to be measured.
+const BASCULE_BOX_WIDTH: i32 = 78;
 
 /// Double-leaf bascule glyph in a 78x24 box anchored at `x, y`.
 ///
@@ -268,9 +341,16 @@ fn draw_bascule(frame: &mut MonoFrame, x: i32, y: i32, open: bool, color: Binary
 }
 
 fn draw_spans(frame: &mut MonoFrame, spans: &[&SpanStatus]) {
-    let top = SPANS_BASELINE;
+    let grid = frame.grid();
+    let top = spans_baseline(grid);
+    // Two columns across the content area. The second span starts where the
+    // first one's room runs out, so neither can grow into the other whatever
+    // the panel is.
+    let column = grid.content_width() as i32 / 2 - 4;
+    // What is left of a column once the code and its two gaps are taken out.
+    let detail_characters = usize::try_from((column - 46).max(6) / 6).unwrap_or(1);
     for (index, span) in spans.iter().enumerate() {
-        let x = 5 + i32::try_from(index).unwrap_or(0) * 112;
+        let x = 5 + i32::try_from(index).unwrap_or(0) * column;
         let code = fit(&span.code, 3);
         if span.open {
             // Invert the code only. Extending the fill under the detail text
@@ -287,7 +367,7 @@ fn draw_spans(frame: &mut MonoFrame, spans: &[&SpanStatus]) {
                 frame,
                 x + text_width(&code, 6) + 8,
                 top,
-                &fit(&detail, 11),
+                &fit(&detail, detail_characters),
                 BinaryColor::On,
             );
         } else {

@@ -65,6 +65,10 @@ pub struct BleConnectionInfo {
     pub id: String,
     /// Advertised local name.
     pub name: String,
+    /// The banner the board holds on its TX characteristic, when it published
+    /// one. Over Bluetooth this is the only place the panel geometry is spoken,
+    /// so it is read on connect rather than waited for.
+    pub banner: Option<String>,
 }
 
 struct BleConnection {
@@ -123,6 +127,17 @@ impl BleTransport {
                 which: "TX",
                 uuid: TX_UUID,
             })?;
+        // Read before any frame is sent: the host has to know which panel it is
+        // drawing for before it draws, and this characteristic holds the same
+        // line the board speaks over serial at boot.
+        let banner = peripheral
+            .read(&tx)
+            .await
+            .ok()
+            .and_then(|value| match device_reply(&value) {
+                Some(DeviceReply::Ready(line)) => Some(line),
+                _ => None,
+            });
         Ok(BleConnection {
             peripheral,
             rx,
@@ -130,6 +145,7 @@ impl BleTransport {
             info: BleConnectionInfo {
                 id: observed.id,
                 name: observed.name,
+                banner,
             },
         })
     }
@@ -357,9 +373,7 @@ async fn compatible_device(
     }
     Ok(Some(BleDeviceInfo {
         id: peripheral.id().to_string(),
-        name: properties
-            .local_name
-            .unwrap_or_else(|| "INK1 E213 display".into()),
+        name: properties.local_name.unwrap_or_else(|| "INK1 panel".into()),
         signal_strength: properties.rssi,
     }))
 }

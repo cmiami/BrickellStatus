@@ -26,7 +26,13 @@
     sendDisplayTestFrame
   } from '$lib/api';
   import { notice, persistPreferences, preferences, snapshot } from '$lib/state';
-  import type { AppPreferences, DisplayConnectionStatus, DisplayDeviceCandidate, DisplaySettings } from '$lib/types';
+  import {
+    PANEL_GEOMETRY,
+    type AppPreferences,
+    type DisplayConnectionStatus,
+    type DisplayDeviceCandidate,
+    type DisplaySettings
+  } from '$lib/types';
 
   let { draft = $bindable() }: { draft: AppPreferences } = $props();
 
@@ -50,6 +56,12 @@
     { id: 'usb', label: 'USB only', detail: 'Native serial with INK1 acknowledgement.', icon: Usb },
     { id: 'ble', label: 'Bluetooth only', detail: 'Direct in-app GATT connection.', icon: Bluetooth }
   ];
+
+  // Whatever board answered. Nothing here asks which one it is, and nothing
+  // stores an answer: the panel is a property of the hardware on the desk.
+  const panel = $derived(deviceStatus.panel ?? 'e213');
+  const geometry = $derived(PANEL_GEOMETRY[panel]);
+  const detected = $derived(Boolean(deviceStatus.panel));
 
   const epaperOutput = $derived($snapshot?.outputs.find((output) => output.id === 'epaper'));
   const settingsDirty = $derived(
@@ -98,7 +110,7 @@
     try {
       deviceCandidates = await scanDisplayDevices();
       if (!deviceCandidates.length) {
-        notice.set({ ok: false, message: 'No E213 transport was discovered. Wake the board, allow Bluetooth, or connect USB and scan again.' });
+        notice.set({ ok: false, message: 'No panel transport was discovered. Wake the board, allow Bluetooth, or connect USB and scan again.' });
       }
     } catch (error) {
       notice.set({ ok: false, message: error instanceof Error ? error.message : 'Device scan failed.' });
@@ -158,8 +170,14 @@
   <header class="band-heading">
     <div class="route-mark"><MonitorUp size={26} strokeWidth={1.45} aria-hidden="true" /></div>
     <div>
-      <h2 id="epaper-heading">Heltec E213 e-paper</h2>
-      <p>250 × 122 monochrome frames over USB serial or Bluetooth Low Energy.</p>
+      <h2 id="epaper-heading">
+        {detected ? `Heltec ${geometry.label} e-paper` : 'Heltec e-paper'}
+      </h2>
+      <p>
+        {detected
+          ? `${geometry.width} × ${geometry.height} monochrome frames over USB serial or Bluetooth Low Energy.`
+          : 'Monochrome frames over USB serial or Bluetooth Low Energy. The board names its own panel when it connects.'}
+      </p>
     </div>
     <span class="status-word" data-state={deviceStatus.state === 'connected' ? 'ready' : deviceStatus.state}>
       {deviceStatus.state}
@@ -209,7 +227,7 @@
             <p>{deviceStatus.detail}</p>
           </div>
           <div class="status-facts">
-            <span>{deviceStatus.deviceName ?? 'InkDock E213'}</span>
+            <span>{deviceStatus.deviceName ?? `InkDock ${geometry.label}`}</span>
             <strong>{deviceStatus.transport?.toUpperCase() ?? 'NO LINK'}</strong>
             {#if deviceStatus.lastAckAt}<small>Last ACK {new Date(deviceStatus.lastAckAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>{/if}
           </div>
@@ -219,7 +237,7 @@
         </header>
 
         <ol class="pairing-steps">
-          <li><span>01</span><Power size={20} strokeWidth={1.45} aria-hidden="true" /><div><strong>Power the board</strong><small>The E213 should show <code>READY / USB + BLE</code>.</small></div></li>
+          <li><span>01</span><Power size={20} strokeWidth={1.45} aria-hidden="true" /><div><strong>Power the board</strong><small>It should show <code>READY / USB + BLE</code>.</small></div></li>
           <li class:complete={deviceCandidates.length > 0 || deviceStatus.state === 'connected'}>
             <span>02</span><BluetoothSearching size={20} strokeWidth={1.45} aria-hidden="true" />
             <div><strong>Discover a route</strong><small>Choose and save a hardware mode, then scan.</small></div>
@@ -253,7 +271,7 @@
           <summary>Advanced transport selectors</summary>
           <div class="connection-fields">
             <label class="field"><span>USB serial port</span><input bind:value={draft.display.serialPort} placeholder="auto" maxlength="180" disabled={draft.display.transport === 'ble' || draft.display.transport === 'preview'} /><small class="field-note">Use <code>auto</code> to discover the Espressif interface.</small></label>
-            <label class="field"><span>Bluetooth device name</span><input bind:value={draft.display.bleName} maxlength="64" disabled={draft.display.transport === 'usb' || draft.display.transport === 'preview'} /><small class="field-note">The INK1 UUID confirms protocol compatibility, not identity.</small></label>
+            <label class="field"><span>Bluetooth device name</span><input bind:value={draft.display.bleName} maxlength="64" disabled={draft.display.transport === 'usb' || draft.display.transport === 'preview'} /><small class="field-note">Any board advertising the INK1 service is found whatever it is named; this only pins discovery to one of them.</small></label>
           </div>
         </details>
       </section>
@@ -272,7 +290,13 @@
 
     <aside class="frame-preview">
       {#if $snapshot}
-        <EpaperPreview decision={$snapshot.decision} evidence={$snapshot.evidence} connected={deviceStatus.state === 'connected'} transport={deviceStatus.transport ?? draft.display.transport} />
+        <EpaperPreview
+          decision={$snapshot.decision}
+          evidence={$snapshot.evidence}
+          connected={deviceStatus.state === 'connected'}
+          transport={deviceStatus.transport ?? draft.display.transport}
+          {panel}
+        />
       {:else}
         <div class="empty-sheet" role="status"><h3>No live frame yet</h3><p>Refresh the real sources before rendering a frame.</p></div>
       {/if}

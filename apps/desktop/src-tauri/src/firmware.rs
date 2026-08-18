@@ -1,24 +1,26 @@
-//! Bundled E213 firmware and the USB flash workflow.
+//! Bundled panel firmware and the USB flash workflow.
 //!
 //! The app ships the firmware it expects the device to run, so a user who plugs
-//! in a board can bring it up without a toolchain. Detection of the board is
-//! automatic; the *panel revision* is not, and cannot be.
+//! in a board can bring it up without a toolchain, and without being asked what
+//! they plugged in.
 //!
-//! `platformio.ini` builds two environments whose only difference is a
-//! compile-time driver class:
+//! The display library binds one board's pinout and controller per image, so
+//! `platformio.ini` builds one environment per panel. Nobody chooses between
+//! them: every build runs the same probe at boot and reports the board it
+//! actually found, so
 //!
-//! ```text
-//! #if TENDERS_LOG_PANEL_V11
-//! EInkDisplay_VisionMasterE213V1_1 display;
-//! #else
-//! EInkDisplay_VisionMasterE213 display;
-//! #endif
-//! ```
+//! - a board already running this firmware names itself, and the matching build
+//!   is written;
+//! - a board that has never been flashed is written the most likely build, and
+//!   if the probe then reports a different board the app writes the right one
+//!   without asking again.
 //!
-//! Same ESP32-S3, same USB VID/PID; the difference is the physical panel. So
-//! the revision is a question for the operator, remembered once, with a
-//! re-flash of the other variant as the recovery when the screen comes up
-//! garbled.
+//! The single exception is the E213's panel revision. Its two revisions are the
+//! same ESP32-S3, the same USB identifiers, the same six pins and the same BUSY
+//! line — only the controller behind the glass differs, and it cannot be read
+//! back. That one stays a remembered answer, arrived at by flashing a build and
+//! asking whether the screen is readable, never by asking someone to identify
+//! hardware sealed inside a case.
 
 use std::{
     collections::BTreeMap,
@@ -26,6 +28,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use bridgestatus_eink::PanelModel;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -52,10 +55,17 @@ const REQUIRED_OFFSETS: [u32; 4] = [
 ];
 
 /// Chip this bundle targets. Guards against a manifest built for another board
-/// being flashed onto an E213.
+/// being flashed onto one of these.
 pub const EXPECTED_CHIP: &str = "esp32s3";
 
-/// Which physical e-paper panel a build drives.
+/// Manifest revision this app reads. Version 2 names the board each build
+/// drives, which is what lets the app pick one without asking.
+pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
+
+/// Which E213 panel controller a build drives.
+///
+/// Only meaningful on the E213, whose two revisions are electrically identical.
+/// Every other board has exactly one build and nothing to choose.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PanelRevision {
@@ -96,7 +106,12 @@ pub struct FirmwareVariantSpec {
     pub id: String,
     /// Operator-facing name.
     pub label: String,
-    pub panel_revision: PanelRevision,
+    /// Board this build drives, which is what the device's own probe reports
+    /// back and therefore what a flash decision is made from.
+    pub panel: PanelModel,
+    /// Which E213 controller this build carries, on the board that has two.
+    #[serde(default)]
+    pub panel_revision: Option<PanelRevision>,
     pub images: Vec<FirmwareImageSpec>,
 }
 
@@ -125,7 +140,8 @@ pub struct FlashSegment {
 pub struct FirmwareVariant {
     pub id: String,
     pub label: String,
-    pub panel_revision: PanelRevision,
+    pub panel: PanelModel,
+    pub panel_revision: Option<PanelRevision>,
     pub segments: Vec<FlashSegment>,
 }
 
@@ -167,7 +183,7 @@ impl FirmwareBundle {
     }
 
     fn from_manifest(manifest: FirmwareManifest, root: &Path) -> Result<Self, FirmwareError> {
-        if manifest.schema_version != 1 {
+        if manifest.schema_version != MANIFEST_SCHEMA_VERSION {
             return Err(FirmwareError::SchemaVersion(manifest.schema_version));
         }
         if !manifest.chip.eq_ignore_ascii_case(EXPECTED_CHIP) {
@@ -202,12 +218,39 @@ impl FirmwareBundle {
         self.variants.iter().find(|variant| variant.id == id)
     }
 
-    /// The build matching a panel revision, which is how the operator's stored
-    /// answer maps onto an image set.
-    pub fn for_panel(&self, panel: PanelRevision) -> Option<&FirmwareVariant> {
+    /// The build to write to a board.
+    ///
+    /// `board` is what the device reported about itself, so on everything but a
+    /// virgin board this is a fact rather than a guess. `revision` is the
+    /// remembered answer to the one question hardware cannot settle, and only
+    /// the E213 has more than one build for it to choose between.
+    pub fn for_board(
+        &self,
+        board: PanelModel,
+        revision: Option<PanelRevision>,
+    ) -> Option<&FirmwareVariant> {
+        let for_board = || {
+            self.variants
+                .iter()
+                .filter(|variant| variant.panel == board)
+        };
+        revision
+            .and_then(|revision| {
+                for_board().find(|variant| variant.panel_revision == Some(revision))
+            })
+            // With nothing remembered, the first build listed for the board is
+            // the one to try. `bundle_firmware.py` lists the current revision
+            // first for exactly this reason.
+            .or_else(|| for_board().next())
+    }
+
+    /// Every build that could drive this board, so a screen that comes up
+    /// unreadable has somewhere to go next.
+    pub fn alternatives_for(&self, board: PanelModel, written: &str) -> Vec<&FirmwareVariant> {
         self.variants
             .iter()
-            .find(|variant| variant.panel_revision == panel)
+            .filter(|variant| variant.panel == board && variant.id != written)
+            .collect()
     }
 }
 
@@ -258,6 +301,7 @@ fn resolve_variant(
     Ok(FirmwareVariant {
         id: spec.id,
         label: spec.label,
+        panel: spec.panel,
         panel_revision: spec.panel_revision,
         segments,
     })
@@ -296,49 +340,16 @@ fn validate_layout(variant: &str, segments: &[FlashSegment]) -> Result<(), Firmw
 
 /// What the firmware banner told us about the attached board.
 ///
-/// The device announces itself on boot as `READY INK1 <w>x<h> <payload> <build>`.
-/// Firmware predating build reporting omits the last field, so a missing build
-/// is "unknown", never "wrong" -- a working device must not be nagged to
-/// reflash just because it cannot say which build it runs.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct DeviceBanner {
-    /// Whether `READY INK1` was seen at all.
-    pub saw_ready: bool,
-    /// Build identity, when the firmware is new enough to report one.
-    pub build: Option<String>,
-}
-
-impl DeviceBanner {
-    /// Reads a banner line emitted by the device.
-    pub fn parse(line: &str) -> Self {
-        let trimmed = line.trim();
-        if !(trimmed.contains("READY INK1") || trimmed == "READY") {
-            return Self::default();
-        }
-        // `READY INK1 250x122 3904 <build>`; anything before the build id is
-        // geometry the host already knows, so only the 5th token is read.
-        let build = trimmed
-            .split_whitespace()
-            .nth(4)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            // A firmware built without git history stamps "unknown" rather than
-            // lying about its identity. That is an absent build id, not a
-            // different one: comparing it against a real revision would report
-            // every such board as outdated and offer a reflash that changes
-            // nothing.
-            .filter(|value| !value.eq_ignore_ascii_case(UNKNOWN_BUILD))
-            .map(str::to_owned);
-        Self {
-            saw_ready: true,
-            build,
-        }
-    }
-}
-
-/// What the firmware stamps into its banner when it cannot name its own source
-/// revision. Treated as "no build id" on both sides of the comparison.
-const UNKNOWN_BUILD: &str = "unknown";
+/// The device announces itself on boot as
+/// `READY INK1 <w>x<h> <payload> <build> [panel]`. It is the same line the
+/// display route reads to learn which panel it is drawing for, so the parser
+/// lives beside the protocol rather than here; this module only cares about the
+/// build id it carries.
+///
+/// Firmware predating build reporting omits that field, so a missing build is
+/// "unknown", never "wrong" -- a working device must not be nagged to reflash
+/// just because it cannot say which build it runs.
+pub use bridgestatus_eink::DeviceBanner;
 
 /// Why a flash is being offered.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -349,6 +360,13 @@ pub enum FlashReason {
     NotResponding,
     /// The board runs a different build from the one this app ships.
     BuildMismatch { device: String, bundled: String },
+    /// The board is running this firmware, but the build for another panel.
+    ///
+    /// Only the device can tell us this, and it does: its probe names the board
+    /// it woke up on. Nothing needs to be asked, and nothing is wrong with the
+    /// hardware — the right image simply has to replace the one that was
+    /// written before anybody knew what this board was.
+    WrongBoard { board: PanelModel },
 }
 
 /// Whether the operator should be prompted to flash.
@@ -465,6 +483,15 @@ pub fn evaluate_flash_requirement(
     };
     if !banner.saw_ready {
         return silent_board(remembered, bundled_build, evidence);
+    }
+    // A board that says it is the wrong build for itself has settled the
+    // question: whatever the build ids say, this image cannot drive this panel.
+    if banner.mismatch
+        && let Some(board) = banner.board
+    {
+        return FlashRequirement::Required {
+            reason: FlashReason::WrongBoard { board },
+        };
     }
     // The board's own word wins when it gives one; our record answers when it
     // does not. A firmware old enough to omit its build id is exactly the case
@@ -728,13 +755,14 @@ mod tests {
     fn manifest_json(images: &str) -> String {
         format!(
             r#"{{
-              "schemaVersion": 1,
+              "schemaVersion": 2,
               "chip": "esp32s3",
               "sourceRevision": "abc1234",
               "variants": [
                 {{
                   "id": "vision-master-e213",
                   "label": "Vision Master E213 (original panel)",
+                  "panel": "e213",
                   "panelRevision": "original",
                   "images": [{images}]
                 }}
@@ -751,10 +779,31 @@ mod tests {
     "#;
 
     fn write_full_images(fixture: &Fixture) {
-        fixture.image("vision-master-e213", "bootloader.bin", 15_104);
-        fixture.image("vision-master-e213", "partitions.bin", 3_072);
-        fixture.image("vision-master-e213", "boot_app0.bin", 8_192);
-        fixture.image("vision-master-e213", "firmware.bin", 502_736);
+        write_variant_images(fixture, "vision-master-e213");
+    }
+
+    fn write_variant_images(fixture: &Fixture, variant: &str) {
+        fixture.image(variant, "bootloader.bin", 15_104);
+        fixture.image(variant, "partitions.bin", 3_072);
+        fixture.image(variant, "boot_app0.bin", 8_192);
+        fixture.image(variant, "firmware.bin", 502_736);
+    }
+
+    /// The shipped shape: one build per board, and two for the board whose
+    /// panel revision nothing can read back.
+    fn every_board_manifest() -> String {
+        format!(
+            r#"{{
+              "schemaVersion": 2,
+              "chip": "esp32s3",
+              "sourceRevision": "abc1234",
+              "variants": [
+                {{"id":"vision-master-e213","label":"Original panel","panel":"e213","panelRevision":"original","images":[{FULL_IMAGES}]}},
+                {{"id":"vision-master-e213-v11","label":"Panel v1.1","panel":"e213","panelRevision":"v11","images":[{FULL_IMAGES}]}},
+                {{"id":"vision-master-e290","label":"E290","panel":"e290","images":[{FULL_IMAGES}]}}
+              ]
+            }}"#
+        )
     }
 
     #[test]
@@ -766,7 +815,7 @@ mod tests {
         let bundle = FirmwareBundle::load(&fixture.root).unwrap();
         assert_eq!(bundle.source_revision.as_deref(), Some("abc1234"));
         let variant = bundle.variant("vision-master-e213").unwrap();
-        assert_eq!(variant.panel_revision, PanelRevision::Original);
+        assert_eq!(variant.panel_revision, Some(PanelRevision::Original));
         assert_eq!(variant.segments.len(), 4);
         assert_eq!(variant.total_bytes(), 15_104 + 3_072 + 8_192 + 502_736);
         // Sorted by offset so the flasher writes the bootloader first.
@@ -896,33 +945,85 @@ mod tests {
     #[test]
     fn selects_a_build_by_panel_revision() {
         let fixture = Fixture::new("two-variants");
-        for variant in ["vision-master-e213", "vision-master-e213-v11"] {
-            fixture.image(variant, "bootloader.bin", 15_104);
-            fixture.image(variant, "partitions.bin", 3_072);
-            fixture.image(variant, "boot_app0.bin", 8_192);
-            fixture.image(variant, "firmware.bin", 501_888);
+        for variant in [
+            "vision-master-e213",
+            "vision-master-e213-v11",
+            "vision-master-e290",
+        ] {
+            write_variant_images(&fixture, variant);
         }
         fixture.manifest(
             &r#"{
-              "schemaVersion": 1,
+              "schemaVersion": 2,
               "chip": "esp32s3",
               "variants": [
-                {"id":"vision-master-e213","label":"Original panel","panelRevision":"original","images":[IMAGES]},
-                {"id":"vision-master-e213-v11","label":"Panel v1.1","panelRevision":"v11","images":[IMAGES]}
+                {"id":"vision-master-e213","label":"Original panel","panel":"e213","panelRevision":"original","images":[IMAGES]},
+                {"id":"vision-master-e213-v11","label":"Panel v1.1","panel":"e213","panelRevision":"v11","images":[IMAGES]},
+                {"id":"vision-master-e290","label":"E290","panel":"e290","images":[IMAGES]}
               ]
             }"#
             .replace("IMAGES", FULL_IMAGES),
         );
 
         let bundle = FirmwareBundle::load(&fixture.root).unwrap();
-        assert_eq!(bundle.variants().len(), 2);
+        assert_eq!(bundle.variants().len(), 3);
+        // The remembered revision picks between the two E213 builds...
         assert_eq!(
-            bundle.for_panel(PanelRevision::V11).unwrap().id,
+            bundle
+                .for_board(PanelModel::E213, Some(PanelRevision::V11))
+                .unwrap()
+                .id,
             "vision-master-e213-v11"
         );
         assert_eq!(
-            bundle.for_panel(PanelRevision::Original).unwrap().id,
+            bundle
+                .for_board(PanelModel::E213, Some(PanelRevision::Original))
+                .unwrap()
+                .id,
             "vision-master-e213"
+        );
+        // ...and means nothing on a board with only one build, which must be
+        // selected by the board alone rather than falling through to a
+        // revision that does not apply to it.
+        assert_eq!(
+            bundle
+                .for_board(PanelModel::E290, Some(PanelRevision::V11))
+                .unwrap()
+                .id,
+            "vision-master-e290"
+        );
+        assert_eq!(
+            bundle.for_board(PanelModel::E290, None).unwrap().id,
+            "vision-master-e290"
+        );
+    }
+
+    /// Nothing remembered, and a board that has never spoken: the first build
+    /// listed for it is written, and the firmware reports back if that was the
+    /// wrong guess.
+    #[test]
+    fn a_board_with_nothing_remembered_still_has_a_build_to_write() {
+        let fixture = Fixture::new("unremembered");
+        write_variant_images(&fixture, "vision-master-e213");
+        write_variant_images(&fixture, "vision-master-e213-v11");
+        write_variant_images(&fixture, "vision-master-e290");
+        fixture.manifest(&every_board_manifest());
+        let bundle = FirmwareBundle::load(&fixture.root).unwrap();
+        assert!(bundle.for_board(PanelModel::E213, None).is_some());
+        assert_eq!(
+            bundle
+                .alternatives_for(PanelModel::E213, "vision-master-e213")
+                .iter()
+                .map(|variant| variant.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["vision-master-e213-v11"],
+            "the other E213 build is what an unreadable screen is offered next"
+        );
+        assert!(
+            bundle
+                .alternatives_for(PanelModel::E290, "vision-master-e290")
+                .is_empty(),
+            "a board with one build has nothing else to try"
         );
     }
 
@@ -986,7 +1087,8 @@ mod tests {
             return;
         };
         assert_ne!(
-            revision, UNKNOWN_BUILD,
+            revision,
+            bridgestatus_eink::UNKNOWN_BUILD,
             "a bundle that cannot name its own build must not be shipped"
         );
         for variant in bundle.variants() {
@@ -1253,6 +1355,68 @@ mod tests {
     /// ACK INK1 is proof this firmware is running, whatever the board said or
     /// did not say at boot. This is the case with no record to fall back on --
     /// a board someone else flashed, which must also not be nagged.
+    /// A build that landed on the other board says so, and that outranks every
+    /// other signal: the build ids can agree while the image is still unable to
+    /// drive the panel in front of it.
+    #[test]
+    fn a_build_on_the_wrong_board_is_always_reflashed() {
+        let banner = DeviceBanner::parse("READY INK1 0x0 0 abc1234 E290 MISMATCH");
+        let requirement = evaluate_flash_requirement(
+            &DeviceProbe::Answered(banner),
+            Some("abc1234"),
+            None,
+            RouteEvidence::Absent,
+        );
+        assert_eq!(
+            requirement,
+            FlashRequirement::Required {
+                reason: FlashReason::WrongBoard {
+                    board: PanelModel::E290
+                }
+            }
+        );
+        assert!(requirement.should_prompt());
+    }
+
+    /// The board it landed on is what the app writes next, without asking.
+    #[test]
+    fn the_reported_board_selects_the_build_that_replaces_it() {
+        let fixture = Fixture::new("wrong-board");
+        for variant in [
+            "vision-master-e213",
+            "vision-master-e213-v11",
+            "vision-master-e290",
+        ] {
+            write_variant_images(&fixture, variant);
+        }
+        fixture.manifest(&every_board_manifest());
+        let bundle = FirmwareBundle::load(&fixture.root).unwrap();
+        let banner = DeviceBanner::parse("READY INK1 0x0 0 abc1234 E290 MISMATCH");
+        let board = banner.board.expect("the firmware named the board");
+        assert_eq!(
+            bundle.for_board(board, None).unwrap().id,
+            "vision-master-e290"
+        );
+    }
+
+    /// A board running the right build for itself is left alone, panel name and
+    /// all.
+    #[test]
+    fn a_board_on_its_own_build_is_up_to_date() {
+        let requirement = evaluate_flash_requirement(
+            &DeviceProbe::Answered(DeviceBanner::parse("READY INK1 296x128 4736 abc1234 E290")),
+            Some("abc1234"),
+            None,
+            RouteEvidence::Acknowledged,
+        );
+        assert_eq!(
+            requirement,
+            FlashRequirement::UpToDate {
+                build: "abc1234".into()
+            }
+        );
+    }
+
     #[test]
     fn a_board_that_acknowledges_frames_is_never_called_unresponsive() {
         let requirement = evaluate_flash_requirement(

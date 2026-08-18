@@ -3,9 +3,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { onMount } from 'svelte';
 
-  import type { FirmwareStatus, PanelRevision } from '$lib/types';
-
-  const PANEL_CHOICE_KEY = 'tenders-log.panel-revision';
+  import { PANEL_GEOMETRY, type FirmwareStatus, type FirmwareVariantSummary } from '$lib/types';
 
   let status = $state<FirmwareStatus | null>(null);
   let dismissed = $state(false);
@@ -16,16 +14,20 @@
   let error = $state<string | null>(null);
   let done = $state(false);
 
-  // The panel revision cannot be detected: both builds run on the same ESP32-S3
-  // with the same USB identifiers, and only the physical display differs.
+  // Which board is attached is never a question: the firmware probes its own
+  // pins at boot and says so, and the app writes the build for whatever it
+  // named. A board that has never been flashed cannot answer yet, so it is
+  // written the most likely build — and if the probe then reports a different
+  // board, the app writes the right one without asking anything.
   //
-  // Asking up front made that our problem into the reader's — nobody knows
-  // which revision is in a sealed case, and getting it wrong looks identical to
-  // a failed flash. So we no longer ask. We flash the build that worked last
-  // time, then ask the one question anyone can actually answer: can you read
-  // the screen? A "no" flashes the other one and remembers.
-  let panel = $state<PanelRevision | null>(null);
+  // The one thing hardware cannot settle is the E213's panel revision: two
+  // controllers, identical wiring, no read-back. Nobody knows which revision is
+  // in a sealed case, and getting it wrong looks exactly like a failed flash.
+  // So that one is not asked either. The app flashes a build and asks the only
+  // question anyone can actually answer — can you read the screen? — and a "no"
+  // flashes the other one and remembers.
   let checkingScreen = $state(false);
+  let lastWritten = $state<FirmwareVariantSummary | null>(null);
 
   const prompted = $derived(
     !dismissed &&
@@ -33,20 +35,37 @@
       !!status.port &&
       (status.requirement.state === 'required' || checkingScreen)
   );
+
   const variant = $derived(
-    status?.variants.find((item) => item.panelRevision === panel) ?? status?.variants[0] ?? null
+    status?.variants.find((item) => item.id === status?.recommendedVariantId) ??
+      status?.variants[0] ??
+      null
   );
-  const otherVariant = $derived(
-    status?.variants.find((item) => item.id !== variant?.id) ?? null
+
+  // Only builds that could drive the board that is actually there. On a board
+  // with one build there is nothing to try next, so nothing is offered.
+  const alternatives = $derived(
+    status && lastWritten
+      ? status.variants.filter(
+          (item) => item.panel === lastWritten?.panel && item.id !== lastWritten?.id
+        )
+      : []
   );
+
+  const panelName = $derived(status?.board ? PANEL_GEOMETRY[status.board].label : null);
   const percent = $derived(total > 0 ? Math.min(100, Math.round((written / total) * 100)) : 0);
 
   function reasonText(): string {
     const requirement = status?.requirement;
     if (requirement?.state !== 'required') return '';
-    return requirement.reason.kind === 'notResponding'
-      ? 'A board is connected but is not running Tender’s Log firmware.'
-      : `The board is running build ${requirement.reason.device}; this app ships ${requirement.reason.bundled}.`;
+    switch (requirement.reason.kind) {
+      case 'notResponding':
+        return 'A board is connected but is not running Tender’s Log firmware.';
+      case 'wrongBoard':
+        return `This board is an ${PANEL_GEOMETRY[requirement.reason.board].label}, and it is running the build for the other panel.`;
+      default:
+        return `The board is running build ${requirement.reason.device}; this app ships ${requirement.reason.bundled}.`;
+    }
   }
 
   async function refresh() {
@@ -60,7 +79,6 @@
   }
 
   onMount(() => {
-    panel = (localStorage.getItem(PANEL_CHOICE_KEY) as PanelRevision | null) ?? null;
     void refresh();
     const poll = setInterval(refresh, 15_000);
     const unlisten = listen<{ stage: string; written: number; total: number }>(
@@ -77,11 +95,6 @@
     };
   });
 
-  function choosePanel(next: PanelRevision) {
-    panel = next;
-    localStorage.setItem(PANEL_CHOICE_KEY, next);
-  }
-
   async function flash(target = variant) {
     if (!status?.port || !target) return;
     flashing = true;
@@ -91,11 +104,14 @@
     total = target.totalBytes;
     try {
       await invoke('flash_firmware', { variantId: target.id, port: status.port });
-      panel = target.panelRevision;
+      lastWritten = target;
       done = true;
-      // Keep the panel open for exactly one question, then get out of the way.
-      checkingScreen = true;
       await refresh();
+      // A board whose panel this app cannot tell apart is the only reason to
+      // keep this open. Everything else has already been settled by the device.
+      checkingScreen =
+        status?.variants.filter((item) => item.panel === target.panel).length > 1;
+      if (!checkingScreen) dismissed = true;
     } catch (cause) {
       error = String(cause);
     } finally {
@@ -103,18 +119,18 @@
     }
   }
 
-  // The screen is readable: remember which build produced that and close.
+  // The screen is readable: this build is the remembered answer for this board.
   function confirmScreen() {
-    if (panel) localStorage.setItem(PANEL_CHOICE_KEY, panel);
     checkingScreen = false;
     dismissed = true;
   }
 
-  // The screen is wrong: the other panel build is the only remaining
-  // explanation worth offering, so flash it rather than asking them to diagnose.
+  // The screen is wrong: the other build for this same board is the only
+  // remaining explanation worth offering, so flash it rather than asking them
+  // to diagnose a panel they cannot see the part number of.
   async function tryOtherPanel() {
-    if (!otherVariant) return;
-    await flash(otherVariant);
+    const other = alternatives[0];
+    if (other) await flash(other);
   }
 </script>
 
@@ -130,7 +146,7 @@
           ? 'If the screen is blank, garbled, or mirrored, this board has the other panel and needs the other build.'
           : reasonText()}
       </p>
-      <p class="port">{status?.port}</p>
+      <p class="port">{status?.port}{panelName ? ` · ${panelName}` : ''}</p>
     </div>
 
     {#if flashing}
@@ -150,7 +166,7 @@
     <div class="firmware-actions">
       {#if checkingScreen && !flashing}
         <button class="primary-action" onclick={confirmScreen}>Yes, it looks right</button>
-        {#if otherVariant}
+        {#if alternatives.length}
           <button class="secondary-action" onclick={tryOtherPanel}>No — try the other panel</button>
         {/if}
       {:else}

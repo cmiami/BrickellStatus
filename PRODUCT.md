@@ -8,7 +8,7 @@ web
 
 ## Users
 
-People who want a quiet, personally configured signal console for information that is worth interrupting them—starting with people who routinely approach the Brickell Avenue Bridge and need to decide, several minutes before arrival, whether to continue toward it or take another route. The first distribution target is a small trusted group of friends running the system on ordinary computers, with a glanceable companion display on a Heltec 2.13-inch ESP32 e-paper board.
+People who want a quiet, personally configured signal console for information that is worth interrupting them—starting with people who routinely approach the Brickell Avenue Bridge and need to decide, several minutes before arrival, whether to continue toward it or take another route. The first distribution target is a small trusted group of friends running the system on ordinary computers, with a glanceable companion display on a Heltec ESP32 e-paper board, 2.13-inch or 2.9-inch.
 
 ## Product Purpose
 
@@ -35,7 +35,7 @@ This is a user-programmable signal instrument, not a feed firehose or binary bri
 - Sends deduplicated notices for material state changes; does not alert solely because a legal opening slot is approaching.
 - Supports pluggable observations so schedule, live AISStream movement, upstream bridge, and ground-truth collectors can mature independently.
 - Shows estimate range, confidence, evidence sources, freshness, and next legal slot.
-- Drives a Heltec Meshtastic LoRa Arduino ESP32 E-Paper Monitor Devboard 2.13 (the no-LoRa model) over USB serial or Bluetooth Low Energy.
+- Drives a Heltec Vision Master E-Paper board (the no-LoRa models: E213 at 250 x 122, E290 at 296 x 128) over USB serial or Bluetooth Low Energy. The board identifies its own panel at boot, so no one is asked which display they own, for showing frames or for flashing firmware.
 - Provides guided BLE/USB discovery, direct GATT connection, connection state, and physical `ACK INK1` proof. Closing the configuration window leaves the service running in the platform tray/menu bar until the user explicitly quits.
 - Provides an optional AISStream WebSocket source with an operating-system-vault API key, a bridge-target-derived 2–30 km coverage radius, and explicit parked/missing-key/armed/live/degraded health. When enabled, only the backend sends that derived bounding box and key to AISStream over WSS; the UI never connects browser-side or samples location passively.
 - Provides first-class configurable channels for the bridge predictor, local weather, official life-safety alerts, hurricane changes, news/RSS, and market watch items; additional channels join through the same typed interface.

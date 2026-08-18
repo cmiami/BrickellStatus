@@ -5,16 +5,57 @@
 #include <array>
 #include <cstring>
 
-#if TENDERS_LOG_PANEL_V11
-EInkDisplay_VisionMasterE213V1_1 display;
-#else
-EInkDisplay_VisionMasterE213 display;
-#endif
+// Which board this is, worked out by the board rather than by a person.
+//
+// The Vision Master E213 and E290 carry the same six display GPIOs with their
+// roles permuted:
+//
+//   pin      1      2      3      4      5      6
+//   E213     BUSY   DC     RST    CLK    CS     MOSI
+//   E290     MOSI   CLK    CS     DC     RST    BUSY
+//
+// Five of those are panel inputs whichever board is attached; only BUSY is a
+// panel output. So the probe never drives pins 1 or 6 — it asks which of them
+// is being *driven*, reading each one first with a pull-down and then with a
+// pull-up. A panel output overrides the weak internal pull and answers the same
+// way twice; a pin wired to the panel's MOSI input floats and follows the pull.
+// The pin that answers names the board.
+//
+// Deliberately not a polarity or timing test: the E213 V1 panel is a Fitipower
+// controller that holds BUSY LOW while busy and the others are SSD parts that
+// hold it HIGH, so a probe reading levels would identify one board and
+// mis-identify another.
+//
+// The display library binds its pinout at compile time, so a build carries one
+// board's driver and the probe's job is to confirm it is on that board. When it
+// is not, the firmware says which board it actually found and leaves the panel
+// alone: writing an E213 waveform onto E290 pins is how a board comes back with
+// a scrambled screen and no explanation. The desktop app reads that line and
+// writes the right build, so being wrong costs a minute rather than a diagnosis.
 
 namespace {
 
-constexpr uint16_t kWidth = 250;
-constexpr uint16_t kHeight = 122;
+struct PanelWiring {
+  const char *name;
+  uint16_t width;   // Landscape width, which is what the host draws.
+  uint16_t height;  // Landscape height.
+  uint8_t busy;
+};
+
+constexpr PanelWiring kE213{"E213", 250, 122, 1};
+constexpr PanelWiring kE290{"E290", 296, 128, 6};
+
+#if defined(Vision_Master_E290)
+constexpr const PanelWiring &kBuiltFor = kE290;
+#else
+constexpr const PanelWiring &kBuiltFor = kE213;
+#endif
+
+/// Peripheral power, active HIGH and on the same pin on both boards.
+constexpr uint8_t kVextPin = 18;
+
+constexpr uint16_t kWidth = kBuiltFor.width;
+constexpr uint16_t kHeight = kBuiltFor.height;
 constexpr size_t kStride = (kWidth + 7) / 8;
 constexpr size_t kPayloadSize = kStride * kHeight;
 constexpr size_t kHeaderSize = 18;
@@ -22,12 +63,27 @@ constexpr size_t kPacketSize = kHeaderSize + kPayloadSize;
 constexpr uint8_t kFlagFullRefresh = 0x01;
 constexpr uint32_t kFrameAssemblyTimeoutMs = 1000;
 
-// Name and GATT identifiers intentionally remain compatible with the proven
-// sibling InkDock firmware and existing desktop senders.
-constexpr char kBleName[] = "InkDock E213";
+// GATT identifiers intentionally remain compatible with the proven sibling
+// InkDock firmware and existing desktop senders. Only the advertised name
+// carries the panel, so a host scanning for a board learns which one it found
+// before it connects.
 constexpr char kServiceUuid[] = "8b7a0000-4f4b-4a9b-9d6e-1d0c1a2b3c4d";
 constexpr char kRxUuid[] = "8b7a0001-4f4b-4a9b-9d6e-1d0c1a2b3c4d";
 constexpr char kTxUuid[] = "8b7a0002-4f4b-4a9b-9d6e-1d0c1a2b3c4d";
+
+#if defined(Vision_Master_E290)
+DEPG0290BNS800 display;
+#elif TENDERS_LOG_PANEL_V11
+EInkDisplay_VisionMasterE213V1_1 display;
+#else
+EInkDisplay_VisionMasterE213 display;
+#endif
+
+/// The board the probe actually found, or null if nothing answered.
+const PanelWiring *attached = nullptr;
+/// Whether this build can drive what is attached.
+bool driving = false;
+char bannerLine[96] = "READY";
 
 std::array<uint8_t, kPayloadSize> pendingFrame{};
 volatile bool framePending = false;
@@ -67,7 +123,47 @@ void acknowledge(const char *message) {
   }
 }
 
+/// Whether something on the other end of this pin is driving it.
+///
+/// Read once biased low and once biased high. A driven line ignores the
+/// internal pull and answers the same way twice; a floating one follows it.
+bool pinIsDriven(uint8_t pin) {
+  pinMode(pin, INPUT_PULLDOWN);
+  delayMicroseconds(600);
+  const int low_bias = digitalRead(pin);
+  pinMode(pin, INPUT_PULLUP);
+  delayMicroseconds(600);
+  const int high_bias = digitalRead(pin);
+  pinMode(pin, INPUT);
+  return low_bias == high_bias;
+}
+
+/// Identifies the attached board, or returns null if neither answered.
+const PanelWiring *probePanel() {
+  pinMode(kVextPin, OUTPUT);
+  digitalWrite(kVextPin, HIGH);
+  delay(50);  // Peripheral rail settling, as the vendor platform also waits.
+
+  // Repeated because a panel mid-refresh can hold its BUSY line at the level
+  // the internal pull happens to agree with for one reading.
+  for (uint8_t attempt = 0; attempt < 5; ++attempt) {
+    const bool e213_driven = pinIsDriven(kE213.busy);
+    const bool e290_driven = pinIsDriven(kE290.busy);
+    Serial.printf("PROBE attempt=%u pin%u=%s pin%u=%s\n", attempt, kE213.busy,
+                  e213_driven ? "driven" : "floating", kE290.busy,
+                  e290_driven ? "driven" : "floating");
+    if (e213_driven && !e290_driven) return &kE213;
+    if (e290_driven && !e213_driven) return &kE290;
+    delay(40);
+  }
+  return nullptr;
+}
+
 bool submitPacket(const uint8_t *packet, size_t length) {
+  if (!driving) {
+    acknowledge("NACK WRONG BUILD");
+    return false;
+  }
   if (length != kPacketSize || std::memcmp(packet, "INK1", 4) != 0) {
     acknowledge("NACK FORMAT");
     return false;
@@ -81,6 +177,8 @@ bool submitPacket(const uint8_t *packet, size_t length) {
   const uint32_t expectedCrc = readLe32(packet + 14);
   const uint8_t *payload = packet + kHeaderSize;
 
+  // The frame has to be drawn for the panel that is actually here. A host
+  // sending the other geometry is told so rather than shown a smear.
   if (width != kWidth || height != kHeight || payloadLength != kPayloadSize ||
       reserved != 0 || (flags & ~kFlagFullRefresh) != 0) {
     acknowledge("NACK SIZE");
@@ -166,7 +264,10 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
 
 void setupBle() {
 #if TENDERS_LOG_ENABLE_BLE
-  NimBLEDevice::init(kBleName);
+  char name[32];
+  snprintf(name, sizeof(name), "InkDock %s",
+           attached != nullptr ? attached->name : kBuiltFor.name);
+  NimBLEDevice::init(name);
   NimBLEDevice::setPower(ESP_PWR_LVL_P3);
   NimBLEServer *server = NimBLEDevice::createServer();
   server->setCallbacks(new ServerCallbacks());
@@ -176,12 +277,15 @@ void setupBle() {
   txCharacteristic = service->createCharacteristic(
       kTxUuid, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
   rx->setCallbacks(new RxCallbacks());
-  txCharacteristic->setValue("READY");
+  // The banner rather than a bare "READY": over Bluetooth this is the only
+  // place the geometry is spoken, and a host that cannot read it does not know
+  // which panel to draw for.
+  txCharacteristic->setValue(bannerLine);
   service->start();
 
   NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
   advertising->addServiceUUID(kServiceUuid);
-  advertising->setName(kBleName);
+  advertising->setName(name);
   advertising->enableScanResponse(true);
   advertising->start();
 #endif
@@ -198,14 +302,36 @@ void drawWaitingScreen() {
   display.setCursor(15, 53);
   display.print("READY / USB + BLE");
   display.setCursor(15, 72);
-  display.print("INK1 / 250 x 122");
+  char geometry[32];
+  snprintf(geometry, sizeof(geometry), "INK1 / %u x %u", kWidth, kHeight);
+  display.print(geometry);
   display.setCursor(15, 91);
   display.print("NO WI-FI / NO LORA");
   display.update();
 }
 
+/// The line the host identifies this board by.
+///
+/// `READY INK1 <w>x<h> <payload> <build> <board> [MISMATCH]`
+///
+/// The geometry is what this firmware can draw right now, so a build sitting on
+/// the wrong board reports none: there is nothing it can correctly accept. The
+/// board name is what the probe found, which is what the app needs in order to
+/// write the build that belongs here.
+void composeBanner() {
+  const char *board = attached != nullptr ? attached->name : "NONE";
+  if (driving) {
+    snprintf(bannerLine, sizeof(bannerLine), "READY INK1 %ux%u %u %s %s",
+             kWidth, kHeight, static_cast<unsigned>(kPayloadSize),
+             TENDERS_LOG_BUILD_ID, board);
+  } else {
+    snprintf(bannerLine, sizeof(bannerLine), "READY INK1 0x0 0 %s %s MISMATCH",
+             TENDERS_LOG_BUILD_ID, board);
+  }
+}
+
 void renderPendingFrame() {
-  if (!framePending) return;
+  if (!framePending || !driving) return;
 
   std::array<uint8_t, kPayloadSize> frame{};
   bool fullRefresh;
@@ -238,14 +364,23 @@ void setup() {
   Serial.setRxBufferSize(kPacketSize + 64);
   Serial.begin(115200);
   Serial.setTimeout(50);
-  drawWaitingScreen();
+
+  attached = probePanel();
+  // A board that answered on neither line has no panel this firmware knows how
+  // to find. Drawing anyway would be writing a waveform into the dark, so the
+  // build it was given is trusted and the screen is left alone.
+  driving = attached == &kBuiltFor;
+  composeBanner();
+  if (driving) {
+    drawWaitingScreen();
+  }
+
   setupBle();
   // The build id lets the host tell whether the device is running the firmware
   // the app ships. Without it a working board can only be reported as "unknown
   // build", never as up to date, so the app would have no basis for offering a
   // flash and no basis for staying quiet.
-  Serial.printf("READY INK1 %ux%u %u %s\n", kWidth, kHeight,
-                static_cast<unsigned>(kPayloadSize), TENDERS_LOG_BUILD_ID);
+  Serial.println(bannerLine);
 }
 
 void loop() {
