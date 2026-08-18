@@ -36,10 +36,16 @@ output, and it reads no levels or timings: the E213 `V1` controller holds `BUSY`
 low while busy and the others hold it high, so a probe that read polarity would
 identify one board and mis-identify another.
 
+Only a positive identification of the *other* board stops a build from driving.
+A probe that cannot tell — neither line answering — falls back to the board the
+image was written for, which is how this firmware behaved before it could ask at
+all. The probe is allowed to redirect a flash; it is not allowed to take a
+working panel out of service over an unfamiliar reading.
+
 The display library binds one board's pinout and controller per image, so each
-environment below carries one of them. A build that lands on a board it cannot
-drive leaves the panel alone and says so, and the desktop app writes the right
-image without asking anything:
+environment below carries one of them. A build that lands on a board it can see
+is the wrong one leaves the panel alone and says so, and the desktop app writes
+the right image without asking anything:
 
 ```text
 READY INK1 0x0 0 <build> E290 MISMATCH

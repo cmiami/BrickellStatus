@@ -169,6 +169,7 @@ const PanelWiring *probePanel() {
     if (e290_driven && !e213_driven) return &kE290;
     delay(40);
   }
+  Serial.println("PROBE inconclusive; keeping this build's own board");
   return nullptr;
 }
 
@@ -332,7 +333,9 @@ void drawWaitingScreen() {
 /// board name is what the probe found, which is what the app needs in order to
 /// write the build that belongs here.
 void composeBanner() {
-  const char *board = attached != nullptr ? attached->name : "NONE";
+  // With nothing identified, this build's own board is the honest answer: it is
+  // what the firmware is about to drive, and what the app should keep writing.
+  const char *board = attached != nullptr ? attached->name : kBuiltFor.name;
   if (driving) {
     snprintf(bannerLine, sizeof(bannerLine), "READY INK1 %ux%u %u %s %s",
              kWidth, kHeight, static_cast<unsigned>(kPayloadSize),
@@ -379,10 +382,12 @@ void setup() {
   Serial.setTimeout(50);
 
   attached = probePanel();
-  // A board that answered on neither line has no panel this firmware knows how
-  // to find. Drawing anyway would be writing a waveform into the dark, so the
-  // build it was given is trusted and the screen is left alone.
-  driving = attached == &kBuiltFor;
+  // Only a positive identification of the *other* board stops this build from
+  // driving. A probe that could not tell falls back to the board this image was
+  // written for, which is how the firmware behaved before it could ask at all:
+  // the probe is allowed to redirect a flash, never to take a working panel out
+  // of service because it read an unfamiliar line.
+  driving = attached == nullptr || attached == &kBuiltFor;
   composeBanner();
   if (driving) {
     // Only now: the panel this build knows how to talk to is the one attached.
