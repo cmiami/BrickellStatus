@@ -572,10 +572,15 @@ fn health_for_delay(delay: Option<Option<u64>>) -> CollectorHealth {
                 "Yahoo reports this quote is delayed by {minutes} minute(s)"
             )),
         },
+        // Yahoo routinely omits the delay field. A quote that arrived intact
+        // is not a fault, and calling it one parked the markets channel in
+        // "needs attention" for hours at a time while it was working. The
+        // delay is unstated, which is a thing to say about the quote, not a
+        // thing to say about the source's health.
         Some(None) | None => CollectorHealth {
-            state: crate::HealthState::Unknown,
+            state: crate::HealthState::Healthy,
             checked_at: Utc::now(),
-            message: Some("Yahoo did not report exchange delay metadata".into()),
+            message: Some("Exchange delay not stated by Yahoo".into()),
         },
     }
 }

@@ -136,6 +136,15 @@ export interface VesselTrackPoint {
   observedAt: string;
 }
 
+/** Behavioural standing, decided by the engine from the track itself. */
+export type VesselPosture =
+  | 'underway'
+  | 'waiting'
+  | 'holding'
+  | 'moored'
+  | 'off_channel'
+  | 'deep_draft';
+
 export interface VesselTrack {
   mmsi: string;
   vesselName?: string;
@@ -144,7 +153,80 @@ export interface VesselTrack {
   speedKnots: number;
   courseDegrees: number;
   observedAt: string;
+  /** Broadcast ship-type word, when the vessel has sent a static report. */
+  vesselClass?: string;
+  posture?: VesselPosture;
+  /** Signed channel metres to the span: positive upriver, negative seaward. */
+  sMeters?: number;
+  /** Which charted branch the fix projected onto. */
+  branch?: 'river' | 'north_approach' | 'south_approach';
+  /** Broadcast identity, present only when the vessel has sent a static report. */
+  callSign?: string;
+  imoNumber?: number;
+  /** Skipper-entered destination, when it is something meaningful. */
+  destination?: string;
+  /** Hull size from the static report; absent until one is received. */
+  lengthMeters?: number;
+  beamMeters?: number;
+  draughtMeters?: number;
+  /**
+   * Learned likelihood this hull forces an opening, in basis points. Absent
+   * means unproven, which is not the same as "fits under".
+   */
+  openingPropensity?: number;
+  /** Minutes until this vessel reaches the span. Absent when it is not closing. */
+  etaMinMinutes?: number;
+  etaMaxMinutes?: number;
+  /** Whether 33 CFR 117.261 lets this hull be passed outside the schedule. */
+  scheduleExempt?: boolean;
+  /** When it could actually be passed, schedule included. */
+  predictedOpeningAt?: string;
+  /** True when the schedule pushed the opening later than the arrival. */
+  waitsForSlot?: boolean;
   points: VesselTrackPoint[];
+}
+
+/** A named point on the corridor: a bascule, the mouth, or a charted mark. */
+export interface RiverStation {
+  label: string;
+  kind: 'target' | 'bridge' | 'mouth' | 'waypoint';
+  /** FL511 selector key when this station is a bascule the app watches. */
+  bridgeKey?: string;
+  latitude: number;
+  longitude: number;
+  /** Signed channel metres from the span: positive upriver, negative seaward. */
+  sMeters: number;
+}
+
+export interface RiverCorridorBranch {
+  id: string;
+  label: string;
+  /** Half-width of the tracked water either side of the centreline. */
+  corridorOffsetMeters: number;
+  /** `[latitude, longitude]` waypoints, mouth-first. */
+  centerline: [number, number][];
+  /** Named points along this branch, mouth-first. */
+  stations: RiverStation[];
+}
+
+/** One vessel observed crossing the target bridge line. */
+export interface BridgeCrossing {
+  mmsi: string;
+  vesselName?: string;
+  vesselClass?: string;
+  direction: 'upriver' | 'downriver';
+  crossedAt: string;
+  speedKnots?: number;
+  /** `opened`, `fits_under`, `unknown`, or absent while still unresolved. */
+  outcome?: 'opened' | 'fits_under' | 'unknown';
+}
+
+export interface RiverCorridor {
+  bridgeLatitude: number;
+  bridgeLongitude: number;
+  /** Whether an AIS source is actually running and receiving vessels. */
+  aisLive: boolean;
+  branches: RiverCorridorBranch[];
 }
 
 export interface AppSnapshot {
@@ -157,6 +239,10 @@ export interface AppSnapshot {
   dispatches: DispatchRecord[];
   bridgeIntervals: BridgeStateInterval[];
   vesselTracks: VesselTrack[];
+  /** Always present; `aisLive` says whether vessels are being received. */
+  riverCorridor: RiverCorridor;
+  /** Recent bridge-line crossings, newest first. */
+  bridgeCrossings: BridgeCrossing[];
   system: SystemHealth;
 }
 

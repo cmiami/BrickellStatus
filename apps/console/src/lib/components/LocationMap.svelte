@@ -10,11 +10,19 @@
   import { CloudRain, Crosshair, Globe2, MapPin, MousePointer2 } from '@lucide/svelte';
   import type { GeoJSONSource, Map as MapLibreMap, Marker as MapLibreMarker, ScaleControl } from 'maplibre-gl';
 
-  import type { LocationMapPoint, RadarLayer, UnitSystem, VesselTrack } from '$lib/types';
+  import { corridorFeatureCollection } from '$lib/river';
+  import type {
+    LocationMapPoint,
+    RadarLayer,
+    RiverCorridor,
+    UnitSystem,
+    VesselTrack
+  } from '$lib/types';
 
   let {
     points = [],
     vesselTracks = [],
+    corridor = null,
     radar = null,
     candidate = null,
     selectedId = null,
@@ -26,6 +34,7 @@
   }: {
     points?: LocationMapPoint[];
     vesselTracks?: VesselTrack[];
+    corridor?: RiverCorridor | null;
     radar?: RadarLayer | null;
     candidate?: LocationMapPoint | null;
     selectedId?: string | null;
@@ -121,6 +130,40 @@
     initialFramed = true;
   }
 
+  // The tracked corridor: the water AIS is actually subscribed to, drawn from
+  // the engine's own published geometry. It sits at the very bottom of the
+  // stack — it is the ground the rest of the AIS evidence stands on, and it
+  // must never obscure a vessel, a storm cell, or a marker.
+  function syncCorridor() {
+    if (!map || !loaded || !map.isStyleLoaded()) return;
+    const data = corridor
+      ? corridorFeatureCollection(corridor)
+      : { type: 'FeatureCollection' as const, features: [] };
+    const source = map.getSource('ais-corridor') as GeoJSONSource | undefined;
+    if (source) {
+      source.setData(data);
+      return;
+    }
+    if (!data.features.length) return;
+    map.addSource('ais-corridor', { type: 'geojson', data });
+    map.addLayer({
+      id: 'ais-corridor-area',
+      type: 'fill',
+      source: 'ais-corridor',
+      paint: { 'fill-color': '#6e4fa3', 'fill-opacity': 0.14 }
+    });
+    map.addLayer({
+      id: 'ais-corridor-edge',
+      type: 'line',
+      source: 'ais-corridor',
+      paint: {
+        'line-color': '#5b3e8c',
+        'line-width': 1.25,
+        'line-opacity': 0.62
+      }
+    });
+  }
+
   function syncVesselTracks() {
     if (!map || !loaded || !map.isStyleLoaded()) return;
     const data = {
@@ -204,10 +247,15 @@
     const trackSignature = vesselTracks
       .map((track) => `${track.mmsi}:${track.observedAt}:${track.points.length}:${track.movement}`)
       .join('|');
+    const corridorSignature = corridor?.branches
+      .map((branch) => `${branch.id}:${branch.centerline.length}:${branch.corridorOffsetMeters}`)
+      .join('|');
     void markerSignature;
     void trackSignature;
+    void corridorSignature;
     void selectedId;
     if (loaded) queueMicrotask(() => {
+      syncCorridor();
       syncMarkers();
       syncVesselTracks();
       syncRadar();
@@ -257,6 +305,7 @@
           failed = null;
           loaded = true;
           if (loadTimer) window.clearTimeout(loadTimer);
+          syncCorridor();
           syncMarkers();
           syncVesselTracks();
         };
@@ -316,6 +365,18 @@
     </button>
   {/if}
 
+  <!-- A wash of colour over water is a claim about what is being watched. It
+       gets a written key, so the shape is never left to be guessed at. -->
+  {#if corridor}
+    <div class="map-corridor-key">
+      <span class="corridor-swatch" aria-hidden="true"></span>
+      <span>
+        <strong>Tracked AIS corridor</strong>
+        <small>Vessel positions are collected inside this water only</small>
+      </span>
+    </div>
+  {/if}
+
   <div class="map-instruction">
     {#if candidate?.draggable}
       <MapPin size={16} strokeWidth={1.6} aria-hidden="true" /> Drag the amber pin to tune
@@ -371,11 +432,54 @@
 
   .map-registration,
   .map-instruction,
+  .map-corridor-key,
   .map-radar-toggle,
   .map-loading,
   .map-fallback {
     position: absolute;
     z-index: 2;
+  }
+
+  /* Keyed under the registration block, in the same marine sheet, so the two
+     read as one column of annotation rather than competing overlays. */
+  .map-corridor-key {
+    top: 132px;
+    left: 22px;
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    width: min(330px, calc(100% - 96px));
+    padding: 10px 13px 11px;
+    color: var(--white);
+    background: var(--marine);
+    border: 1px solid var(--nav-subdued);
+    box-shadow: var(--strip-shadow);
+    pointer-events: none;
+  }
+
+  .corridor-swatch {
+    flex: none;
+    width: 15px;
+    height: 15px;
+    margin-top: 1px;
+    background: rgba(140, 110, 200, 0.42);
+    border: 1px solid #a88fd4;
+  }
+
+  .map-corridor-key strong {
+    display: block;
+    font-family: var(--font-instrument);
+    font-size: var(--type-label);
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .map-corridor-key small {
+    display: block;
+    color: var(--nav-muted);
+    font-size: var(--type-caption);
+    line-height: 1.35;
   }
 
   .map-radar-toggle {
@@ -620,6 +724,12 @@
 
     .map-registration {
       top: 14px;
+      left: 14px;
+      width: calc(100% - 76px);
+    }
+
+    .map-corridor-key {
+      top: 118px;
       left: 14px;
       width: calc(100% - 76px);
     }

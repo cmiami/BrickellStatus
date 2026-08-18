@@ -487,8 +487,21 @@ impl Default for StreamState {
 #[derive(Clone, Debug, Default)]
 struct VesselStatic {
     name: Option<String>,
+    /// Radio call sign, broadcast alongside the name. The only human-readable
+    /// identity many working hulls give beyond their MMSI.
+    call_sign: Option<String>,
+    /// IMO number: the hull's permanent global identity, unlike an MMSI, which
+    /// follows the radio licence and changes with owner or flag.
+    imo_number: Option<u32>,
+    /// Skipper-entered destination. Free text, frequently blank or padding,
+    /// but a hull that types a river berth has declared it is coming through.
+    destination: Option<String>,
     ship_type: Option<u16>,
     length_meters: Option<f64>,
+    /// Beam from the reported dimensions. Drawn hulls need a width as well as
+    /// a length, and a tug and a barge of the same length are not the same
+    /// shape on the water.
+    beam_meters: Option<f64>,
     draught_meters: Option<f64>,
     updated_at: Option<DateTime<Utc>>,
 }
@@ -548,6 +561,45 @@ struct VesselHistory {
     speed_knots: f64,
     course_degrees: f64,
     observed_at: DateTime<Utc>,
+    /// Broadcast ship-type word, when the vessel has sent a static report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vessel_class: Option<String>,
+    /// Behavioral standing: `underway`, `moored`, `waiting`, `holding`,
+    /// `off_channel`, or `deep_draft`. This is what separates a vessel on
+    /// passage from a hull tied up beside the channel, so a surface can drop
+    /// the moored fleet without re-deriving the test.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    posture: Option<String>,
+    /// Signed channel meters to the Brickell span: positive upriver, negative
+    /// seaward. Absent when the fix was not projected in corridor mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    s_meters: Option<f64>,
+    /// Which charted branch the fix projected onto: `river`, `north_approach`
+    /// or `south_approach`. Seaward traffic is only placeable on a diagram
+    /// once this says which entrance channel it is in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    call_sign: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    imo_number: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    destination: Option<String>,
+    /// Hull dimensions from the vessel's static report, absent until one is
+    /// received. A hull with no reported size is drawn at a neutral size
+    /// rather than guessed at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    length_meters: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    beam_meters: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    draught_meters: Option<f64>,
+    /// Minutes until this vessel reaches the span, as a range. Absent when the
+    /// vessel is not closing on it, which is not the same as "far away".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    eta_min_minutes: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    eta_max_minutes: Option<u16>,
     points: VecDeque<VesselHistoryPoint>,
 }
 
@@ -831,11 +883,24 @@ fn normalize_static(root: &Value, received_at: DateTime<Utc>) -> Option<(u32, Ve
             .get("Name")
             .and_then(Value::as_str)
             .and_then(sanitize_vessel_name);
+        update.call_sign = report
+            .get("CallSign")
+            .and_then(Value::as_str)
+            .and_then(sanitize_call_sign);
+        update.imo_number = report
+            .get("ImoNumber")
+            .and_then(Value::as_u64)
+            .and_then(valid_imo_number);
+        update.destination = report
+            .get("Destination")
+            .and_then(Value::as_str)
+            .and_then(sanitize_destination);
         update.ship_type = report
             .get("Type")
             .and_then(Value::as_u64)
             .and_then(|value| u16::try_from(value).ok());
         update.length_meters = dimension_length(report.get("Dimension"));
+        update.beam_meters = dimension_beam(report.get("Dimension"));
         update.draught_meters = report
             .get("MaximumStaticDraught")
             .and_then(finite_number)
@@ -863,11 +928,13 @@ fn normalize_static(root: &Value, received_at: DateTime<Utc>) -> Option<(u32, Ve
                 .and_then(Value::as_u64)
                 .and_then(|value| u16::try_from(value).ok());
             update.length_meters = dimension_length(part_b.and_then(|part| part.get("Dimension")));
+            update.beam_meters = dimension_beam(part_b.and_then(|part| part.get("Dimension")));
         }
     }
     (update.name.is_some()
         || update.ship_type.is_some()
         || update.length_meters.is_some()
+        || update.beam_meters.is_some()
         || update.draught_meters.is_some())
     .then_some((mmsi, update))
 }
@@ -878,6 +945,15 @@ fn dimension_length(dimension: Option<&Value>) -> Option<f64> {
     let stern = dimension.get("B").and_then(finite_number)?;
     let length = bow + stern;
     ((1.0..=500.0).contains(&length)).then_some(length)
+}
+
+/// Beam, from the port and starboard offsets of the reported reference point.
+fn dimension_beam(dimension: Option<&Value>) -> Option<f64> {
+    let dimension = dimension?;
+    let port = dimension.get("C").and_then(finite_number)?;
+    let starboard = dimension.get("D").and_then(finite_number)?;
+    let beam = port + starboard;
+    ((1.0..=100.0).contains(&beam)).then_some(beam)
 }
 
 fn apply_static(
@@ -892,6 +968,21 @@ fn apply_static(
     }
     if update.ship_type.is_some() {
         entry.ship_type = update.ship_type;
+    }
+    if update.call_sign.is_some() {
+        entry.call_sign = update.call_sign;
+    }
+    if update.imo_number.is_some() {
+        entry.imo_number = update.imo_number;
+    }
+    // Destination is the one static field a skipper retypes mid-voyage, so a
+    // later report replaces it rather than merging; but a report that omits it
+    // is silence, not a clearing.
+    if update.destination.is_some() {
+        entry.destination = update.destination;
+    }
+    if update.beam_meters.is_some() {
+        entry.beam_meters = update.beam_meters;
     }
     if update.length_meters.is_some() {
         entry.length_meters = update.length_meters;
@@ -1152,8 +1243,20 @@ fn normalize_value(
     if let Some(word) = vessel_class {
         attributes.insert("vessel_class".into(), json!(word));
     }
+    if let Some(call_sign) = vessel_static.and_then(|value| value.call_sign.as_deref()) {
+        attributes.insert("call_sign".into(), json!(call_sign));
+    }
+    if let Some(imo) = vessel_static.and_then(|value| value.imo_number) {
+        attributes.insert("imo_number".into(), json!(imo));
+    }
+    if let Some(destination) = vessel_static.and_then(|value| value.destination.as_deref()) {
+        attributes.insert("destination".into(), json!(destination));
+    }
     if let Some(length) = vessel_static.and_then(|value| value.length_meters) {
         attributes.insert("length_meters".into(), json!(length.round()));
+    }
+    if let Some(beam) = vessel_static.and_then(|value| value.beam_meters) {
+        attributes.insert("beam_meters".into(), json!(beam.round()));
     }
     if let Some(draught) = vessel_static.and_then(|value| value.draught_meters) {
         attributes.insert("draught_meters".into(), json!(draught));
@@ -1508,6 +1611,57 @@ fn update_history(
         .get("vessel_name")
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
+    let vessel_class = track
+        .item
+        .attributes
+        .get("vessel_class")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let posture = track
+        .item
+        .attributes
+        .get("posture")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let s_meters = track.point.s_meters;
+    let branch = track
+        .item
+        .attributes
+        .get("branch")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let text = |key: &str| {
+        track
+            .item
+            .attributes
+            .get(key)
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+    };
+    let call_sign = text("call_sign");
+    let destination = text("destination");
+    let imo_number = track
+        .item
+        .attributes
+        .get("imo_number")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok());
+    let number = |key: &str| track.item.attributes.get(key).and_then(Value::as_f64);
+    let length_meters = number("length_meters");
+    let beam_meters = number("beam_meters");
+    let draught_meters = number("draught_meters");
+    let eta_min_minutes = track
+        .item
+        .attributes
+        .get("eta_min_minutes")
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok());
+    let eta_max_minutes = track
+        .item
+        .attributes
+        .get("eta_max_minutes")
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok());
     let point = VesselHistoryPoint {
         latitude,
         longitude,
@@ -1523,6 +1677,18 @@ fn update_history(
             speed_knots,
             course_degrees,
             observed_at: track.observed_at,
+            vessel_class: vessel_class.clone(),
+            posture: posture.clone(),
+            s_meters,
+            branch: branch.clone(),
+            call_sign: call_sign.clone(),
+            imo_number,
+            destination: destination.clone(),
+            length_meters,
+            beam_meters,
+            draught_meters,
+            eta_min_minutes,
+            eta_max_minutes,
             points: VecDeque::new(),
         });
 
@@ -1532,6 +1698,39 @@ fn update_history(
     history.speed_knots = speed_knots;
     history.course_degrees = course_degrees;
     history.observed_at = track.observed_at;
+    // A static report can arrive long after the first position, and a vessel
+    // that stops broadcasting its class has not lost it; keep the last known
+    // identity rather than blanking it on a bare position report.
+    if vessel_class.is_some() {
+        history.vessel_class = vessel_class;
+    }
+    history.posture = posture;
+    history.s_meters = s_meters;
+    history.branch = branch;
+    // Identity arrives on a static report that may lag the first position by
+    // minutes; never blank a known hull on a bare position update.
+    if call_sign.is_some() {
+        history.call_sign = call_sign;
+    }
+    if imo_number.is_some() {
+        history.imo_number = imo_number;
+    }
+    if destination.is_some() {
+        history.destination = destination;
+    }
+    // Dimensions arrive with a static report that may lag the first position
+    // by minutes; never blank a known hull size on a bare position update.
+    if length_meters.is_some() {
+        history.length_meters = length_meters;
+    }
+    if beam_meters.is_some() {
+        history.beam_meters = beam_meters;
+    }
+    if draught_meters.is_some() {
+        history.draught_meters = draught_meters;
+    }
+    history.eta_min_minutes = eta_min_minutes;
+    history.eta_max_minutes = eta_max_minutes;
 
     let bucket = track.observed_at.timestamp() / HISTORY_SAMPLE_SECONDS;
     if history
@@ -1621,6 +1820,36 @@ fn parse_aisstream_time(value: &str) -> Option<DateTime<Utc>> {
         .or_else(|_| DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f %z UTC"))
         .ok()
         .map(|value| value.with_timezone(&Utc))
+}
+
+/// Call signs are short alphanumeric identifiers; anything else is padding.
+fn sanitize_call_sign(value: &str) -> Option<String> {
+    let sign = value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_uppercase();
+    (2..=16).contains(&sign.len()).then_some(sign)
+}
+
+/// IMO numbers occupy a fixed range; 0 is the field's "not set".
+fn valid_imo_number(value: u64) -> Option<u32> {
+    (1_000_000..=9_999_999)
+        .contains(&value)
+        .then_some(value as u32)
+}
+
+/// Destination is free text a skipper types, so it arrives padded, blank, or
+/// as a placeholder. Anything that is not letters and digits is not a place.
+fn sanitize_destination(value: &str) -> Option<String> {
+    let destination = sanitize_vessel_name(value)?;
+    let meaningful = destination
+        .chars()
+        .any(|character| character.is_ascii_alphanumeric());
+    let placeholder = destination.eq_ignore_ascii_case("none")
+        || destination.eq_ignore_ascii_case("unknown")
+        || destination.eq_ignore_ascii_case("n/a");
+    (meaningful && !placeholder).then_some(destination)
 }
 
 fn sanitize_vessel_name(value: &str) -> Option<String> {
@@ -1798,6 +2027,18 @@ mod tests {
             speed_knots: 0.0,
             course_degrees: 129.0,
             observed_at: source_time,
+            vessel_class: None,
+            posture: None,
+            s_meters: None,
+            branch: None,
+            call_sign: None,
+            imo_number: None,
+            destination: None,
+            length_meters: None,
+            beam_meters: None,
+            draught_meters: None,
+            eta_min_minutes: None,
+            eta_max_minutes: None,
             points: minutes.iter().copied().map(point).collect(),
         };
 

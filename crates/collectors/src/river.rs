@@ -20,7 +20,7 @@
 
 /// Which charted line a fix projected onto.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RiverBranch {
+pub enum RiverBranch {
     /// The river trunk from Palmer Lake down through the mouth.
     River,
     /// Government Cut / Main Channel / ICW leg approaching from the north.
@@ -54,16 +54,16 @@ impl RiverBranch {
 
 /// A position projected into channel coordinates.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct RiverFix {
-    pub(crate) branch: RiverBranch,
+pub struct RiverFix {
+    pub branch: RiverBranch,
     /// Signed channel meters to the Brickell span: positive upriver of it,
     /// negative seaward, continuing along the approach branches.
-    pub(crate) s_meters: f64,
+    pub s_meters: f64,
     /// Perpendicular meters off the branch centerline.
-    pub(crate) offset_meters: f64,
+    pub offset_meters: f64,
     /// Compass bearing of the channel direction that closes on the bridge at
     /// this point — what a vessel's COG looks like when it is coming.
-    pub(crate) bridgeward_bearing_degrees: f64,
+    pub bridgeward_bearing_degrees: f64,
 }
 
 impl RiverFix {
@@ -78,8 +78,8 @@ impl RiverFix {
 }
 
 /// Brickell Avenue Bridge, matching the FL511 target selector.
-pub(crate) const BRIDGE_LATITUDE: f64 = 25.7699;
-pub(crate) const BRIDGE_LONGITUDE: f64 = -80.190_05;
+pub const BRIDGE_LATITUDE: f64 = 25.7699;
+pub const BRIDGE_LONGITUDE: f64 = -80.190_05;
 
 /// The corridor model is specific to this bridge; any other configured target
 /// falls back to the generic square subscription.
@@ -88,7 +88,7 @@ pub(crate) fn is_brickell_target(latitude: f64, longitude: f64) -> bool {
 }
 
 /// Waypoint: (latitude, longitude, cumulative meters from the first point).
-type Waypoint = (f64, f64);
+pub type Waypoint = (f64, f64);
 
 /// River trunk, mouth-first so approaches splice on cleanly. The nine bascule
 /// coordinates are FL511's own; S Miami Avenue is unpublished there but its
@@ -134,7 +134,7 @@ fn mouth_to_bridge_meters() -> f64 {
 }
 
 /// Projects a fix onto the nearest branch centerline.
-pub(crate) fn project(latitude: f64, longitude: f64) -> RiverFix {
+pub fn project(latitude: f64, longitude: f64) -> RiverFix {
     let mouth_s = -mouth_to_bridge_meters();
     let trunk = project_polyline(latitude, longitude, &TRUNK);
     let north = project_polyline(latitude, longitude, &NORTH_APPROACH);
@@ -231,6 +231,203 @@ fn project_polyline(latitude: f64, longitude: f64, line: &[Waypoint]) -> Polylin
     best
 }
 
+/// What a named point on the corridor is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StationKind {
+    /// The Brickell span itself.
+    Target,
+    /// A bascule upstream of the target.
+    Bridge,
+    /// Where the river meets the bay; both approaches join here.
+    Mouth,
+    /// A charted turn or channel mark with no bascule on it.
+    Waypoint,
+}
+
+impl StationKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Target => "target",
+            Self::Bridge => "bridge",
+            Self::Mouth => "mouth",
+            Self::Waypoint => "waypoint",
+        }
+    }
+}
+
+/// A named point on the corridor, for a diagram that names what it draws.
+#[derive(Clone, Copy, Debug)]
+pub struct Station {
+    pub label: &'static str,
+    pub kind: StationKind,
+    /// FL511 selector key when this station is a bascule the app watches, so a
+    /// surface can join it to live bridge state. `None` for a bascule FL511
+    /// does not publish, and for every non-bridge station.
+    pub bridge_key: Option<&'static str>,
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+/// One charted branch of the tracked corridor, published for display.
+#[derive(Clone, Copy, Debug)]
+pub struct CorridorBranch {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// Half-width of the tracked water either side of the centerline.
+    pub corridor_offset_meters: f64,
+    /// `(latitude, longitude)` waypoints, mouth-first.
+    pub centerline: &'static [Waypoint],
+    /// Named points along this branch, mouth-first.
+    pub stations: &'static [Station],
+}
+
+const fn station(
+    label: &'static str,
+    kind: StationKind,
+    bridge_key: Option<&'static str>,
+    latitude: f64,
+    longitude: f64,
+) -> Station {
+    Station {
+        label,
+        kind,
+        bridge_key,
+        latitude,
+        longitude,
+    }
+}
+
+/// Trunk stations. Bridge keys are FL511's own selector keys, so a station and
+/// its live state are the same bridge by construction rather than by a name
+/// match that could drift.
+const TRUNK_STATIONS: [Station; 11] = [
+    station("River mouth", StationKind::Mouth, None, 25.7710, -80.1849),
+    station(
+        "Brickell Ave",
+        StationKind::Target,
+        Some("brickell"),
+        25.7699,
+        -80.190_05,
+    ),
+    // South Miami Avenue is deliberately absent. FL511 publishes no selector
+    // for it, so the app can never say whether it is up or down, and a station
+    // drawn with no state reads as "closed" to anyone glancing. The blind spot
+    // is recorded in the module docs and in the FL511 selector list; it is not
+    // something to draw on a status diagram.
+    station(
+        "SW 2 Ave",
+        StationKind::Bridge,
+        Some("sw_2_ave"),
+        25.768_907,
+        -80.197_552,
+    ),
+    station(
+        "SW 1 St",
+        StationKind::Bridge,
+        Some("sw_1_st"),
+        25.773_038,
+        -80.200_591,
+    ),
+    station(
+        "W Flagler",
+        StationKind::Bridge,
+        Some("w_flagler"),
+        25.774_205,
+        -80.201_287,
+    ),
+    station(
+        "NW 5 St",
+        StationKind::Bridge,
+        Some("nw_5_st"),
+        25.778_307,
+        -80.206_931,
+    ),
+    station(
+        "NW 12 Ave",
+        StationKind::Bridge,
+        Some("nw_12_ave"),
+        25.782_594,
+        -80.214_716,
+    ),
+    station(
+        "NW 17 Ave",
+        StationKind::Bridge,
+        Some("nw_17_ave"),
+        25.785_884,
+        -80.222_961,
+    ),
+    station(
+        "NW 22 Ave",
+        StationKind::Bridge,
+        Some("nw_22_ave"),
+        25.788_202,
+        -80.231_373,
+    ),
+    station(
+        "NW 27 Ave",
+        StationKind::Bridge,
+        Some("nw_27_ave"),
+        25.792_670,
+        -80.239_650,
+    ),
+    station("Palmer Lake", StationKind::Waypoint, None, 25.8085, -80.2550),
+];
+
+/// North approach marks, named from the charted route the leg follows.
+const NORTH_APPROACH_STATIONS: [Station; 6] = [
+    station("River mouth", StationKind::Mouth, None, 25.7710, -80.1849),
+    station("Bayfront ICW", StationKind::Waypoint, None, 25.7690, -80.1824),
+    station("Brickell Key", StationKind::Waypoint, None, 25.7663, -80.1830),
+    station("Dodge Island", StationKind::Waypoint, None, 25.7725, -80.1795),
+    station("Main Channel", StationKind::Waypoint, None, 25.7705, -80.1700),
+    station(
+        "Government Cut",
+        StationKind::Waypoint,
+        None,
+        25.7635,
+        -80.1330,
+    ),
+];
+
+/// South approach marks along the ICW toward the Rickenbacker.
+const SOUTH_APPROACH_STATIONS: [Station; 4] = [
+    station("River mouth", StationKind::Mouth, None, 25.7710, -80.1849),
+    station("Claughton", StationKind::Waypoint, None, 25.7620, -80.1845),
+    station("ICW south", StationKind::Waypoint, None, 25.7520, -80.1810),
+    station("Rickenbacker", StationKind::Waypoint, None, 25.7460, -80.1700),
+];
+
+/// The tracked corridor as geometry a surface can draw.
+///
+/// Published from the same constants `project` runs on, so the water a map
+/// highlights is by construction the water a fix is tested against: the two
+/// can never drift into disagreeing about what is being tracked.
+pub fn corridor_geometry() -> [CorridorBranch; 3] {
+    [
+        CorridorBranch {
+            id: RiverBranch::River.as_str(),
+            label: "Miami River",
+            corridor_offset_meters: RiverBranch::River.corridor_offset_meters(),
+            centerline: &TRUNK,
+            stations: &TRUNK_STATIONS,
+        },
+        CorridorBranch {
+            id: RiverBranch::NorthApproach.as_str(),
+            label: "Main Channel approach",
+            corridor_offset_meters: RiverBranch::NorthApproach.corridor_offset_meters(),
+            centerline: &NORTH_APPROACH,
+            stations: &NORTH_APPROACH_STATIONS,
+        },
+        CorridorBranch {
+            id: RiverBranch::SouthApproach.as_str(),
+            label: "ICW south approach",
+            corridor_offset_meters: RiverBranch::SouthApproach.corridor_offset_meters(),
+            centerline: &SOUTH_APPROACH,
+            stations: &SOUTH_APPROACH_STATIONS,
+        },
+    ]
+}
+
 /// Bounding boxes tiling the corridor: four slim river tiles plus the two
 /// marked entrance channels. Format matches the AISStream subscription:
 /// `[[south, west], [north, east]]`.
@@ -319,6 +516,47 @@ mod tests {
         // Mid-bay, well off any channel.
         let bay = project(25.7560, -80.1600);
         assert!(!bay.in_corridor(), "offset {}", bay.offset_meters);
+    }
+
+    #[test]
+    fn published_geometry_is_the_geometry_fixes_are_tested_against() {
+        let branches = corridor_geometry();
+        assert_eq!(branches.len(), 3);
+
+        // Every published waypoint must project onto its own branch at
+        // effectively zero offset. If a centerline were ever published from a
+        // separate copy of the constants, a map would highlight water the
+        // collector does not actually test against, and this fails.
+        for branch in branches {
+            assert!(branch.centerline.len() >= 2, "{} has no line", branch.id);
+            for &(latitude, longitude) in branch.centerline {
+                let fix = project(latitude, longitude);
+                assert!(
+                    fix.offset_meters < 1.0,
+                    "{} waypoint {latitude},{longitude} sits {} m off the corridor",
+                    branch.id,
+                    fix.offset_meters
+                );
+                assert!(fix.in_corridor());
+            }
+            // The published half-width is the threshold `in_corridor` applies.
+            let matching = [
+                RiverBranch::River,
+                RiverBranch::NorthApproach,
+                RiverBranch::SouthApproach,
+            ]
+            .into_iter()
+            .find(|candidate| candidate.as_str() == branch.id)
+            .expect("published id names a real branch");
+            assert_eq!(
+                branch.corridor_offset_meters,
+                matching.corridor_offset_meters()
+            );
+        }
+
+        // The published bridge anchor is the target itself.
+        let bridge = project(BRIDGE_LATITUDE, BRIDGE_LONGITUDE);
+        assert!(bridge.s_meters.abs() < 1.0);
     }
 
     #[test]

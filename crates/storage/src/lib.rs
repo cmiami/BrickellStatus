@@ -189,6 +189,22 @@ pub struct AisCrossingObservation<'a> {
     pub session_id: &'a str,
 }
 
+/// One recorded bridge-line crossing, with the vessel's identity attached.
+///
+/// This is what lets an opening be attributed to a hull rather than left as an
+/// unexplained event. `outcome` is `opened` once the crossing has been matched
+/// to a recorded up interval.
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct AisCrossingRecord {
+    pub mmsi: String,
+    pub name: Option<String>,
+    pub vessel_class: Option<String>,
+    pub direction: String,
+    pub crossed_at_ms: i64,
+    pub speed_knots: Option<f64>,
+    pub outcome: Option<String>,
+}
+
 /// A vessel's learned opening record.
 #[derive(Clone, Debug, sqlx::FromRow)]
 pub struct AisLedgerEntry {
@@ -680,6 +696,36 @@ impl Store {
             "#,
         )
         .bind(i64::from(limit.clamp(1, 2_000)))
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Recent bridge-line crossings, newest first, with vessel identity.
+    ///
+    /// Left-joined against the ledger so a crossing by a hull that has never
+    /// broadcast a static report still returns, with a null name, rather than
+    /// vanishing from the record of what went through the bridge.
+    pub async fn list_recent_ais_crossings(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<AisCrossingRecord>, StorageError> {
+        Ok(sqlx::query_as::<_, AisCrossingRecord>(
+            r#"
+            SELECT
+                t.mmsi          AS mmsi,
+                l.name          AS name,
+                l.vessel_class  AS vessel_class,
+                t.direction     AS direction,
+                t.crossed_at_ms AS crossed_at_ms,
+                t.speed_knots   AS speed_knots,
+                t.outcome       AS outcome
+            FROM ais_transits t
+            LEFT JOIN ais_vessel_ledger l ON l.mmsi = t.mmsi
+            ORDER BY t.crossed_at_ms DESC
+            LIMIT ?1
+            "#,
+        )
+        .bind(i64::from(limit.clamp(1, 500)))
         .fetch_all(&self.pool)
         .await?)
     }

@@ -30,6 +30,14 @@
   --success: #176b47;
   --success-sheet: #dceee5;
   --danger: #8d2d28;
+  /* Corridor violet marks AIS provenance and nothing else: the water the
+     collector actually subscribes to, and the vessel courses received from it.
+     It is a provenance colour, never a severity one — amber still owns
+     urgency, and the ration rule is unaffected by how much water is drawn. */
+  --corridor: #5b3e8c;
+  --corridor-wash: rgba(110, 79, 163, 0.14);
+  --corridor-rule: rgba(91, 62, 140, 0.42);
+  --corridor-sheet: #ece6f5;
   --nav-muted: #cbd8e2;
   --nav-subdued: #b9cad7;
   --signal-green: #4ac18a;

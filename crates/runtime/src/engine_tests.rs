@@ -769,6 +769,99 @@ async fn live_fl511_becomes_authoritative_bridge_evidence() {
 }
 
 #[tokio::test]
+async fn snapshot_publishes_the_tracked_corridor_whenever_ais_is_running() {
+    let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
+    let engine = RuntimeEngine::initialize(
+        Store::in_memory().await.unwrap(),
+        RuntimeConfig::default(),
+        Arc::new(Fl511AndAisFactory {
+            fl511: Arc::new(OpenThenUnknownFl511Collector {
+                calls: AtomicUsize::new(0),
+            }),
+            ais: Arc::new(QuietAisCollector),
+        }),
+        clock.clone(),
+    )
+    .await
+    .unwrap();
+    engine.refresh_all().await.unwrap();
+
+    // Without this the live surface has no water to draw and silently renders
+    // nothing, which is indistinguishable from "no vessels".
+    let snapshot = engine.get_snapshot().await.unwrap();
+    let corridor = snapshot.river_corridor;
+    assert!(corridor.ais_live, "an active AIS source must report live");
+    assert!((corridor.bridge_latitude - 25.7699).abs() < 0.001);
+    let river = corridor
+        .branches
+        .iter()
+        .find(|branch| branch.id == "river")
+        .expect("the trunk is always published");
+    assert!(river.centerline.len() >= 2);
+    assert_eq!(river.corridor_offset_meters, 120.0);
+    assert_eq!(corridor.branches.len(), 3);
+
+    // Stations are what a diagram names, and the target must be findable by
+    // FL511's own key so its live state can be joined to it.
+    let brickell = river
+        .stations
+        .iter()
+        .find(|station| station.bridge_key.as_deref() == Some("brickell"))
+        .expect("the target span is a station");
+    assert_eq!(brickell.kind, "target");
+    assert!(brickell.s_meters.abs() < 1.0);
+    assert!(
+        river
+            .stations
+            .iter()
+            .any(|station| station.bridge_key.as_deref() == Some("sw_2_ave"))
+    );
+    // Upstream bascules sit at positive channel metres, seaward marks negative.
+    let sw2 = river
+        .stations
+        .iter()
+        .find(|station| station.bridge_key.as_deref() == Some("sw_2_ave"))
+        .unwrap();
+    assert!(sw2.s_meters > 0.0);
+    let cut = corridor
+        .branches
+        .iter()
+        .find(|branch| branch.id == "north_approach")
+        .unwrap()
+        .stations
+        .iter()
+        .find(|station| station.label == "Government Cut")
+        .expect("the north approach names its seaward marks");
+    assert!(cut.s_meters < 0.0);
+}
+
+#[tokio::test]
+async fn corridor_is_published_even_when_the_ais_channel_is_switched_off() {
+    // The failure this guards: with AIS disabled an earlier build sent no
+    // corridor at all, so the live surface rendered an empty space that looked
+    // exactly like a broken page rather than a disabled source.
+    // Only FL511 is registered here; there is no AIS source at all.
+    let engine = engine_with(
+        Arc::new(OpenThenUnknownFl511Collector {
+            calls: AtomicUsize::new(0),
+        }),
+        Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000))),
+    )
+    .await;
+
+    let corridor = engine.get_snapshot().await.unwrap().river_corridor;
+    assert!(!corridor.ais_live, "no AIS source is running here");
+    assert_eq!(corridor.branches.len(), 3);
+    assert!(
+        corridor
+            .branches
+            .iter()
+            .any(|branch| !branch.stations.is_empty()),
+        "the river is still described when nothing is watching it"
+    );
+}
+
+#[tokio::test]
 async fn prior_open_cannot_resolve_from_unknown_degraded_fl511_with_usable_ais() {
     let clock = Arc::new(FixedClock(AtomicI64::new(1_786_741_200_000)));
     let engine = RuntimeEngine::initialize(

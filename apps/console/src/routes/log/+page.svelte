@@ -1,4 +1,5 @@
 <script lang="ts">
+  import BasculeMark from '$lib/components/BasculeMark.svelte';
   import { Download, Search, SlidersHorizontal } from '@lucide/svelte';
 
   import { lazyLoad } from '$lib/actions/lazyList';
@@ -181,7 +182,10 @@
                   <strong>{interval.bridgeName}</strong>
                   <span>{interval.relation === 'target' ? 'Brickell target' : 'Upstream bridge'}</span>
                 </div>
-                <span class="bridge-state" data-state={interval.state}>{intervalLabel(interval)}</span>
+                <span class="bridge-state" data-state={interval.state}>
+                  <BasculeMark state={interval.state} size={30} />
+                  {intervalLabel(interval)}
+                </span>
                 <div class="interval-duration">
                   <strong>{intervalDuration(interval)}</strong>
                   {#if interval.endedAt}<small>until {formatTime(interval.endedAt)}</small>{/if}
@@ -499,12 +503,8 @@
     text-transform: uppercase;
   }
 
-  .bridge-state::before {
-    width: 10px;
-    height: 10px;
-    border: 1px solid currentColor;
-    content: '';
-  }
+  /* The bascule drawing carries the state now; a colour chip beside it was
+     the same fact told twice. */
 
   .bridge-state[data-state='up'] {
     color: var(--danger);

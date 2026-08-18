@@ -1,6 +1,7 @@
 <script lang="ts">
   import { page } from '$app/stores';
-  import { ChevronDown, ChevronUp, MapPinned, RadioTower, Save } from '@lucide/svelte';
+  import { Check, ChevronDown, ChevronUp, MapPinned, RadioTower, Save } from '@lucide/svelte';
+  import { onMount } from 'svelte';
 
   import ChannelScopeEditor from '$lib/components/ChannelScopeEditor.svelte';
   import EpaperPreview from '$lib/components/EpaperPreview.svelte';
@@ -52,6 +53,7 @@
     draft.profile.channels[index] = channel;
     draft.profile.preset = 'custom';
     if (commit) void saveNow();
+    else scheduleSave();
   }
 
   function moveSelected(direction: -1 | 1) {
@@ -64,6 +66,7 @@
       draft.profile.channels[index]
     ];
     draft.profile.preset = 'custom';
+    scheduleSave();
   }
 
   async function save() {
@@ -71,16 +74,35 @@
     await persistPreferences($state.snapshot(draft));
   }
 
-  // A switch is a decision, not a draft. Turning a channel on and finding it off
-  // after a restart is what happens when the commitment lives behind a separate
-  // Save press somewhere else on the page, so switches save themselves. Typed
-  // fields still wait for Save — nobody wants a write per keystroke.
+  // A switch is a decision, not a draft: it commits the moment it is thrown.
   async function saveNow() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = undefined;
     await save();
   }
 
-  // Everything not covered by that: shown so the page can never look applied
-  // while it is only staged.
+  // Typed fields commit too, just not per keystroke. Long enough that a name
+  // being typed is one write rather than twenty; short enough that nobody can
+  // leave the page believing an edit was applied when it was not.
+  const SETTLE_MS = 700;
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function scheduleSave() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = undefined;
+      void save();
+    }, SETTLE_MS);
+  }
+
+  // A pending edit must not die with the page. Leaving flushes it.
+  onMount(() => () => {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      void save();
+    }
+  });
+
   const unsaved = $derived(
     !!draft && !!$preferences && JSON.stringify($state.snapshot(draft)) !== JSON.stringify($preferences)
   );
@@ -100,10 +122,17 @@
     </div>
     <div class="heading-actions">
       <a class="secondary-action" href="/map"><MapPinned size={17} aria-hidden="true" /> Open map</a>
-      <button class="primary-action" onclick={save} disabled={!draft || $saving || !unsaved}>
-        <Save size={17} aria-hidden="true" />
-        {#if $saving}Saving policy{:else if unsaved}Save channel policy{:else}Saved{/if}
-      </button>
+      <!-- No Save button: every change on this page applies itself. The status
+           exists so "applied" is something the reader can see, not assume. -->
+      <p class="apply-state" aria-live="polite" data-state={$saving || unsaved ? 'working' : 'applied'}>
+        {#if $saving}
+          <Save size={15} aria-hidden="true" /> Applying…
+        {:else if unsaved}
+          <Save size={15} aria-hidden="true" /> Applying changes
+        {:else}
+          <Check size={15} aria-hidden="true" /> All changes applied
+        {/if}
+      </p>
     </div>
   </header>
 
@@ -309,7 +338,6 @@
   }
 
   .heading-actions,
-  .heading-actions .primary-action,
   .heading-actions .secondary-action {
     display: inline-flex;
     align-items: center;
@@ -752,5 +780,26 @@
     .live-preview {
       padding: 24px 16px;
     }
+  }
+
+  .apply-state {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin: 0;
+    padding: 9px 12px;
+    color: var(--muted);
+    background: var(--frost);
+    border: 1px solid var(--rule);
+    font-family: var(--font-instrument);
+    font-size: var(--type-micro);
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .apply-state[data-state='applied'] {
+    color: var(--success);
+    border-color: var(--success);
   }
 </style>

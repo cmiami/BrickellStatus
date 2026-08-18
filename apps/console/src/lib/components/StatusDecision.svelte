@@ -1,7 +1,17 @@
 <script lang="ts">
   import type { DecisionSnapshot } from '$lib/types';
 
-  let { decision }: { decision: DecisionSnapshot } = $props();
+  let {
+    decision,
+    band = false
+  }: {
+    decision: DecisionSnapshot;
+    /**
+     * Lay the reading out across the sheet instead of down a column, so the
+     * river below it gets the height. Same facts, same type sizes.
+     */
+    band?: boolean;
+  } = $props();
 
   const confidence = () =>
     decision.confidenceBps == null ? null : Math.round(decision.confidenceBps / 100);
@@ -14,7 +24,13 @@
   };
 </script>
 
-<section class="decision" data-state={decision.state} aria-labelledby="decision-state" aria-live="polite">
+<section
+  class="decision"
+  class:band
+  data-state={decision.state}
+  aria-labelledby="decision-state"
+  aria-live="polite"
+>
   <header class="decision-header">
     <p class="registration-label">{decision.subject}</p>
     {#if decision.availability !== 'fresh'}
@@ -40,13 +56,14 @@
     {/if}
   </div>
 
-  <p class="action">{decision.action}</p>
-
-  <footer>
-    {decision.openingAllowedNow
-      ? 'Opening permitted on signal now'
-      : `Next permitted slot · ${decision.nextLegalSlot ?? 'unavailable'}`}
-  </footer>
+  <div class="band-tail">
+    <p class="action">{decision.action}</p>
+    <footer>
+      {decision.openingAllowedNow
+        ? 'Opening permitted on signal now'
+        : `Next permitted slot · ${decision.nextLegalSlot ?? 'unavailable'}`}
+    </footer>
+  </div>
 </section>
 
 <style>
@@ -174,6 +191,71 @@
     .decision {
       border-right: 0;
       border-bottom: 1px solid var(--rule-strong);
+    }
+  }
+
+  /* Band: the same reading, laid across the sheet. The state keeps the display
+     size it earns; timing and consequence sit beside it rather than under it,
+     which is what frees the height for the river. */
+  .decision.band {
+    grid-template-columns: minmax(0, auto) minmax(0, auto) minmax(0, 1fr);
+    gap: clamp(20px, 3vw, 52px);
+    align-items: center;
+    align-content: center;
+    padding: clamp(12px, 1.4vw, 18px) clamp(20px, 3vw, 42px);
+    border-right: 0;
+    border-bottom: 1px solid var(--rule-strong);
+  }
+
+  .decision.band .decision-header {
+    grid-column: 1 / -1;
+    padding-bottom: 6px;
+  }
+
+  .decision.band h1 {
+    margin: 0;
+    font-size: var(--type-display-compact);
+    line-height: 0.84;
+  }
+
+  .decision.band .decision-timing {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+    border-left: 1px solid var(--rule-strong);
+    padding-left: clamp(18px, 2.4vw, 36px);
+  }
+
+  .decision.band[data-state='open'] .decision-timing {
+    border-left-color: rgba(255, 255, 255, 0.5);
+  }
+
+  /* Consequence and the next permitted slot read as one sentence at the end
+     of the band rather than as a footer nobody reaches. */
+  .decision.band .action {
+    margin: 0;
+  }
+
+  .decision.band footer {
+    margin: 4px 0 0;
+    padding-top: 0;
+  }
+
+  .decision.band .band-tail {
+    display: grid;
+    gap: 2px;
+    justify-items: start;
+  }
+
+  @media (max-width: 900px) {
+    .decision.band {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 12px;
+    }
+
+    .decision.band .decision-timing {
+      border-left: 0;
+      padding-left: 0;
     }
   }
 </style>

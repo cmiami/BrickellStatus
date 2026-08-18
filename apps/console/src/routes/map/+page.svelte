@@ -92,6 +92,7 @@
     };
   });
   const vesselTracks = $derived<VesselTrack[]>($snapshot?.vesselTracks ?? []);
+  const corridor = $derived($snapshot?.riverCorridor ?? null);
   const mapPoints = $derived<LocationMapPoint[]>([
     ...(draft?.areas.map((area) => ({
       id: area.id,
@@ -429,11 +430,12 @@
       <LocationMap
         points={mapPoints}
         {vesselTracks}
+        {corridor}
         {radar}
         candidate={candidatePoint}
         selectedId={candidate?.id ?? selectedVesselId ?? selectedAreaId}
         unitSystem={draft.unitSystem}
-        ariaLabel="Map of saved coverage areas, Brickell Avenue Bridge, and recent AISStream vessel courses."
+        ariaLabel="Map of the tracked AIS corridor, saved coverage areas, Brickell Avenue Bridge, and recent AISStream vessel courses."
         onselect={(point) => {
           if (point.id === candidate?.id) return;
           if (point.kind === 'vessel') {

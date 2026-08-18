@@ -46,3 +46,4 @@ firmware/e213/.vscode/
 # Local Impeccable design-tool state and generated comparison boards.
 # The public design contract lives in DESIGN.md; product imagery lives in docs/assets/.
 /.impeccable/
+.svelte-kit/

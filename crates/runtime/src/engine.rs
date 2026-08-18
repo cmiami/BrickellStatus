@@ -15,13 +15,15 @@ use crate::{
     CredentialFreeCollectorFactory, DecisionSnapshot, DeliveryStateDto, DestinationIdDto,
     DisplayTransport, EvidenceStateDto, EvidenceStrip, LocationSearchError, LocationSearchResult,
     LocationSearchService, MutationResult, ObservedBridgeStateDto, OutputSnapshot, OutputStateDto,
-    PreferencesError, SourceHealth, SystemHealth, SystemStatusDto, UnitSystem, UrgencyDto,
-    VesselTrackSnapshot, WhatsAppRecipientConsent, validate_preferences,
-    whatsapp_consent_is_current,
+    BridgeCrossingDto, PreferencesError, RiverCorridorBranchDto, RiverCorridorDto, RiverStationDto,
+    SourceHealth, SystemHealth,
+    SystemStatusDto, UnitSystem, UrgencyDto, VesselTrackSnapshot, WhatsAppRecipientConsent,
+    validate_preferences, whatsapp_consent_is_current,
 };
 use bridgestatus_collectors::{
-    AIS_CROSSINGS_CURSOR_KEY, AIS_VESSEL_TRACKS_CURSOR_KEY, AisCrossing, CollectContext, Collector,
-    CollectorBatch, CollectorCursor, CollectorError, CollectorItem, HealthState, ItemKind,
+    AIS_CROSSINGS_CURSOR_KEY, AIS_VESSEL_TRACKS_CURSOR_KEY, AisCrossing, BRIDGE_LATITUDE,
+    BRIDGE_LONGITUDE, CollectContext, Collector, CollectorBatch, CollectorCursor, CollectorError,
+    CollectorItem, HealthState, ItemKind, corridor_geometry, project,
 };
 use bridgestatus_model::{
     Availability, AvailabilityStatus, BridgeControllerState, BridgeObservation, ChannelId,
@@ -29,8 +31,8 @@ use bridgestatus_model::{
     TimestampMillis, VesselMovement,
 };
 use bridgestatus_policy::{
-    BridgeEvidence, BridgePrediction, BridgePredictor, ContributionDisposition, EvidenceKind,
-    PredictionError,
+    BridgeEvidence, BridgePrediction, BridgePredictor, BrickellSchedule, ContributionDisposition,
+    EvidenceKind, PredictionError,
 };
 use futures::{StreamExt, stream};
 use jiff::{Timestamp, tz::TimeZone};
@@ -789,6 +791,23 @@ impl RuntimeEngine {
             .into_iter()
             .map(bridge_interval_dto)
             .collect::<Result<Vec<_>, _>>()?;
+        snapshot.bridge_crossings = self
+            .store
+            .list_recent_ais_crossings(40)
+            .await?
+            .into_iter()
+            .map(|crossing| {
+                Ok(BridgeCrossingDto {
+                    mmsi: crossing.mmsi,
+                    vessel_name: crossing.name,
+                    vessel_class: crossing.vessel_class,
+                    direction: crossing.direction,
+                    crossed_at: iso_timestamp(crossing.crossed_at_ms)?,
+                    speed_knots: crossing.speed_knots,
+                    outcome: crossing.outcome,
+                })
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
         snapshot.system.database_size_bytes = self.store.database_size_bytes().await?;
         Ok(snapshot)
     }
@@ -1036,6 +1055,7 @@ impl RuntimeEngine {
             SystemStatusDto::Degraded
         };
         let vessel_tracks = vessel_tracks(state, now_ms);
+        let river_corridor = river_corridor(state);
         let generated_at = iso_timestamp(now_ms)?;
         Ok(AppSnapshot {
             generated_at: generated_at.clone(),
@@ -1047,6 +1067,8 @@ impl RuntimeEngine {
             dispatches: Vec::new(),
             bridge_intervals: Vec::new(),
             vessel_tracks,
+            river_corridor,
+            bridge_crossings: Vec::new(),
             system: SystemHealth {
                 status: system_status,
                 sqlite_version: self.sqlite_version.clone(),
@@ -1997,10 +2019,16 @@ fn bridge_interval_dto(
 fn decision_copy(state: BridgeStateDto) -> (&'static str, &'static str, &'static str) {
     match state {
         BridgeStateDto::Clear => ("Road open", "No opening expected.", "Traffic is moving."),
+        // Not "Watch". A driver cannot act on a request to watch, and a state
+        // whose own advice was "Nothing to do yet" spent the largest type on
+        // the page saying nothing. For the person deciding whether to drive,
+        // this state and Clear have the same answer — the road is open — so it
+        // says so, and spends its detail on the one thing that differs: there
+        // is traffic on the river that has not yet earned a prediction.
         BridgeStateDto::Possible => (
-            "Watch",
-            "An opening is possible but not predicted.",
-            "Nothing to do yet.",
+            "Road open",
+            "Vessels on the river, no opening predicted.",
+            "Traffic is moving.",
         ),
         // Status, not advice. Whether another route exists, and whether it is
         // worth taking, is something the driver knows and this app does not.

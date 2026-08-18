@@ -47,6 +47,11 @@ pub use nhc::{NhcCurrentStormsCollector, NhcRssCollector, parse_current_storms};
 pub use nws::{NwsAlertsCollector, parse_nws_alerts};
 pub use open_meteo::{OpenMeteoCollector, parse_open_meteo};
 pub use rainviewer::{RainViewerCollector, parse_rainviewer_index};
+#[cfg(feature = "native")]
+pub use river::{
+    BRIDGE_LATITUDE, BRIDGE_LONGITUDE, CorridorBranch, Station, StationKind, Waypoint,
+    corridor_geometry, project,
+};
 pub use syndication::{SyndicationCollector, SyndicationConfig, parse_syndication};
 pub use usgs::{UsgsEarthquakesCollector, UsgsWindow, parse_usgs_earthquakes};
 pub use yahoo_chart::{MarketSession, YahooChartCollector, YahooChartConfig, parse_yahoo_chart};

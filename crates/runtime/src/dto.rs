@@ -382,7 +382,134 @@ pub struct VesselTrackSnapshot {
     pub speed_knots: f64,
     pub course_degrees: f64,
     pub observed_at: String,
+    /// Broadcast ship-type word, when the vessel has sent a static report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vessel_class: Option<String>,
+    /// Behavioral standing: `underway`, `moored`, `waiting`, `holding`,
+    /// `off_channel`, or `deep_draft`. A surface showing traffic under way
+    /// filters on this rather than inventing a second drift threshold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posture: Option<String>,
+    /// Signed channel meters to the target span: positive upriver, negative
+    /// seaward, measured along the charted centerline rather than as the crow
+    /// flies. Absent for a fix taken outside corridor mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s_meters: Option<f64>,
+    /// Which charted branch the fix projected onto: `river`, `north_approach`
+    /// or `south_approach`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Radio call sign, when broadcast.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_sign: Option<String>,
+    /// Permanent hull identity, unlike the MMSI which follows the licence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imo_number: Option<u32>,
+    /// Skipper-entered destination. A hull naming a river berth has said where
+    /// it is going, which is stronger evidence than any inference from course.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+    /// Hull size from the vessel's static report. Absent until one arrives —
+    /// a hull with no reported size must be drawn neutral, not guessed at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length_meters: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beam_meters: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draught_meters: Option<f64>,
+    /// Learned likelihood this hull forces an opening, in basis points, from
+    /// the durable vessel ledger. Absent means unproven, which is not the
+    /// same as "fits under" and must not be displayed as one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening_propensity: Option<u16>,
+    /// Minutes until this vessel reaches the span, as a range. Absent when it
+    /// is not closing on the span at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_min_minutes: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_max_minutes: Option<u16>,
+    /// Whether 33 CFR 117.261 lets this hull be passed outside the ordinary
+    /// schedule. Tugs, tows and pilot craft are the commercial working traffic
+    /// the bridge opens for when it would make a yacht wait.
+    #[serde(default)]
+    pub schedule_exempt: bool,
+    /// When this vessel could actually be passed: its arrival for exempt
+    /// traffic, otherwise the first ordinary opening at or after it. Absent
+    /// when there is no ETA to reason from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_opening_at: Option<String>,
+    /// True when the schedule pushed the opening later than the arrival, which
+    /// is the difference between "it turns up" and "it gets through".
+    #[serde(default)]
+    pub waits_for_slot: bool,
     pub points: Vec<VesselTrackPoint>,
+}
+
+/// One vessel observed crossing the target bridge line.
+///
+/// Openings are otherwise unexplained events: the span is up and nobody can
+/// say what for. A crossing recorded inside an up interval is the answer, when
+/// the vessel was broadcasting at all.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BridgeCrossingDto {
+    pub mmsi: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vessel_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vessel_class: Option<String>,
+    /// "upriver" or "downriver".
+    pub direction: String,
+    pub crossed_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed_knots: Option<f64>,
+    /// `opened`, `fits_under`, `unknown`, or absent while still unresolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+}
+
+/// The AIS corridor as drawable geometry, published so a surface highlights
+/// exactly the water the collector subscribes to and tests fixes against.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RiverCorridorDto {
+    pub bridge_latitude: f64,
+    pub bridge_longitude: f64,
+    /// Whether an AIS source is actually running. False means the geometry is
+    /// still true but no vessel is being received, which a surface must say
+    /// rather than present as empty water.
+    pub ais_live: bool,
+    pub branches: Vec<RiverCorridorBranchDto>,
+}
+
+/// A named point on the corridor: a bascule, the mouth, or a charted mark.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RiverStationDto {
+    pub label: String,
+    /// `target`, `bridge`, `mouth`, or `waypoint`.
+    pub kind: String,
+    /// FL511 selector key when this station is a bascule the app watches, so a
+    /// surface can join it to live bridge state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bridge_key: Option<String>,
+    pub latitude: f64,
+    pub longitude: f64,
+    /// Signed channel metres from the span: positive upriver, negative seaward.
+    pub s_meters: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RiverCorridorBranchDto {
+    pub id: String,
+    pub label: String,
+    /// Half-width of the tracked water either side of the centerline.
+    pub corridor_offset_meters: f64,
+    /// `[latitude, longitude]` waypoints, mouth-first.
+    pub centerline: Vec<[f64; 2]>,
+    /// Named points along this branch, mouth-first.
+    pub stations: Vec<RiverStationDto>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -430,6 +557,13 @@ pub struct AppSnapshot {
     pub dispatches: Vec<DispatchRecord>,
     pub bridge_intervals: Vec<BridgeStateIntervalDto>,
     pub vessel_tracks: Vec<VesselTrackSnapshot>,
+    /// The river this app reasons about. Always present; see `ais_live` for
+    /// whether anything is currently being received on it.
+    pub river_corridor: RiverCorridorDto,
+    /// Recent bridge-line crossings, newest first, so an opening can be
+    /// attributed to the hull that caused it.
+    #[serde(default)]
+    pub bridge_crossings: Vec<BridgeCrossingDto>,
     pub system: SystemHealth,
 }
 

@@ -1574,7 +1574,112 @@ fn vessel_tracks(state: &PersistedRuntimeState, now_ms: i64) -> Vec<VesselTrackS
         .collect::<Vec<_>>();
     tracks.sort_by_key(|(observed_ms, _)| std::cmp::Reverse(*observed_ms));
     tracks.truncate(MAX_MAP_VESSEL_TRACKS);
-    tracks.into_iter().map(|(_, track)| track).collect()
+    let schedule = BrickellSchedule::new().ok();
+    tracks
+        .into_iter()
+        .map(|(_, mut track)| {
+            // The collector knows where a hull is; only the ledger knows
+            // whether that hull has ever needed the span raised. Joining here
+            // keeps the learned history on one side of the boundary and the
+            // live positions on the other.
+            track.opening_propensity = state.ais_propensities.get(&track.mmsi).copied();
+            track.schedule_exempt = schedule_exempt(track.vessel_class.as_deref());
+            if let Some(schedule) = schedule.as_ref() {
+                annotate_predicted_opening(&mut track, schedule, now_ms);
+            }
+            track
+        })
+        .collect()
+}
+
+/// Whether 33 CFR 117.261 lets this hull be passed outside the ordinary
+/// schedule.
+///
+/// The regulation names public vessels, tugs with tows, and vessels in
+/// distress. A hull broadcasting a bare tug type is working traffic on this
+/// river rather than a pleasure craft, and is treated as exempt; that is an
+/// inference from what the Miami River carries, not a quotation of the rule,
+/// and it is deliberately narrow — cargo and passenger types are not included,
+/// because a hull that cannot reach the span does not get an exemption for it.
+fn schedule_exempt(vessel_class: Option<&str>) -> bool {
+    matches!(vessel_class, Some("tug + tow" | "tug" | "pilot"))
+}
+
+/// Writes the opening this vessel could actually be passed through.
+///
+/// An ETA is when the hull arrives; it is not when it gets through. During the
+/// hour/half-hour period an ordinary vessel reaching the span at 18:32 waits
+/// for 19:00, and saying otherwise would be the single most misleading number
+/// this surface could show. Exempt traffic is passed on arrival.
+fn annotate_predicted_opening(
+    track: &mut VesselTrackSnapshot,
+    schedule: &BrickellSchedule,
+    now_ms: i64,
+) {
+    let Some(eta_minutes) = track.eta_min_minutes else {
+        return;
+    };
+    let arrival_ms = now_ms.saturating_add(i64::from(eta_minutes) * 60_000);
+    let arrival = TimestampMillis(arrival_ms);
+    let opening = if track.schedule_exempt {
+        Some(arrival)
+    } else {
+        // `None` means the bridge is on signal then, so arrival is the answer.
+        schedule
+            .ordinary_opening_at_or_after(arrival)
+            .ok()
+            .flatten()
+            .or(Some(arrival))
+    };
+    let Some(opening) = opening else { return };
+    track.waits_for_slot = opening.0 > arrival_ms;
+    track.predicted_opening_at = iso_timestamp(opening.0).ok();
+}
+
+/// The corridor this app models, always published.
+///
+/// An earlier version withheld it whenever no AIS source was running, on the
+/// theory that drawing water implies the water is watched. That was wrong in
+/// practice: with the AIS channel switched off the live surface rendered
+/// nothing at all, which reads as a broken page rather than as a disabled
+/// source. The geometry is a fixed description of the river the app reasons
+/// about, so it is always sent, and `ais_live` carries the thing the earlier
+/// guard was actually trying to say.
+fn river_corridor(state: &PersistedRuntimeState) -> RiverCorridorDto {
+    let ais_live = state
+        .active_sources
+        .keys()
+        .any(|source_id| source_id.starts_with("aisstream."));
+    RiverCorridorDto {
+        bridge_latitude: BRIDGE_LATITUDE,
+        bridge_longitude: BRIDGE_LONGITUDE,
+        ais_live,
+        branches: corridor_geometry()
+            .into_iter()
+            .map(|branch| RiverCorridorBranchDto {
+                id: branch.id.into(),
+                label: branch.label.into(),
+                corridor_offset_meters: branch.corridor_offset_meters,
+                centerline: branch
+                    .centerline
+                    .iter()
+                    .map(|(latitude, longitude)| [*latitude, *longitude])
+                    .collect(),
+                stations: branch
+                    .stations
+                    .iter()
+                    .map(|station| RiverStationDto {
+                        label: station.label.into(),
+                        kind: station.kind.as_str().into(),
+                        bridge_key: station.bridge_key.map(Into::into),
+                        latitude: station.latitude,
+                        longitude: station.longitude,
+                        s_meters: project(station.latitude, station.longitude).s_meters,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
 }
 
 fn valid_map_coordinate(latitude: f64, longitude: f64) -> bool {

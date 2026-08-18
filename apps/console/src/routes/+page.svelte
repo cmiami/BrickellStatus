@@ -1,17 +1,12 @@
 <!--
-THESIS: One current decision owns the surface; evidence registers against time instead of dissolving into a generic widget grid.
-OWN-WORLD: Cool weatherproof paper, marine and graphite rules, clipped frost strips, condensed instrument type, and one rationed amber interrupt mark.
-STORY: Read what matters, when it may happen, why the model believes it, then verify channels and accepted deliveries.
-FIRST VIEWPORT: Decision field left, off-centre live time rail and evidence center, enabled-channel and destination ledger right; the primary action is the route instruction inside the decision.
-FORM: Grounded direction 3, approved Live Time Rail composition, concept seed 1400f3c1.
+THESIS: One question — keep driving, or turn off — answered by the span's state and the traffic coming to change it.
+OWN-WORLD: Cool weatherproof paper, marine and graphite rules, condensed instrument type, corridor violet for AIS, one rationed amber mark.
+STORY: Read the state, then read the water that will change it. Nothing else.
+FIRST VIEWPORT: A decision band over the river, both inside one tile, no scroll.
+FORM: Distilled from the Live Time Rail composition — channel roster, signal board and delivery ledger moved to the surfaces that own them.
 -->
 <script lang="ts">
-  import BridgeSpans from '$lib/components/BridgeSpans.svelte';
-  import ChannelLedger from '$lib/components/ChannelLedger.svelte';
-  import DispatchLedger from '$lib/components/DispatchLedger.svelte';
-  import SignalBoard from '$lib/components/SignalBoard.svelte';
-  import StatusDecision from '$lib/components/StatusDecision.svelte';
-  import TimeRail from '$lib/components/TimeRail.svelte';
+  import LiveDeck from '$lib/components/LiveDeck.svelte';
   import { loadApp, loadError, loading, snapshot } from '$lib/state';
 </script>
 
@@ -33,28 +28,26 @@ FORM: Grounded direction 3, approved Live Time Rail composition, concept seed 14
   </section>
 {:else if $snapshot}
   <div class="live-console">
-    <div class="live-grid">
-      <StatusDecision decision={$snapshot.decision} />
-      <TimeRail
-        evidence={$snapshot.evidence}
-        generatedAt={$snapshot.generatedAt}
-        decision={$snapshot.decision}
-      />
-      <ChannelLedger channels={$snapshot.channels} outputs={$snapshot.outputs} />
-    </div>
-    <BridgeSpans
+    <!--
+      The decision owns the top; the river underneath it is the evidence for
+      that decision, shown once. An earlier version also carried a time rail and
+      a separate span panel, which restated the same bridge state in two more
+      shapes — three readings of one fact, none of which said what was on the
+      water.
+    -->
+    <!-- Decision and river are one reading, so they are one tile, sized to
+         the viewport. Everything below is reference the reader scrolls to. -->
+    <LiveDeck
+      decision={$snapshot.decision}
+      corridor={$snapshot.riverCorridor}
+      vesselTracks={$snapshot.vesselTracks}
       intervals={$snapshot.bridgeIntervals}
+      crossings={$snapshot.bridgeCrossings}
       localTimeZone={$snapshot.localTimeZone}
     />
-    <!-- Below the bridge, always. Everything here is secondary by definition,
-         and the anchor keeps the top of the page. -->
-    <SignalBoard channels={$snapshot.channels} />
-    {#if $snapshot.dispatches.length}
-      <DispatchLedger dispatches={$snapshot.dispatches} channels={$snapshot.channels} />
-    {/if}
     <footer class="live-footer">
       <span>All times · {$snapshot.localTimeZone}</span>
-      <span>Tender’s Log supports decisions; it does not guarantee a bridge opening.</span>
+      <span>Supports a decision; does not guarantee an opening.</span>
     </footer>
   </div>
 {:else}
@@ -70,12 +63,6 @@ FORM: Grounded direction 3, approved Live Time Rail composition, concept seed 14
   .live-console {
     min-height: calc(100vh - 72px);
     background: var(--paper);
-  }
-
-  .live-grid {
-    display: grid;
-    grid-template-columns: minmax(330px, 3.8fr) minmax(390px, 4.7fr) minmax(280px, 3.1fr);
-    min-height: 670px;
   }
 
   .live-footer {
@@ -97,7 +84,7 @@ FORM: Grounded direction 3, approved Live Time Rail composition, concept seed 14
   .live-loading {
     display: grid;
     min-height: calc(100vh - 72px);
-    grid-template-columns: 3.8fr 4.7fr 3.1fr;
+    grid-template-columns: 5fr 3.1fr;
     background: var(--paper);
   }
 
@@ -139,12 +126,10 @@ FORM: Grounded direction 3, approved Live Time Rail composition, concept seed 14
   }
 
   @media (max-width: 1180px) {
-    .live-grid,
     .live-loading {
       grid-template-columns: 1fr 1fr;
     }
 
-    .live-grid > :global(:first-child),
     .live-loading > :first-child {
       grid-column: 1 / -1;
     }
@@ -156,7 +141,6 @@ FORM: Grounded direction 3, approved Live Time Rail composition, concept seed 14
       padding-bottom: 76px;
     }
 
-    .live-grid,
     .live-loading {
       display: block;
       min-height: 0;

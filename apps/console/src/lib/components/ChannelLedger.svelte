@@ -14,10 +14,17 @@
 
   let {
     channels,
-    outputs
+    outputs,
+    compact = false
   }: {
     channels: ChannelSnapshot[];
     outputs: OutputSnapshot[];
+    /**
+     * Reference density: on the live page this is plumbing sitting below the
+     * decision and the river, so it lays out in rows across the sheet rather
+     * than as a full-height column competing with them.
+     */
+    compact?: boolean;
   } = $props();
 
   const age = (seconds: number) => {
@@ -40,7 +47,7 @@
   const iconForOutput = (id: OutputSnapshot['id']) => (id === 'epaper' ? MonitorUp : Send);
 </script>
 
-<aside class="ledger" aria-label="Enabled channels and destinations">
+<aside class="ledger" class:compact aria-label="Enabled channels and destinations">
   <section>
     <header class="ruled-header">
       <div>
@@ -264,5 +271,27 @@
     .ledger-key {
       grid-column: auto;
     }
+  }
+
+  /* Compact: a low horizontal band, not a tall column. */
+  .ledger.compact {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 0 clamp(20px, 3vw, 42px);
+    padding: clamp(12px, 1.6vw, 18px) clamp(20px, 3vw, 42px);
+    min-height: 0;
+  }
+
+  .ledger.compact :global(h2) {
+    font-size: var(--type-title);
+  }
+
+  .ledger.compact .ledger-list {
+    max-height: none;
+  }
+
+  .ledger.compact .ledger-row {
+    padding-top: 5px;
+    padding-bottom: 5px;
   }
 </style>
