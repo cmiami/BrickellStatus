@@ -370,16 +370,46 @@ const TRUNK_STATIONS: [Station; 11] = [
         25.792_670,
         -80.239_650,
     ),
-    station("Palmer Lake", StationKind::Waypoint, None, 25.8085, -80.2550),
+    station(
+        "Palmer Lake",
+        StationKind::Waypoint,
+        None,
+        25.8085,
+        -80.2550,
+    ),
 ];
 
 /// North approach marks, named from the charted route the leg follows.
 const NORTH_APPROACH_STATIONS: [Station; 6] = [
     station("River mouth", StationKind::Mouth, None, 25.7710, -80.1849),
-    station("Bayfront ICW", StationKind::Waypoint, None, 25.7690, -80.1824),
-    station("Brickell Key", StationKind::Waypoint, None, 25.7663, -80.1830),
-    station("Dodge Island", StationKind::Waypoint, None, 25.7725, -80.1795),
-    station("Main Channel", StationKind::Waypoint, None, 25.7705, -80.1700),
+    station(
+        "Bayfront ICW",
+        StationKind::Waypoint,
+        None,
+        25.7690,
+        -80.1824,
+    ),
+    station(
+        "Brickell Key",
+        StationKind::Waypoint,
+        None,
+        25.7663,
+        -80.1830,
+    ),
+    station(
+        "Dodge Island",
+        StationKind::Waypoint,
+        None,
+        25.7725,
+        -80.1795,
+    ),
+    station(
+        "Main Channel",
+        StationKind::Waypoint,
+        None,
+        25.7705,
+        -80.1700,
+    ),
     station(
         "Government Cut",
         StationKind::Waypoint,
@@ -394,7 +424,13 @@ const SOUTH_APPROACH_STATIONS: [Station; 4] = [
     station("River mouth", StationKind::Mouth, None, 25.7710, -80.1849),
     station("Claughton", StationKind::Waypoint, None, 25.7620, -80.1845),
     station("ICW south", StationKind::Waypoint, None, 25.7520, -80.1810),
-    station("Rickenbacker", StationKind::Waypoint, None, 25.7460, -80.1700),
+    station(
+        "Rickenbacker",
+        StationKind::Waypoint,
+        None,
+        25.7460,
+        -80.1700,
+    ),
 ];
 
 /// The tracked corridor as geometry a surface can draw.

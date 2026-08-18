@@ -10,13 +10,13 @@ use std::{
 
 use crate::{
     AisConnectionStateDto, AisStreamStatusDto, AlertArea, AlertAreaSource, AppPreferences,
-    AppSnapshot, AvailabilityDto, BridgeRelationDto, BridgeStateDto, BridgeStateIntervalDto,
-    ChannelKindDto, ChannelPreference, ChannelPriorityDto, ChannelSignalDto, ChannelSnapshot,
-    CredentialFreeCollectorFactory, DecisionSnapshot, DeliveryStateDto, DestinationIdDto,
-    DisplayTransport, EvidenceStateDto, EvidenceStrip, LocationSearchError, LocationSearchResult,
-    LocationSearchService, MutationResult, ObservedBridgeStateDto, OutputSnapshot, OutputStateDto,
-    BridgeCrossingDto, PreferencesError, RiverCorridorBranchDto, RiverCorridorDto, RiverStationDto,
-    SourceHealth, SystemHealth,
+    AppSnapshot, AvailabilityDto, BridgeCrossingDto, BridgeRelationDto, BridgeStateDto,
+    BridgeStateIntervalDto, ChannelKindDto, ChannelPreference, ChannelPriorityDto,
+    ChannelSignalDto, ChannelSnapshot, CredentialFreeCollectorFactory, DecisionSnapshot,
+    DeliveryStateDto, DestinationIdDto, DisplayTransport, EvidenceStateDto, EvidenceStrip,
+    LocationSearchError, LocationSearchResult, LocationSearchService, MutationResult,
+    ObservedBridgeStateDto, OutputSnapshot, OutputStateDto, PreferencesError,
+    RiverCorridorBranchDto, RiverCorridorDto, RiverStationDto, SourceHealth, SystemHealth,
     SystemStatusDto, UnitSystem, UrgencyDto, VesselTrackSnapshot, WhatsAppRecipientConsent,
     validate_preferences, whatsapp_consent_is_current,
 };
@@ -31,7 +31,7 @@ use bridgestatus_model::{
     TimestampMillis, VesselMovement,
 };
 use bridgestatus_policy::{
-    BridgeEvidence, BridgePrediction, BridgePredictor, BrickellSchedule, ContributionDisposition,
+    BrickellSchedule, BridgeEvidence, BridgePrediction, BridgePredictor, ContributionDisposition,
     EvidenceKind, PredictionError,
 };
 use futures::{StreamExt, stream};
