@@ -71,19 +71,32 @@ constexpr char kServiceUuid[] = "8b7a0000-4f4b-4a9b-9d6e-1d0c1a2b3c4d";
 constexpr char kRxUuid[] = "8b7a0001-4f4b-4a9b-9d6e-1d0c1a2b3c4d";
 constexpr char kTxUuid[] = "8b7a0002-4f4b-4a9b-9d6e-1d0c1a2b3c4d";
 
-#if defined(Vision_Master_E290)
-DEPG0290BNS800 display;
-#elif TENDERS_LOG_PANEL_V11
-EInkDisplay_VisionMasterE213V1_1 display;
-#else
-EInkDisplay_VisionMasterE213 display;
-#endif
+/// Built only once the probe agrees this is the right board.
+///
+/// A global display object would construct before `setup()` runs, and its
+/// constructor powers the rail, resets the panel, claims the SPI pins and
+/// writes a blank frame. On the board this build is not for, one of those pins
+/// is the panel's own BUSY output, so the driver and the panel would drive the
+/// same line against each other before anything had established which board
+/// this is. Nothing touches a pin here until the probe has answered.
+BaseDisplay *display = nullptr;
 
 /// The board the probe actually found, or null if nothing answered.
 const PanelWiring *attached = nullptr;
 /// Whether this build can drive what is attached.
 bool driving = false;
+
 char bannerLine[96] = "READY";
+
+BaseDisplay *makeDisplay() {
+#if defined(Vision_Master_E290)
+  return new DEPG0290BNS800();
+#elif TENDERS_LOG_PANEL_V11
+  return new EInkDisplay_VisionMasterE213V1_1();
+#else
+  return new EInkDisplay_VisionMasterE213();
+#endif
+}
 
 std::array<uint8_t, kPayloadSize> pendingFrame{};
 volatile bool framePending = false;
@@ -292,22 +305,22 @@ void setupBle() {
 }
 
 void drawWaitingScreen() {
-  display.landscape();
-  display.clearMemory();
-  display.setTextColor(BLACK);
-  display.setTextSize(2);
-  display.setCursor(14, 18);
-  display.print("Tender's Log");
-  display.setTextSize(1);
-  display.setCursor(15, 53);
-  display.print("READY / USB + BLE");
-  display.setCursor(15, 72);
+  display->landscape();
+  display->clearMemory();
+  display->setTextColor(BLACK);
+  display->setTextSize(2);
+  display->setCursor(14, 18);
+  display->print("Tender's Log");
+  display->setTextSize(1);
+  display->setCursor(15, 53);
+  display->print("READY / USB + BLE");
+  display->setCursor(15, 72);
   char geometry[32];
   snprintf(geometry, sizeof(geometry), "INK1 / %u x %u", kWidth, kHeight);
-  display.print(geometry);
-  display.setCursor(15, 91);
-  display.print("NO WI-FI / NO LORA");
-  display.update();
+  display->print(geometry);
+  display->setCursor(15, 91);
+  display->print("NO WI-FI / NO LORA");
+  display->update();
 }
 
 /// The line the host identifies this board by.
@@ -331,7 +344,7 @@ void composeBanner() {
 }
 
 void renderPendingFrame() {
-  if (!framePending || !driving) return;
+  if (!framePending || !driving || display == nullptr) return;
 
   std::array<uint8_t, kPayloadSize> frame{};
   bool fullRefresh;
@@ -342,19 +355,19 @@ void renderPendingFrame() {
   portEXIT_CRITICAL(&frameMux);
 
   if (fullRefresh) {
-    display.fastmodeOff();
+    display->fastmodeOff();
   } else {
-    display.fastmodeOn();
+    display->fastmodeOn();
   }
-  display.clearMemory();
+  display->clearMemory();
   for (uint16_t y = 0; y < kHeight; ++y) {
     for (uint16_t x = 0; x < kWidth; ++x) {
       const size_t offset = static_cast<size_t>(y) * kStride + x / 8;
       const bool black = (frame[offset] & (0x80u >> (x % 8))) != 0;
-      display.drawPixel(x, y, black ? BLACK : WHITE);
+      display->drawPixel(x, y, black ? BLACK : WHITE);
     }
   }
-  display.update();
+  display->update();
   acknowledge("ACK INK1");
 }
 
@@ -372,6 +385,8 @@ void setup() {
   driving = attached == &kBuiltFor;
   composeBanner();
   if (driving) {
+    // Only now: the panel this build knows how to talk to is the one attached.
+    display = makeDisplay();
     drawWaitingScreen();
   }
 
