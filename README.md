@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/readme-hero.svg" alt="BrickellStatus — BrickellStatus advance warning and personal signal console" width="100%" />
+  <img src="docs/assets/readme-hero.svg" alt="BrickellStatus — Brickell Avenue Bridge advance warning and personal signal console" width="100%" />
 </p>
 
 <p align="center">
@@ -51,10 +51,10 @@ app again, then go back to Privacy & Security.
 
 ## What it is
 
-**BrickellStatus** is the repository. **BrickellStatus** is the app inside it: a
-local-first desktop console that watches the Miami River, decides whether
-anything deserves your attention, and says so once — on screen, on a 2.13-inch
-e-paper display, via native notification, or over WhatsApp.
+**BrickellStatus** is a local-first desktop console that watches the Miami
+River, decides whether anything deserves your attention, and says so once — on
+screen, on a 2.13-inch or 2.9-inch e-paper display, via native notification, or
+over WhatsApp.
 
 The flagship channel warns that the Brickell Avenue Bridge is likely to open
 *before* traffic stacks up, rather than confirming it after the fact. It reads
@@ -62,9 +62,11 @@ FL511 bascule status for Brickell and the eight bridges upstream of it, the
 Biscayne Bay Pilots dispatch board for scheduled river transits, and the bridge's
 own legal operating schedule, then weighs those against each other with explicit
 confidence and freshness rather than firing on any single signal. The same engine
-handles rain heads-ups, NWS alerts, tropical systems, earthquakes, and RSS feeds
-through the same policy, so adding a channel does not turn the app into a
-notification casino.
+handles rain heads-ups, NWS alerts, tropical systems, earthquakes, markets,
+news, and sports through the same policy, so adding a channel does not turn the
+app into a notification casino. News and sports pick from a catalog of feeds
+that were each fetched and checked before being written down, rather than
+asking you to know a feed address before you can see anything.
 
 Everything runs on your machine. There is no account, no server, and no
 telemetry. Secrets live in a private per-user credential file — sealed to your
@@ -117,11 +119,6 @@ covers the interface contract, [`PRODUCT.md`](PRODUCT.md) the product intent, an
 Dependencies are pinned in lockfiles and updated by Dependabot on a 48-hour
 cooldown, so a freshly published release cannot be pulled in before anyone has
 had a chance to look at it. See [`SECURITY.md`](SECURITY.md).
-
-## Why the name
-
-*Puente* is Spanish for bridge. The rest is what Miami drivers call this
-particular one, at roughly the fourth consecutive opening.
 
 ## License
 

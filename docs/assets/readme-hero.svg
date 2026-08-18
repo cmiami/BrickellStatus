@@ -15,13 +15,13 @@
     <rect x="72" y="132" width="270" height="34" fill="#F2A900"/>
     <text x="88" y="155" fill="#111418" font-size="17" font-weight="800" letter-spacing="2.5">ADVANCE WARNING SYSTEM</text>
 
-    <text x="66" y="305" fill="#FFFFFF" font-size="124" font-weight="800" letter-spacing="-3">PUENTE</text>
-    <text x="66" y="415" fill="#FFFFFF" font-size="124" font-weight="800" letter-spacing="-3">GONORREA</text>
+    <text x="66" y="305" fill="#FFFFFF" font-size="124" font-weight="800" letter-spacing="-3">BRICKELL</text>
+    <text x="66" y="415" fill="#FFFFFF" font-size="124" font-weight="800" letter-spacing="-3">STATUS</text>
     <path d="M72 447h710" stroke="#F2A900" stroke-width="3"/>
     <text x="72" y="493" fill="#DDE3E8" font-size="33" font-weight="700" letter-spacing=".5">THE BRIDGE WARNING THAT ARRIVES</text>
     <text x="72" y="531" fill="#DDE3E8" font-size="33" font-weight="700" letter-spacing=".5">BEFORE THE TRAFFIC JAM DOES.</text>
     <text x="72" y="579" fill="#B9CAD7" font-size="20" font-weight="500">Confidence-weighted evidence · weather · official alerts · storms · news</text>
-    <text x="72" y="609" fill="#B9CAD7" font-size="20" font-weight="500">Desktop · WhatsApp Cloud API · USB/BLE Heltec E213 e-paper</text>
+    <text x="72" y="609" fill="#B9CAD7" font-size="20" font-weight="500">Desktop · WhatsApp Cloud API · USB/BLE Heltec E213 · E290 e-paper</text>
 
     <g transform="translate(914 116)">
       <rect width="602" height="374" rx="5" fill="#20262B"/>
