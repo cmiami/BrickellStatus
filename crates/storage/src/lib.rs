@@ -172,6 +172,39 @@ pub struct PruneReport {
     pub scrubbed_destinations: u64,
     pub outbox_rows: u64,
     pub incidents: u64,
+    pub track_fixes: u64,
+}
+
+/// A stored position fix as read back for calibration and training.
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct ObservedTrackFix {
+    pub mmsi: String,
+    pub observed_at_ms: i64,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub speed_knots: Option<f64>,
+    pub course_degrees: Option<f64>,
+    pub branch: Option<String>,
+    pub s_meters: Option<f64>,
+    pub offset_meters: Option<f64>,
+    pub posture: Option<String>,
+}
+
+/// One observed AIS position fix, with the channel coordinates it projected
+/// to at the time it was seen.
+#[derive(Clone, Copy, Debug)]
+pub struct AisTrackFix<'a> {
+    pub mmsi: &'a str,
+    pub observed_at_ms: i64,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub speed_knots: Option<f64>,
+    pub course_degrees: Option<f64>,
+    pub branch: Option<&'a str>,
+    pub s_meters: Option<f64>,
+    pub offset_meters: Option<f64>,
+    pub posture: Option<&'a str>,
+    pub session_id: &'a str,
 }
 
 /// One observed AIS bridge-line crossing, ready to become ledger history.
@@ -277,6 +310,49 @@ impl StoreTransaction<'_> {
         .bind(estimated_bridge_at_ms)
         .bind(estimated_offset_minutes)
         .bind(observed_at_ms)
+        .bind(session_id)
+        .execute(&mut *self.inner)
+        .await?;
+        Ok(())
+    }
+
+    /// Records one observed position fix. Re-offering a fix already held is
+    /// how the caller works — the live window it reads from overlaps every
+    /// cycle — so a repeat is ignored rather than treated as an error.
+    pub async fn record_ais_track_fix(&mut self, fix: AisTrackFix<'_>) -> Result<(), StorageError> {
+        let AisTrackFix {
+            mmsi,
+            observed_at_ms,
+            latitude,
+            longitude,
+            speed_knots,
+            course_degrees,
+            branch,
+            s_meters,
+            offset_meters,
+            posture,
+            session_id,
+        } = fix;
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO ais_track_fixes(
+                mmsi, observed_at_ms, latitude, longitude, speed_knots,
+                course_degrees, branch, s_meters, offset_meters, posture,
+                session_id
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "#,
+        )
+        .bind(mmsi)
+        .bind(observed_at_ms)
+        .bind(latitude)
+        .bind(longitude)
+        .bind(speed_knots)
+        .bind(course_degrees)
+        .bind(branch)
+        .bind(s_meters)
+        .bind(offset_meters)
+        .bind(posture)
         .bind(session_id)
         .execute(&mut *self.inner)
         .await?;
@@ -1134,7 +1210,11 @@ impl Store {
 
     /// Scrubs terminal delivery addresses and bounds historical storage.
     /// Active incidents and retryable outbox rows are never removed.
-    pub async fn prune_history(&self, delivery_cutoff: &str) -> Result<PruneReport, StorageError> {
+    pub async fn prune_history(
+        &self,
+        delivery_cutoff: &str,
+        track_cutoff_ms: i64,
+    ) -> Result<PruneReport, StorageError> {
         let mut transaction = self.pool.begin().await?;
         let mut scrubbed_destinations = sqlx::query(
             r#"
@@ -1221,12 +1301,40 @@ impl Store {
         .execute(&mut *transaction)
         .await?
         .rows_affected();
+        let track_fixes = sqlx::query("DELETE FROM ais_track_fixes WHERE observed_at_ms < ?1")
+            .bind(track_cutoff_ms)
+            .execute(&mut *transaction)
+            .await?
+            .rows_affected();
         transaction.commit().await?;
         Ok(PruneReport {
             scrubbed_destinations,
             outbox_rows,
             incidents,
+            track_fixes,
         })
+    }
+
+    /// Observed fixes since a cutoff, oldest first, for calibrating the
+    /// charted centreline and training per-vessel behaviour against water
+    /// that was actually run.
+    pub async fn track_fixes_since(
+        &self,
+        since_ms: i64,
+    ) -> Result<Vec<ObservedTrackFix>, StorageError> {
+        let rows = sqlx::query_as::<_, ObservedTrackFix>(
+            r#"
+            SELECT mmsi, observed_at_ms, latitude, longitude, speed_knots,
+                   course_degrees, branch, s_meters, offset_meters, posture
+            FROM ais_track_fixes
+            WHERE observed_at_ms >= ?1
+            ORDER BY observed_at_ms
+            "#,
+        )
+        .bind(since_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 }
 
@@ -2174,13 +2282,62 @@ mod tests {
             .await
             .unwrap();
 
-        let report = store.prune_history("2026-04-01T00:00:00Z").await.unwrap();
+        let report = store
+            .prune_history("2026-04-01T00:00:00Z", 0)
+            .await
+            .unwrap();
         assert_eq!(report.outbox_rows, 1);
         assert_eq!(report.incidents, 1);
         let remaining = store.list_outbox_history(20).await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, retryable.to_string());
         assert!(remaining[0].request_json.contains("+13055550999"));
+    }
+
+    #[tokio::test]
+    async fn observed_track_is_kept_for_a_week_and_survives_being_offered_twice() {
+        let store = Store::in_memory().await.unwrap();
+        let week_ms = 7 * 24 * 60 * 60 * 1_000;
+        let now_ms = 1_787_000_000_000_i64;
+        let fix = |observed_at_ms: i64| AisTrackFix {
+            mmsi: "367123456",
+            observed_at_ms,
+            latitude: 25.7699,
+            longitude: -80.190_05,
+            speed_knots: Some(4.2),
+            course_degrees: Some(271.0),
+            branch: Some("river"),
+            s_meters: Some(-12.0),
+            offset_meters: Some(31.0),
+            posture: Some("underway"),
+            session_id: "session-a",
+        };
+
+        let mut transaction = store.begin_transaction().await.unwrap();
+        transaction.record_ais_track_fix(fix(now_ms)).await.unwrap();
+        // The live window is re-offered whole every cycle, so the same fix
+        // arriving again must not fail or double-count.
+        transaction.record_ais_track_fix(fix(now_ms)).await.unwrap();
+        transaction
+            .record_ais_track_fix(fix(now_ms - week_ms - 1))
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let held = store.track_fixes_since(0).await.unwrap();
+        assert_eq!(held.len(), 2, "the repeat must be ignored, not stored");
+        assert_eq!(held[0].mmsi, "367123456");
+        assert_eq!(held[1].offset_meters, Some(31.0));
+        assert_eq!(held[1].branch.as_deref(), Some("river"));
+
+        let report = store
+            .prune_history("2026-04-01T00:00:00Z", now_ms - week_ms)
+            .await
+            .unwrap();
+        assert_eq!(report.track_fixes, 1, "only the fix past a week goes");
+        let remaining = store.track_fixes_since(0).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].observed_at_ms, now_ms);
     }
 
     #[tokio::test]

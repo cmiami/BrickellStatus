@@ -2566,24 +2566,30 @@ async fn run_dispatch_worker(
         if tokio::time::Instant::now() >= next_maintenance_at {
             let now_ms = Timestamp::now().as_millisecond();
             let delivery_cutoff = iso_at(now_ms.saturating_sub(90 * 24 * 60 * 60 * 1_000));
+            // A week of observed track is what the charted centreline is
+            // calibrated against; past that it is weight without evidence.
+            let track_cutoff_ms = now_ms.saturating_sub(7 * 24 * 60 * 60 * 1_000);
             match delivery_cutoff {
-                Ok(delivery_cutoff) => match store.prune_history(&delivery_cutoff).await {
-                    Ok(report) => {
-                        debug!(
-                            scrubbed_destinations = report.scrubbed_destinations,
-                            outbox_rows = report.outbox_rows,
-                            incidents = report.incidents,
-                            "local history retention completed"
-                        );
-                        next_maintenance_at =
-                            tokio::time::Instant::now() + Duration::from_secs(24 * 60 * 60);
+                Ok(delivery_cutoff) => {
+                    match store.prune_history(&delivery_cutoff, track_cutoff_ms).await {
+                        Ok(report) => {
+                            debug!(
+                                scrubbed_destinations = report.scrubbed_destinations,
+                                outbox_rows = report.outbox_rows,
+                                incidents = report.incidents,
+                                track_fixes = report.track_fixes,
+                                "local history retention completed"
+                            );
+                            next_maintenance_at =
+                                tokio::time::Instant::now() + Duration::from_secs(24 * 60 * 60);
+                        }
+                        Err(error) => {
+                            warn!(%error, "local history retention failed");
+                            next_maintenance_at =
+                                tokio::time::Instant::now() + Duration::from_secs(60 * 60);
+                        }
                     }
-                    Err(error) => {
-                        warn!(%error, "local history retention failed");
-                        next_maintenance_at =
-                            tokio::time::Instant::now() + Duration::from_secs(60 * 60);
-                    }
-                },
+                }
                 Err(_) => {
                     warn!("local history retention cutoffs could not be represented");
                     next_maintenance_at =

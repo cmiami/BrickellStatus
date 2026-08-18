@@ -105,6 +105,32 @@ CREATE INDEX IF NOT EXISTS ais_transits_unresolved
     ON ais_transits(crossed_at_ms)
     WHERE outcome IS NULL;
 
+-- Where hulls actually ran, kept for a week so the charted centreline can be
+-- calibrated against observed water rather than traced once and trusted
+-- (docs/AIS_DISCOVERY.md §6). The projection is stored beside the raw fix:
+-- `offset_meters` is the distance from the charted branch, so a leg the chart
+-- has in the wrong place shows up as a run of fixes that all miss the same
+-- way. Fixes are thinned to one per vessel per 30 s on the way in, which is
+-- finer than any hull changes position, and pruned at seven days.
+CREATE TABLE IF NOT EXISTS ais_track_fixes (
+    mmsi TEXT NOT NULL,
+    observed_at_ms INTEGER NOT NULL,
+    latitude REAL NOT NULL,
+    longitude REAL NOT NULL,
+    speed_knots REAL,
+    course_degrees REAL,
+    -- Charted branch this fix projected onto, and its channel coordinates.
+    branch TEXT,
+    s_meters REAL,
+    offset_meters REAL,
+    posture TEXT,
+    session_id TEXT,
+    PRIMARY KEY (mmsi, observed_at_ms)
+);
+
+CREATE INDEX IF NOT EXISTS ais_track_fixes_recent
+    ON ais_track_fixes(observed_at_ms);
+
 -- Ledger seed: the four vessels whose crossings were observed end-to-end with
 -- FL511 confirmation during the 2026-08-17 discovery session
 -- (docs/AIS_DISCOVERY.md §5). Field observations of public broadcasts, not

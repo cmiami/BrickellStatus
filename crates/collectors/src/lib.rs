@@ -49,7 +49,7 @@ pub use open_meteo::{OpenMeteoCollector, parse_open_meteo};
 pub use rainviewer::{RainViewerCollector, parse_rainviewer_index};
 #[cfg(feature = "native")]
 pub use river::{
-    BRIDGE_LATITUDE, BRIDGE_LONGITUDE, CorridorBranch, Station, StationKind, Waypoint,
+    BRIDGE_LATITUDE, BRIDGE_LONGITUDE, CorridorBranch, RiverBranch, Station, StationKind, Waypoint,
     corridor_geometry, project,
 };
 pub use syndication::{SyndicationCollector, SyndicationConfig, parse_syndication};

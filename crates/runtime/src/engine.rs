@@ -39,7 +39,7 @@ use jiff::{Timestamp, tz::TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tenders_storage::{AisCrossingObservation, StorageError, Store};
+use tenders_storage::{AisCrossingObservation, AisTrackFix, StorageError, Store};
 use thiserror::Error;
 use tokio::{
     sync::{Mutex, RwLock},
@@ -51,6 +51,10 @@ use tracing::{debug, warn};
 
 const PREFERENCES_KEY: &str = "runtime.preferences";
 const LIVE_STATE_KEY: &str = "runtime.live_state";
+/// Closest two kept fixes of one vessel may sit. Hulls do not move enough in
+/// half a minute to be worth a second row, and the spacing is what keeps a
+/// week of observed track inside a local database.
+const TRACK_FIX_MIN_SPACING_MS: i64 = 30_000;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -885,7 +889,67 @@ impl RuntimeEngine {
             }
             transaction.commit().await?;
         }
+        self.record_ais_track_fixes(state).await?;
         self.store.resolve_ais_transits(now_ms).await?;
+        Ok(())
+    }
+
+    /// Persists where hulls actually ran. The live window the map reads from
+    /// only reaches back an hour and is re-offered whole every cycle, so the
+    /// fixes are thinned per vessel and re-inserts are ignored; what survives
+    /// is a week of observed water to calibrate the charted centreline
+    /// against.
+    async fn record_ais_track_fixes(
+        &self,
+        state: &PersistedRuntimeState,
+    ) -> Result<(), RuntimeError> {
+        let tracks: Vec<VesselTrackSnapshot> = state
+            .active_sources
+            .keys()
+            .filter(|source_id| source_id.starts_with("aisstream."))
+            .filter_map(|source_id| state.sources.get(source_id))
+            .filter_map(|source| source.cursor.metadata.get(AIS_VESSEL_TRACKS_CURSOR_KEY))
+            .filter_map(|encoded| serde_json::from_str::<Vec<VesselTrackSnapshot>>(encoded).ok())
+            .flatten()
+            .collect();
+        if tracks.is_empty() {
+            return Ok(());
+        }
+        let mut transaction = self.store.begin_transaction().await?;
+        for track in &tracks {
+            let mut kept_at_ms: Option<i64> = None;
+            for point in &track.points {
+                let Ok(observed_at) = point.observed_at.parse::<Timestamp>() else {
+                    continue;
+                };
+                let observed_at_ms = observed_at.as_millisecond();
+                // One fix per vessel per half-minute is finer than any hull
+                // changes position, and keeps a week inside a local database.
+                if kept_at_ms
+                    .is_some_and(|kept| (observed_at_ms - kept).abs() < TRACK_FIX_MIN_SPACING_MS)
+                {
+                    continue;
+                }
+                kept_at_ms = Some(observed_at_ms);
+                let fix = project(point.latitude, point.longitude);
+                transaction
+                    .record_ais_track_fix(AisTrackFix {
+                        mmsi: &track.mmsi,
+                        observed_at_ms,
+                        latitude: point.latitude,
+                        longitude: point.longitude,
+                        speed_knots: Some(track.speed_knots),
+                        course_degrees: Some(track.course_degrees),
+                        branch: Some(fix.branch.as_str()),
+                        s_meters: Some(fix.s_meters),
+                        offset_meters: Some(fix.offset_meters),
+                        posture: track.posture.as_deref(),
+                        session_id: &self.session_id,
+                    })
+                    .await?;
+            }
+        }
+        transaction.commit().await?;
         Ok(())
     }
 

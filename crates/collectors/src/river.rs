@@ -30,7 +30,7 @@ pub enum RiverBranch {
 }
 
 impl RiverBranch {
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::River => "river",
             Self::NorthApproach => "north_approach",
