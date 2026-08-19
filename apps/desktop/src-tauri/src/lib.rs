@@ -1205,6 +1205,23 @@ async fn flash_firmware(
         write(correct, app.clone(), port.clone()).await?;
     }
 
+    // A board that was just flashed through this app is a board the reader
+    // wants driven. Fresh installs default to the preview transport so nothing
+    // reaches for a serial port unasked, which is right until the moment
+    // someone deliberately writes firmware to a panel — after that the default
+    // just means a successful flash appears to do nothing, because the display
+    // worker is still drawing to a preview and the panel holds its boot screen.
+    let mut preferences = state.engine.get_preferences().await;
+    if preferences.display.transport == DisplayTransport::Preview {
+        preferences.display.transport = DisplayTransport::Usb;
+        preferences.display.serial_port = port_for_status.clone();
+        if let Err(error) = state.engine.save_preferences(preferences).await {
+            warn!(%error, "could not point the display at the board that was just flashed");
+        } else {
+            info!(port = %port_for_status, "driving the panel that was just flashed");
+        }
+    }
+
     // Remember what went onto which board. The banner is only spoken at boot
     // and the port is usually held by the display worker, so a device that is
     // running exactly this build routinely cannot say so — and was being
