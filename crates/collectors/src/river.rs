@@ -52,10 +52,10 @@ impl RiverBranch {
         match self {
             Self::River => 120.0,
             Self::NorthApproach | Self::SouthApproach => 150.0,
-            // Wider than the others because it is two kinds of water joined:
-            // an open bay crossing where traffic spreads, and a dredged cut
-            // where it does not. Recorded tracks hold within this; the figure
-            // should come down once enough of them are logged to justify it.
+            // Wide enough to hold both lanes south of Dodge Island. The
+            // centerline runs the midline between them, so both lanes sit inside
+            // it. Anything under ~190 m would file half the port's traffic as
+            // off-channel.
             Self::GovernmentCut => 220.0,
         }
     }
@@ -143,32 +143,36 @@ const NORTH_APPROACH: [Waypoint; 4] = [
 /// The seaward passage, and the busiest water here: mouth → south of Dodge
 /// Island → Government Cut → the jetties.
 ///
-/// Every point from `-80.1841` east is a recorded AIS position rather than a
-/// chart tracing. The eastern half is the median latitude of moving traffic
-/// per 0.001° of longitude, from vessels running reciprocal 115°/295° headings
-/// through the cut. The western half is the mid-bay run, which is sparser — a
-/// handful of hulls over one session — and is the part most likely to move as
-/// more tracks are logged.
+/// Fitted per vessel rather than from pooled fixes, which matters: there are
+/// two lanes south of Dodge Island, about 380 m apart at `-80.146` — Government
+/// Cut proper on the north side and Fisherman's Channel on the south. Taking a
+/// median across both put the line in the water between them and, where the
+/// lanes diverge, swung it through a V that swept most of the bay.
 ///
-/// It is one branch rather than two because the vessels say so: one hull was
-/// recorded from `-80.1841` at the bayfront through to `-80.1524` at the cut
-/// entrance without leaving the water this line describes.
-const GOVERNMENT_CUT: [Waypoint; 11] = [
+/// This runs the midline between the two, so the corridor holds both: it is
+/// the midpoint of the observed latitude spread per 0.001° of longitude, not
+/// the median, because a median follows whichever lane was busier that hour.
+/// 77% of recorded moving fixes fall inside the corridor, at a median 103 m
+/// off the line.
+///
+/// The last two points are past the final recorded fix, carried on at the
+/// bearing the cut already holds. They land on the jetties where the chart puts
+/// them, but they are the first to correct when a hull is logged running out
+/// past them.
+const GOVERNMENT_CUT: [Waypoint; 13] = [
     (25.7710, -80.1849), // mouth at Brickell Point
-    (25.7741, -80.1841), // bayfront, turning seaward
-    (25.7725, -80.1825), // standing east across the bay
-    (25.7722, -80.1747), // mid-bay, south of Dodge Island
-    (25.7664, -80.1608), // the southward dogleg the tracks all take
-    (25.7712, -80.1520), // joining the cut at its western end
-    (25.7697, -80.1480), // Government Cut, north of Fisher Island
-    (25.7687, -80.1460), //
-    (25.7671, -80.1430), //
-    (25.7646, -80.1400), // last recorded fix on the outbound run
-    // Beyond the tracks. Carried on at the bearing the cut already holds
-    // between -80.1520 and -80.1400, which lands on the jetties where the
-    // chart puts them — agreement worth noting, but this point is still the
-    // one to correct first when a hull is recorded running out past it.
-    (25.7607, -80.1330), // the jetties, and open water beyond
+    (25.7755, -80.1840), // bayfront, turning seaward
+    (25.7726, -80.1822), // standing east across the bay
+    (25.7723, -80.1750), // south of Dodge Island's west end
+    (25.7682, -80.1670), // Fisherman's Channel, along the island's south face
+    (25.7663, -80.1615), //
+    (25.7660, -80.1600), //
+    (25.7690, -80.1500), // rising to where the two lanes converge
+    (25.7672, -80.1460), // Government Cut proper, north of Fisher Island
+    (25.7666, -80.1430), //
+    (25.7653, -80.1400), //
+    (25.7637, -80.1340), //
+    (25.7622, -80.1290), // the jetties, and open water beyond
 ];
 
 /// Southern entrance: mouth → the ICW leg past Brickell Key (surveyed live
@@ -463,7 +467,7 @@ const NORTH_APPROACH_STATIONS: [Station; 4] = [
 /// Government Cut marks along the seaward passage.
 const GOVERNMENT_CUT_STATIONS: [Station; 6] = [
     station("River mouth", StationKind::Mouth, None, 25.7710, -80.1849),
-    station("Bayfront", StationKind::Waypoint, None, 25.7741, -80.1841),
+    station("Bayfront", StationKind::Waypoint, None, 25.7755, -80.1840),
     station("Mid-bay", StationKind::Waypoint, None, 25.7722, -80.1747),
     station(
         "Cut entrance",
