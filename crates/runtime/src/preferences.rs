@@ -6,9 +6,9 @@ use thiserror::Error;
 
 use crate::{
     AisSettings, AlertArea, AlertAreaSource, AppPreferences, ChannelKindDto, ChannelPreference,
-    DestinationIdDto, DisplaySettings, DisplayTransport, InterruptPreset, PolicyProfile,
-    ProfilePreset, QuietHours, SurfacePresence, WhatsAppRecipientConsent, WhatsAppSettings,
-    catalog::catalog,
+    DestinationIdDto, DisplayOrientation, DisplaySettings, DisplayTransport, InterruptPreset,
+    PolicyProfile, ProfilePreset, QuietHours, SurfacePresence, WhatsAppRecipientConsent,
+    WhatsAppSettings, catalog::catalog,
 };
 
 /// Resolve shipped catalog entries to their URLs, for seeding a default channel.
@@ -58,6 +58,7 @@ impl Default for AppPreferences {
                 dwell_seconds: 28,
                 return_home_after: 2,
                 full_refresh_every: 12,
+                orientation: DisplayOrientation::default(),
             },
             whatsapp: WhatsAppSettings {
                 enabled: false,

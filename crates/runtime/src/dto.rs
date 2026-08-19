@@ -683,6 +683,26 @@ pub struct DisplaySettings {
     pub dwell_seconds: u32,
     pub return_home_after: u32,
     pub full_refresh_every: u32,
+    /// Which way up the board is mounted.
+    ///
+    /// `#[serde(default)]` so a profile written before this existed still
+    /// loads, and lands upright — which is what it was.
+    #[serde(default)]
+    pub orientation: DisplayOrientation,
+}
+
+/// Which edge of the panel the reader treats as the top.
+///
+/// Half a turn is the only rotation offered because it is the only one the
+/// hardware allows: the glass is bonded to the board, so turning the board over
+/// is how it sits differently, and a quarter turn would hand 250x122 hardware a
+/// 122x250 image that the firmware refuses on size.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayOrientation {
+    #[default]
+    Upright,
+    Inverted,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

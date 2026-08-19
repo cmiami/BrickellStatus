@@ -631,6 +631,66 @@
     grid-template-columns: repeat(3, 1fr);
   }
 
+  .orientation {
+    margin: 28px 0 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .orientation legend {
+    padding: 0 0 9px;
+    color: var(--muted);
+    font-family: var(--font-instrument);
+    font-size: var(--type-micro);
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+  }
+
+  .orientation div[role='radiogroup'] {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+  }
+
+  .orientation button {
+    display: grid;
+    gap: 3px;
+    min-height: 56px;
+    padding: 10px 14px;
+    color: var(--graphite);
+    background: var(--white);
+    border: 0;
+    text-align: start;
+    cursor: pointer;
+  }
+
+  .orientation button:hover {
+    background: var(--frost);
+  }
+
+  /* A registration rule marks the choice, so it is never carried by fill
+     alone. Selected state has to survive a monochrome print of this screen. */
+  .orientation button[aria-checked='true'] {
+    background: var(--frost);
+    box-shadow: inset 3px 0 0 var(--marine);
+  }
+
+  .orientation b {
+    font-family: var(--font-instrument);
+    font-size: var(--type-label);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .orientation button span {
+    color: var(--muted);
+    font-size: var(--type-caption);
+    line-height: 1.35;
+  }
+
   code {
     font-family: inherit;
     font-weight: 600;

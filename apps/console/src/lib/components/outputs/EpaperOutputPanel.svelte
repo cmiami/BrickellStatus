@@ -282,6 +282,28 @@
         <label class="field"><span>Full refresh cadence</span><input type="number" min="1" max="100" bind:value={draft.display.fullRefreshEvery} /><small class="field-note">Frames between ghost-clearing refreshes.</small></label>
       </div>
 
+      <!-- Which way up the board is screwed down. The preview stays upright
+           either way: it shows what the reader sees, and the reader is looking
+           at the panel the right way up whichever way it is mounted. -->
+      <fieldset class="orientation">
+        <legend>Which way up</legend>
+        <div role="radiogroup" aria-label="Panel orientation">
+          {#each [{ id: 'upright', label: 'Upright', hint: 'Cable on the left' }, { id: 'inverted', label: 'Inverted', hint: 'Cable on the right' }] as option (option.id)}
+            <button
+              type="button"
+              role="radio"
+              aria-checked={draft.display.orientation === option.id}
+              class:selected={draft.display.orientation === option.id}
+              onclick={() => (draft.display.orientation = option.id as 'upright' | 'inverted')}
+            >
+              <b>{option.label}</b>
+              <span>{option.hint}</span>
+            </button>
+          {/each}
+        </div>
+        <small class="field-note">Turn the frame over when the board is mounted the other way round. The panel is bonded to the board, so this is the only rotation it can sit at.</small>
+      </fieldset>
+
       <div class="test-line">
         <div><strong>{deviceStatus.state === 'connected' ? 'Ready for a physical proof' : (epaperOutput?.detail ?? 'No device report')}</strong><span>A test succeeds only after the board acknowledges the complete frame.</span></div>
         <button class="secondary-action action-with-icon" onclick={sendFrame} disabled={displayBusy || deviceStatus.state !== 'connected' || settingsDirty}><Send size={16} aria-hidden="true" /> {displayBusy ? 'Sending frame' : 'Send current frame'}</button>

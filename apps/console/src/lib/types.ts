@@ -342,6 +342,7 @@ export interface DisplaySettings {
   dwellSeconds: number;
   returnHomeAfter: number;
   fullRefreshEvery: number;
+  orientation: 'upright' | 'inverted';
 }
 
 export interface WhatsAppSettings {

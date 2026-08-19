@@ -101,6 +101,29 @@ impl MonoFrame {
         &self.bytes
     }
 
+    /// The same frame turned half a turn, for a board mounted the other way up.
+    ///
+    /// Half a turn only. The panel is bonded to the board, so turning it over
+    /// is the one way it physically sits differently, and it is also the only
+    /// rotation that keeps the frame the panel's own shape — a quarter turn
+    /// would hand 250x122 hardware a 122x250 image, which the firmware refuses
+    /// on size.
+    ///
+    /// Applied on the way to the wire and nowhere else: a preview should show
+    /// what the reader sees, and the reader is looking at the panel the right
+    /// way up whichever way the board is screwed down.
+    pub fn inverted(&self) -> Self {
+        let mut turned = Self::white(self.model);
+        for y in 0..self.height() {
+            for x in 0..self.width() {
+                if self.is_black(x, y) {
+                    turned.set_black(self.width() - 1 - x, self.height() - 1 - y, true);
+                }
+            }
+        }
+        turned
+    }
+
     /// Returns whether the addressed pixel is black.
     pub fn is_black(&self, x: u16, y: u16) -> bool {
         if x >= self.width() || y >= self.height() {
@@ -168,6 +191,37 @@ impl DrawTarget for MonoFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn half_a_turn_moves_every_corner_to_the_opposite_one() {
+        for model in PanelModel::ALL {
+            let (right, bottom) = (model.width() - 1, model.height() - 1);
+            let mut frame = MonoFrame::white(model);
+            frame.set_black(0, 0, true);
+            frame.set_black(right, 0, true);
+            frame.set_black(3, 7, true);
+
+            let turned = frame.inverted();
+            assert!(turned.is_black(right, bottom), "top-left goes bottom-right");
+            assert!(turned.is_black(0, bottom), "top-right goes bottom-left");
+            assert!(
+                turned.is_black(right - 3, bottom - 7),
+                "and so does the rest"
+            );
+            assert!(!turned.is_black(0, 0), "nothing is left behind");
+            assert_eq!(turned.black_pixel_count(), frame.black_pixel_count());
+            assert_eq!(turned.panel(), model, "the panel does not change shape");
+        }
+    }
+
+    #[test]
+    fn turning_twice_is_the_frame_you_started_with() {
+        let mut frame = MonoFrame::white(PanelModel::E290);
+        for (x, y) in [(0u16, 0u16), (17, 3), (295, 127), (100, 64)] {
+            frame.set_black(x, y, true);
+        }
+        assert_eq!(frame.inverted().inverted().packed(), frame.packed());
+    }
 
     #[test]
     fn padding_bits_stay_white() {

@@ -50,7 +50,8 @@ function preferencesFixture(): AppPreferences {
       bleName: 'Tender E213',
       dwellSeconds: 30,
       returnHomeAfter: 2,
-      fullRefreshEvery: 10
+      fullRefreshEvery: 10,
+      orientation: 'upright'
     },
     whatsapp: {
       enabled: false,

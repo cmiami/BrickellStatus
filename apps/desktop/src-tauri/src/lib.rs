@@ -44,9 +44,9 @@ pub use brickellstatus_projection::render_live_bridge_frame;
 use brickellstatus_runtime::{
     AisConnectionStateDto, AppPreferences, AppSnapshot, AvailabilityDto, BridgeStateDto,
     ChannelKindDto, ChannelSnapshot, CredentialFreeCollectorFactory, DeliveryStateDto,
-    DestinationIdDto, DispatchRecord, DisplayTransport, InterruptPreset, LocationSearchResult,
-    MutationResult, OutputStateDto, RuntimeConfig, RuntimeEngine, SchedulerHandle, SurfacePresence,
-    UrgencyDto, whatsapp_consent_is_current,
+    DestinationIdDto, DispatchRecord, DisplayOrientation, DisplayTransport, InterruptPreset,
+    LocationSearchResult, MutationResult, OutputStateDto, RuntimeConfig, RuntimeEngine,
+    SchedulerHandle, SurfacePresence, UrgencyDto, whatsapp_consent_is_current,
 };
 use brickellstatus_storage::{IncidentRecord, OutboxLease, OutboxRecord, Store};
 use jiff::{Timestamp, tz::TimeZone};
@@ -794,6 +794,17 @@ impl DisplayController {
         if !force && !self.delivery_armed.load(Ordering::Relaxed) {
             return Ok(None);
         }
+        // Turned here, before the repeat check, so the check compares what will
+        // actually go on the wire. Rotating afterwards would leave an
+        // orientation change looking like the same frame, and the panel would
+        // stay the old way up until something else happened to be drawn.
+        let turned;
+        let frame = if preferences.display.orientation == DisplayOrientation::Inverted {
+            turned = frame.inverted();
+            &turned
+        } else {
+            frame
+        };
         if !force
             && self
                 .last_frame
