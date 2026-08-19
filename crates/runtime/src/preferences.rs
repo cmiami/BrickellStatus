@@ -292,11 +292,6 @@ pub fn default_channel_preferences() -> Vec<ChannelPreference> {
 }
 
 pub fn validate_preferences(preferences: &AppPreferences) -> Result<(), PreferencesError> {
-    if !preferences.ais.radius_kilometers.is_finite()
-        || !(2.0..=30.0).contains(&preferences.ais.radius_kilometers)
-    {
-        return invalid("ais.radiusKilometers must be between 2 and 30");
-    }
     if preferences.areas.len() > 64 {
         return invalid("areas must contain at most 64 entries");
     }
@@ -810,7 +805,6 @@ mod tests {
         assert_eq!(value["ais"]["enabled"], false);
         assert_eq!(value["ais"]["provider"], "aisstream");
         assert_eq!(value["ais"]["apiKeyConfigured"], false);
-        assert_eq!(value["ais"]["radiusKilometers"], 12.0);
         assert_eq!(value["areas"][0]["id"], "area.miami");
         assert_eq!(
             value["profile"]["channels"][1]["scope"]["areaIds"][0],

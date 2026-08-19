@@ -265,13 +265,23 @@ impl CollectorFactory for CredentialFreeCollectorFactory {
                     );
                 }
 
-                if preferences.ais.enabled && self.aisstream_key_configured()? {
+                // The key is the whole gate. A separate stored `enabled` flag
+                // could sit at `false` beside a perfectly good key, which is a
+                // state nothing on screen explains and the reader can no longer
+                // reach a switch to fix.
+                if self.aisstream_key_configured()? {
                     let id = format!("aisstream.{}", channel.id);
+                    // Fixed, and not a setting. For the bridge this app is
+                    // about, `for_bridge` replaces the square with the charted
+                    // corridor anyway, so the radius only ever described the
+                    // fallback — and nobody choosing a number here could know
+                    // that. It stays as the bound for any other target.
+                    const WATCH_RADIUS_KM: f64 = 12.0;
                     let subscription = AisStreamSubscription::for_bridge(
                         bridge_label,
                         latitude,
                         longitude,
-                        preferences.ais.radius_kilometers,
+                        WATCH_RADIUS_KM,
                     )?;
                     let collector = self.ais_collector(&id, subscription)?;
                     active_ais_collectors.insert(id.clone());

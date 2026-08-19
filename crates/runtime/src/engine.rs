@@ -276,6 +276,13 @@ struct SourceState {
     reported_health: HealthState,
     health_message: Option<String>,
     last_attempt_ms: Option<i64>,
+    /// The first time this source was ever reached for.
+    ///
+    /// A socket that has just been opened has not failed; it has not finished
+    /// starting. Without a start time the only way to tell those apart is the
+    /// absence of data, which looks the same as being broken.
+    #[serde(default)]
+    first_attempt_ms: Option<i64>,
     last_success_ms: Option<i64>,
     next_eligible_ms: Option<i64>,
     failure_count: u32,
@@ -321,6 +328,7 @@ impl SourceState {
             reported_health: HealthState::Unknown,
             health_message: None,
             last_attempt_ms: None,
+            first_attempt_ms: None,
             last_success_ms: None,
             next_eligible_ms: None,
             failure_count: 0,
@@ -409,9 +417,13 @@ impl RuntimeEngine {
         // reached a fresh profile. Adopt the ones the user has never seen,
         // switched off, and leave every channel they already have alone.
         let adopted = adopt_new_default_channels(&mut preferences);
+        adopt_host_time_zone(&mut preferences);
         let secret_status_changed = if let Some(configured) = factory.aisstream_key_configured()? {
-            let changed = preferences.ais.api_key_configured != configured;
+            let changed = preferences.ais.api_key_configured != configured
+                || preferences.ais.enabled != configured;
             preferences.ais.api_key_configured = configured;
+            // Kept in step rather than asked about separately: the key decides.
+            preferences.ais.enabled = configured;
             changed
         } else {
             false
@@ -719,6 +731,7 @@ impl RuntimeEngine {
             source.poll_interval_ms = (!registration.minimum_interval.is_zero())
                 .then(|| duration_millis(registration.minimum_interval));
             source.last_attempt_ms = Some(now_ms);
+            source.first_attempt_ms.get_or_insert(now_ms);
             match outcome {
                 CollectionOutcome::Batch(batch) => {
                     succeeded += 1;
@@ -1213,6 +1226,25 @@ fn adopt_new_default_channels(preferences: &mut AppPreferences) -> usize {
     let adopted = missing.len();
     preferences.profile.channels.extend(missing);
     adopted
+}
+
+/// Points the bridge channel at the clock this machine keeps.
+///
+/// The zone was a dropdown with two entries in it, which is not a choice so
+/// much as a chance to be wrong: a reader in Miami had to confirm they were in
+/// Miami, and anyone else had to pick between their own zone and UTC. The host
+/// already knows, and it is the same clock the reader is reading the panel by.
+fn adopt_host_time_zone(preferences: &mut AppPreferences) {
+    let Some(zone) = jiff::tz::TimeZone::system().iana_name().map(str::to_owned) else {
+        return;
+    };
+    for channel in &mut preferences.profile.channels {
+        if channel.kind == ChannelKindDto::Bridge {
+            channel
+                .scope
+                .insert("timeZone".into(), Value::String(zone.clone()));
+        }
+    }
 }
 
 fn active_source_map(

@@ -81,7 +81,6 @@ pub struct AisStreamStatusDto {
     pub source_registered: bool,
     pub connection_state: AisConnectionStateDto,
     pub availability: AvailabilityDto,
-    pub radius_kilometers: f64,
     pub last_success_at: Option<String>,
     pub last_position_at: Option<String>,
     pub fresh_vessel_count: usize,
@@ -741,10 +740,12 @@ pub enum AisProvider {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AisSettings {
+    /// Whether the source should run. Follows the key rather than a switch:
+    /// storing a key turns it on, clearing one turns it off. Asking twice only
+    /// created a state where a key is present and nothing happens.
     pub enabled: bool,
     pub provider: AisProvider,
     pub api_key_configured: bool,
-    pub radius_kilometers: f64,
 }
 
 impl Default for AisSettings {
@@ -753,7 +754,6 @@ impl Default for AisSettings {
             enabled: false,
             provider: AisProvider::Aisstream,
             api_key_configured: false,
-            radius_kilometers: 12.0,
         }
     }
 }

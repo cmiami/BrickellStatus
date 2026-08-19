@@ -49,6 +49,16 @@ describe('persistPreferences', () => {
     await expect(persistPreferences(draft)).resolves.toEqual({ ok: true, message: 'saved' });
     expect(get(preferences)).toBe(saved);
     expect(get(snapshot)).toBe(live);
-    expect(get(notice)).toEqual({ ok: true, message: 'saved' });
+    // Settings apply as they are typed, so a save is not news. Announcing each
+    // one put a banner in front of the reader for something they had just done
+    // on purpose, and made them dismiss it to carry on.
+    expect(get(notice)).toBeNull();
+  });
+
+  it('still speaks up when a save fails', async () => {
+    api.savePreferences.mockResolvedValue({ ok: false, message: 'nope' });
+
+    await expect(persistPreferences(draft)).resolves.toEqual({ ok: false, message: 'nope' });
+    expect(get(notice)).toEqual({ ok: false, message: 'nope' });
   });
 });

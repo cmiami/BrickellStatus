@@ -1,118 +1,78 @@
 <script lang="ts">
-  import { MapPin } from '@lucide/svelte';
-
-  import LocationPickerModal from '$lib/components/LocationPickerModal.svelte';
-  import AisOutputPanel from '$lib/components/outputs/AisOutputPanel.svelte';
-  import type { AisSettings, ChannelPreference, UnitSystem } from '$lib/types';
-  import { formatDistanceKilometers } from '$lib/units';
-  import { scopeBool, scopeNumber, scopeText, setScope, type ChannelChange } from './scope';
+  import VesselSource from './VesselSource.svelte';
+  import { snapshot } from '$lib/state';
+  import type { AisSettings, ChannelPreference, RiverStation, UnitSystem } from '$lib/types';
+  import { scopeText, setScope, type ChannelChange } from './scope';
 
   let {
     channel,
     ais,
-    unitSystem,
     onchannelchange,
     onaischange
   }: {
     channel: ChannelPreference;
     ais: AisSettings;
-    unitSystem: UnitSystem;
+    unitSystem?: UnitSystem;
     onchannelchange: ChannelChange;
     onaischange: (ais: AisSettings) => void;
   } = $props();
 
-  let pickingTarget = $state(false);
+  // The spans come from the same charted geometry the engine projects vessels
+  // onto, so the list cannot name a bridge the corridor does not know. Picking
+  // a point on a map was asking the reader to hit a span within a few hundred
+  // metres, when there are nine of them and they all have names.
+  const bascules = $derived<RiverStation[]>(
+    ($snapshot?.riverCorridor.branches ?? [])
+      .flatMap((branch) => branch.stations)
+      .filter((station) => station.kind === 'target' || station.kind === 'bridge')
+  );
 
-  function set(key: string, value: string | number | boolean) {
-    setScope(channel, onchannelchange, key, value);
+  const selected = $derived(scopeText(channel, 'bridge', 'Brickell Avenue Bridge'));
+  const zone = $derived(scopeText(channel, 'timeZone', 'America/New_York'));
+
+  function pick(label: string) {
+    const station = bascules.find((candidate) => candidate.label === label);
+    if (!station) return;
+    onchannelchange(
+      {
+        ...channel,
+        scope: {
+          ...channel.scope,
+          bridge: station.label,
+          latitude: Number(station.latitude.toFixed(5)),
+          longitude: Number(station.longitude.toFixed(5))
+        }
+      },
+      true
+    );
   }
-
-  function setCoordinates(latitude: number, longitude: number) {
-    onchannelchange({
-      ...channel,
-      scope: {
-        ...channel.scope,
-        latitude: Number(latitude.toFixed(5)),
-        longitude: Number(longitude.toFixed(5))
-      }
-    });
-  }
-
 </script>
 
 <div class="bridge-scope">
   <div class="identity-fields">
     <label class="field">
-      <span>Bridge</span>
-      <input
-        value={scopeText(channel, 'bridge', 'Brickell Avenue Bridge')}
-        maxlength="120"
-        oninput={(event) => set('bridge', event.currentTarget.value)}
-      />
-    </label>
-    <label class="field">
-      <span>Local time zone</span>
-      <select
-        value={scopeText(channel, 'timeZone', 'America/New_York')}
-        onchange={(event) => set('timeZone', event.currentTarget.value)}
-      >
-        <option value="America/New_York">Miami · Eastern time</option>
-        <option value="UTC">UTC</option>
+      <span>Watching</span>
+      <select value={selected} onchange={(event) => pick(event.currentTarget.value)}>
+        {#each bascules as station (station.label)}
+          <option value={station.label}>{station.label}</option>
+        {/each}
+        {#if !bascules.some((station) => station.label === selected)}
+          <option value={selected}>{selected}</option>
+        {/if}
       </select>
+      <small class="field-note">Every bascule on the charted river, seaward first.</small>
     </label>
+    <div class="field">
+      <span>Local time zone</span>
+      <!-- Read from the machine. It was a two-entry dropdown, which is not a
+           choice so much as a chance to be wrong. -->
+      <p class="zone-readout">{zone}</p>
+      <small class="field-note">Taken from this computer.</small>
+    </div>
   </div>
 
-  <section class="bridge-target" aria-labelledby={`${channel.id}-map-heading`}>
-    <header>
-      <div>
-        <h4 id={`${channel.id}-map-heading`}>Controller target</h4>
-        <p>Bridge status reporting is discovered around this exact point.</p>
-      </div>
-      <button class="secondary-action" type="button" onclick={() => (pickingTarget = true)}>
-        <MapPin size={16} aria-hidden="true" /> Set on map
-      </button>
-    </header>
-    <p class="bridge-target-readout">
-      {scopeNumber(channel, 'latitude', 25.7699).toFixed(5)}, {scopeNumber(channel, 'longitude', -80.19005).toFixed(5)}
-    </p>
-    <details>
-      <summary>Advanced coordinates</summary>
-      <div class="coordinate-fields">
-        <label class="field">
-          <span>Latitude</span>
-          <input type="number" step="0.00001" min="-90" max="90" value={scopeNumber(channel, 'latitude', 25.7699)} oninput={(event) => set('latitude', event.currentTarget.valueAsNumber)} />
-        </label>
-        <label class="field">
-          <span>Longitude</span>
-          <input type="number" step="0.00001" min="-180" max="180" value={scopeNumber(channel, 'longitude', -80.19005)} oninput={(event) => set('longitude', event.currentTarget.valueAsNumber)} />
-        </label>
-      </div>
-    </details>
-  </section>
-
-  <!-- Bridge status reporting and upstream progression used to be switches
-       here. Neither is a preference: turning one off does not express an
-       intent, it just makes the forecast worse in a way nothing on screen
-       explains. The engine decides what evidence it weighs. -->
-  <AisOutputPanel {ais} {unitSystem} {onaischange} />
+  <VesselSource {ais} {onaischange} />
 </div>
-
-{#if pickingTarget}
-  <LocationPickerModal
-    title="Controller target"
-    description="Drop the pin on the span itself. Bridge status reporting is discovered around this exact point, so a pin on the wrong side of the river finds the wrong bridge."
-    latitude={scopeNumber(channel, 'latitude', 25.7699)}
-    longitude={scopeNumber(channel, 'longitude', -80.19005)}
-    label={scopeText(channel, 'bridge', 'Bridge target')}
-    {unitSystem}
-    confirmLabel="Use this point"
-    onconfirm={(latitude, longitude) => {
-      setCoordinates(latitude, longitude);
-      pickingTarget = false;
-    }}
-    oncancel={() => (pickingTarget = false)}
-  />
-{/if}
 
 <style>
   .bridge-scope {
@@ -120,72 +80,29 @@
     gap: 16px;
   }
 
-  .identity-fields,
-  .coordinate-fields {
+  .identity-fields {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 14px;
   }
 
-  .coordinate-fields {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .bridge-target {
-    display: grid;
-    overflow: hidden;
-    border: 1px solid var(--rule-strong);
-  }
-
-  .bridge-target > header {
-    padding: 16px;
-    color: var(--white);
-    background: var(--marine);
-  }
-
-  .bridge-target h4,
-  .bridge-target p {
+  .zone-readout {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
     margin: 0;
-  }
-
-  .bridge-target h4 {
-    font-size: var(--type-section);
-    line-height: 1;
-    text-transform: uppercase;
-  }
-
-  .bridge-target p {
-    max-width: 70ch;
-    margin-top: 5px;
-    color: var(--nav-muted);
-    font-size: var(--type-caption);
-    line-height: 1.4;
-  }
-
-  .bridge-target details {
-    padding: 14px 16px 16px;
+    padding: 10px 12px;
+    color: var(--graphite);
     background: var(--frost);
-    border-top: 1px solid var(--rule-strong);
-  }
-
-  .bridge-target summary {
-    width: fit-content;
-    color: var(--channel);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
     font-family: var(--font-instrument);
-    font-size: var(--type-micro);
-    font-weight: 600;
-    letter-spacing: 0.07em;
-    text-transform: uppercase;
-    cursor: pointer;
-  }
-
-  .coordinate-fields {
-    margin-top: 14px;
+    font-size: var(--type-label);
+    letter-spacing: 0.03em;
   }
 
   @media (max-width: 680px) {
-    .identity-fields,
-    .coordinate-fields {
+    .identity-fields {
       grid-template-columns: 1fr;
     }
   }

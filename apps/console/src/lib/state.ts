@@ -55,6 +55,11 @@ export async function persistPreferences(next: AppPreferences): Promise<Mutation
       const [savedPreferences, nextSnapshot] = await Promise.all([getPreferences(), getSnapshot()]);
       preferences.set(savedPreferences);
       snapshot.set(nextSnapshot);
+      // Saving is not news. Settings apply as they are typed, so announcing
+      // each one is a banner per keystroke-batch that the reader has to dismiss
+      // to carry on — and the desk already says "All changes saved" quietly.
+      // A failure still speaks up, because that is something to act on.
+      return result;
     }
     notice.set(result);
     return result;

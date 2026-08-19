@@ -11,7 +11,7 @@ vi.mock('$lib/api', () => ({
     state: 'ready',
     detail: 'Armed.'
   })),
-  getPreferences: vi.fn(async () => ({ ais: { enabled: false, provider: 'aisstream', apiKeyConfigured: true, radiusKilometers: 12 } })),
+  getPreferences: vi.fn(async () => ({ ais: { enabled: false, provider: 'aisstream', apiKeyConfigured: true } })),
   setAisstreamApiKey: vi.fn(async () => ({ ok: true, message: 'Stored.' })),
   clearAisstreamApiKey: vi.fn(async () => ({ ok: true, message: 'Removed.' }))
 }));
@@ -40,7 +40,7 @@ function channel(): ChannelPreference {
   } as ChannelPreference;
 }
 
-const ais: AisSettings = { enabled: false, provider: 'aisstream', apiKeyConfigured: true, radiusKilometers: 12 };
+const ais: AisSettings = { enabled: false, provider: 'aisstream', apiKeyConfigured: true };
 
 function mount(overrides: Partial<AisSettings> = {}) {
   const onaischange = vi.fn();
@@ -58,18 +58,37 @@ describe('the Brickell bridge channel', () => {
   // AIS was configurable in two places, and the radius picker lived on the
   // output desk — which is where frames are delivered, not where evidence for
   // the forecast is chosen.
-  it('holds the vessel watch that used to live under Outputs', () => {
+  it('holds the vessel source that used to live under Outputs', () => {
     mount();
-    expect(screen.getByRole('heading', { name: /AISStream vessel watch/i })).toBeInTheDocument();
-    expect(screen.getByPlaceholderText(/replace saved key|paste api key/i)).toBeInTheDocument();
-    expect(screen.getByRole('slider')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /vessel source/i })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/replace saved key|paste aisstream api key/i)).toBeInTheDocument();
   });
 
-  it('hands a radius change straight back rather than staging it', async () => {
-    const onaischange = mount();
-    await fireEvent.input(screen.getByRole('slider'), { target: { value: '20' } });
-    expect(onaischange).toHaveBeenCalledWith(expect.objectContaining({ radiusKilometers: 20 }));
-    expect(screen.queryByText(/unsaved/i)).toBeNull();
+  // A dropped socket and a quiet river look identical from here, and only one
+  // of them is a fault worth a red light.
+  it('names the health in words rather than by colour alone', () => {
+    mount();
+    expect(screen.getByText(/working|connecting|no key|not working/i)).toBeInTheDocument();
+  });
+
+  it('picks the span by name instead of by map', () => {
+    mount();
+    expect(screen.getByRole('combobox', { name: /watching/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /set on map/i })).toBeNull();
+  });
+
+  it('reads the time zone off the machine rather than asking', () => {
+    mount();
+    expect(screen.getByText(/taken from this computer/i)).toBeInTheDocument();
+  });
+
+  // Coverage follows the charted corridor, so a radius the reader picked never
+  // described the water actually being watched.
+  it('asks for nothing but a key', () => {
+    mount();
+    expect(screen.queryByRole('slider')).toBeNull();
+    expect(screen.queryByRole('switch')).toBeNull();
+    expect(screen.queryByText(/coverage radius/i)).toBeNull();
   });
 
   // Neither expressed an intent a reader could hold; switching one off only

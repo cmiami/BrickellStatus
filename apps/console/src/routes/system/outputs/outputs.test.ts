@@ -41,8 +41,7 @@ function preferencesFixture(): AppPreferences {
     ais: {
       enabled: false,
       provider: 'aisstream',
-      apiKeyConfigured: false,
-      radiusKilometers: 8
+      apiKeyConfigured: false
     },
     display: {
       transport: 'preview',

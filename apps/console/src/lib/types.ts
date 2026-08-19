@@ -362,7 +362,6 @@ export interface AisSettings {
   enabled: boolean;
   provider: 'aisstream';
   apiKeyConfigured: boolean;
-  radiusKilometers: number;
 }
 
 export interface AisStreamStatus {

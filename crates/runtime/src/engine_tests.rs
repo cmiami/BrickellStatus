@@ -1220,7 +1220,7 @@ async fn failed_ais_secret_transaction_restores_factory_and_published_state() {
 }
 
 #[tokio::test]
-async fn ais_enablement_or_radius_change_retires_cached_positions_immediately() {
+async fn moving_the_watched_span_retires_cached_positions_immediately() {
     let now_ms = 1_786_741_200_000;
     let store = Store::in_memory().await.unwrap();
     let clock = Arc::new(FixedClock(AtomicI64::new(now_ms)));
@@ -1256,9 +1256,19 @@ async fn ais_enablement_or_radius_change_retires_cached_positions_immediately() 
         AisConnectionStateDto::Live
     );
 
-    let mut resized = engine.get_preferences().await;
-    resized.ais.radius_kilometers = 18.0;
-    engine.save_preferences(resized).await.unwrap();
+    // Moving the span moves the subscription, so every position cached against
+    // the old one describes water this channel is no longer watching. The
+    // radius used to be the thing a reader could change here; it is fixed now,
+    // and the target is what remains.
+    let mut moved = engine.get_preferences().await;
+    let bridge = moved
+        .profile
+        .channels
+        .iter_mut()
+        .find(|channel| channel.kind == ChannelKindDto::Bridge)
+        .unwrap();
+    bridge.scope.insert("latitude".into(), json!(25.7712));
+    engine.save_preferences(moved).await.unwrap();
     let resized_status = engine.get_aisstream_status().await.unwrap();
     assert_eq!(
         resized_status.connection_state,
@@ -1275,13 +1285,13 @@ async fn ais_enablement_or_radius_change_retires_cached_positions_immediately() 
         .await
         .sources
         .insert(source_id.clone(), recached);
-    let mut disabled = engine.get_preferences().await;
-    disabled.ais.enabled = false;
-    engine.save_preferences(disabled).await.unwrap();
+    // Removing the key is how the source is turned off; there is no separate
+    // switch to leave in the wrong position while a good key sits beside it.
+    engine.set_aisstream_key(None).await.unwrap();
     let disabled_status = engine.get_aisstream_status().await.unwrap();
     assert_eq!(
         disabled_status.connection_state,
-        AisConnectionStateDto::Disabled
+        AisConnectionStateDto::NeedsKey
     );
     assert!(!disabled_status.source_registered);
     assert!(!engine.state.lock().await.sources.contains_key(&source_id));

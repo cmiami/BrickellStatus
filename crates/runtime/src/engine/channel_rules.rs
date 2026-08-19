@@ -1359,6 +1359,7 @@ fn aisstream_status(
     let mut fresh_vessel_count = 0usize;
     let mut last_error: Option<(i64, String)> = None;
     let mut attempted = false;
+    let mut first_attempt_ms: Option<i64> = None;
 
     for (source_id, channel_id) in &registered {
         let Some(source) = state.sources.get(*source_id) else {
@@ -1366,6 +1367,9 @@ fn aisstream_status(
             continue;
         };
         attempted |= source.last_attempt_ms.is_some();
+        if let Some(first) = source.first_attempt_ms {
+            first_attempt_ms = Some(first_attempt_ms.map_or(first, |current: i64| current.min(first)));
+        }
         if let Some(success) = source.last_success_ms {
             last_success_ms =
                 Some(last_success_ms.map_or(success, |current: i64| current.max(success)));
@@ -1478,58 +1482,56 @@ fn aisstream_status(
     let starting = last_error
         .as_deref()
         .is_some_and(|error| error.to_ascii_lowercase().contains("starting"));
-    let connection_state = if !preferences.ais.enabled {
-        AisConnectionStateDto::Disabled
-    } else if !preferences.ais.api_key_configured {
+    // A websocket that opened a minute ago and has not been told about a vessel
+    // yet is not broken; the river is often simply empty. Reporting a fault for
+    // that trains the reader to ignore the one indicator that matters, so the
+    // source is given time to settle before anything it says counts as a
+    // failure. A rejected key is exempt: that is an answer, not a silence.
+    const SETTLING_MS: i64 = 3 * 60 * 1_000;
+    // Only before the source has ever delivered. Once it has worked, losing it
+    // is a real fault and must fail closed immediately — the grace is for not
+    // having started yet, not for having stopped.
+    let settling = last_success_ms.is_none()
+        && first_attempt_ms.is_some_and(|first| now_ms.saturating_sub(first) < SETTLING_MS);
+
+    let connection_state = if !preferences.ais.api_key_configured {
         AisConnectionStateDto::NeedsKey
-    } else if source_registered && (!attempted || (starting && last_success_ms.is_none())) {
-        AisConnectionStateDto::Armed
     } else if rejected {
         AisConnectionStateDto::Rejected
+    } else if source_registered && (!attempted || (starting && last_success_ms.is_none())) {
+        AisConnectionStateDto::Armed
     } else if availability == AvailabilityDto::Fresh && fresh_vessel_count > 0 {
         AisConnectionStateDto::Live
-    } else if availability == AvailabilityDto::Fresh {
+    } else if availability == AvailabilityDto::Fresh || (source_registered && settling) {
         AisConnectionStateDto::Armed
     } else {
         AisConnectionStateDto::Disconnected
     };
     let detail = match connection_state {
-        AisConnectionStateDto::Disabled => "AISStream is disabled.".into(),
-        AisConnectionStateDto::NeedsKey => {
-            "AISStream needs a key from the desktop secret store.".into()
+        AisConnectionStateDto::Disabled => "The vessel source is off.".into(),
+        AisConnectionStateDto::NeedsKey => "Add a key to start the vessel source.".into(),
+        AisConnectionStateDto::Armed if settling && last_success_ms.is_none() => {
+            "Connecting.".into()
         }
-        AisConnectionStateDto::Armed if last_position_ms.is_none() && last_success_ms.is_some() => {
-            "WebSocket connected; AISStream has not delivered a vessel position for this subscription."
-                .into()
-        }
-        AisConnectionStateDto::Armed => {
-            "WebSocket connected; no vessel position is currently fresh in the bridge area."
-                .into()
-        }
+        AisConnectionStateDto::Armed => "Connected. No vessel in range right now.".into(),
         AisConnectionStateDto::Live => format!(
-            "Connected; {fresh_vessel_count} fresh vessel{} inside the configured bridge area.",
+            "Connected. {fresh_vessel_count} vessel{} in range.",
             if fresh_vessel_count == 1 { "" } else { "s" }
         ),
-        AisConnectionStateDto::Rejected => {
-            "AISStream rejected the subscription; verify or replace the saved key.".into()
-        }
-        AisConnectionStateDto::Disconnected => last_error.clone().unwrap_or_else(|| {
-            if source_registered {
-                "AISStream is not currently connected.".into()
-            } else {
-                "No enabled bridge channel has an AISStream source registered.".into()
-            }
-        }),
+        AisConnectionStateDto::Rejected => "The key was refused. Replace it.".into(),
+        AisConnectionStateDto::Disconnected => "Not connected.".into(),
     };
 
     Ok(AisStreamStatusDto {
-        enabled: preferences.ais.enabled,
+        // A key is the whole decision. Storing one turns the source on and
+        // clearing it turns the source off, so there is nothing else to ask.
+        enabled: preferences.ais.api_key_configured,
         provider: preferences.ais.provider,
         api_key_configured: preferences.ais.api_key_configured,
         source_registered,
         connection_state,
         availability,
-        radius_kilometers: preferences.ais.radius_kilometers,
+
         last_success_at: last_success_ms.map(iso_timestamp).transpose()?,
         last_position_at: last_position_ms.map(iso_timestamp).transpose()?,
         fresh_vessel_count,

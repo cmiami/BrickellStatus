@@ -1271,6 +1271,20 @@ async fn flash_firmware(
     Ok(())
 }
 
+/// The port of an attached board that answered with our firmware's banner.
+///
+/// `None` covers every reason not to touch it: no board, a board that does not
+/// speak, or a port somebody else already holds. Each of those is a reason to
+/// leave the reader's transport choice alone rather than guess.
+async fn adoptable_panel_port() -> Option<String> {
+    let port = brickellstatus_eink::transport::discover_espressif_port()
+        .await
+        .ok()
+        .flatten()?;
+    let banner = banner_after_flash(&port).await?;
+    banner.saw_ready.then_some(port)
+}
+
 /// Reads the banner a freshly flashed board speaks at boot.
 ///
 /// Opening the port is what resets the board, so this is also what makes it
@@ -2560,6 +2574,9 @@ async fn run_display_worker(
     let mut next_display_at = tokio::time::Instant::now();
     let mut next_reconnect_at = tokio::time::Instant::now();
     let mut reconnect_failures = 0_u32;
+    // Opening the port resets the board, so looking for one to adopt is done
+    // sparingly rather than on every pass of a five-second loop.
+    let mut next_adopt_at = tokio::time::Instant::now();
     loop {
         interval.tick().await;
         let snapshot = match engine.get_snapshot().await {
@@ -2569,7 +2586,25 @@ async fn run_display_worker(
                 continue;
             }
         };
-        let preferences = engine.get_preferences().await;
+        let mut preferences = engine.get_preferences().await;
+        // A board running our firmware, plugged in, and drawing nothing is the
+        // state this used to sit in forever: the preview transport is the safe
+        // default for a fresh install, and nothing ever moved it off. Adopting
+        // a panel that has announced itself is not reaching for hardware
+        // unasked — the board asked first.
+        if preferences.display.transport == DisplayTransport::Preview
+            && tokio::time::Instant::now() >= next_adopt_at
+        {
+            next_adopt_at = tokio::time::Instant::now() + Duration::from_secs(60);
+            if let Some(port) = adoptable_panel_port().await {
+                preferences.display.transport = DisplayTransport::Usb;
+                preferences.display.serial_port = port.clone();
+                match engine.save_preferences(preferences.clone()).await {
+                    Ok(_) => info!(%port, "a panel announced itself; driving it"),
+                    Err(error) => warn!(%error, "could not adopt the attached panel"),
+                }
+            }
+        }
         if !display.has_active().await
             && display.automatic_reconnect_enabled()
             && preferences.display.transport != DisplayTransport::Preview
