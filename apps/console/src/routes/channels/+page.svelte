@@ -233,6 +233,14 @@
               draft!.ais = ais;
               draft!.profile.preset = 'custom';
             }}
+            onareaadd={(area) => {
+              // Areas are shared between channels, so a pin dropped here joins
+              // the same register the map page keeps rather than becoming a
+              // private copy only this channel can see.
+              draft!.areas = [...draft!.areas, area];
+              draft!.profile.preset = 'custom';
+              void saveNow();
+            }}
           />
         </section>
 

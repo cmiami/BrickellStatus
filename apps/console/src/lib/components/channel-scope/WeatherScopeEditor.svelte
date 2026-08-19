@@ -5,11 +5,12 @@
   import AreaCoverage from './AreaCoverage.svelte';
   import { scopeBool, scopeNumber, setScope, type ChannelChange } from './scope';
 
-  let { channel, areas, unitSystem, onchannelchange }: {
+  let { channel, areas, unitSystem, onchannelchange, onareaadd }: {
     channel: ChannelPreference;
     areas: AlertArea[];
     unitSystem: UnitSystem;
     onchannelchange: ChannelChange;
+    onareaadd?: (area: AlertArea) => void;
   } = $props();
 
   const set = (key: string, value: number | boolean) => setScope(channel, onchannelchange, key, value);
@@ -22,7 +23,7 @@
 </script>
 
 <div class="weather-scope">
-  <AreaCoverage {channel} {areas} {onchannelchange} />
+  <AreaCoverage {channel} {areas} {unitSystem} {onchannelchange} {onareaadd} />
   <div class="rulebook">
     <!-- Rain has no threshold to set. It reads the forecast’s 15-minute
          precipitation amounts and says when rain starts, which is an answer;

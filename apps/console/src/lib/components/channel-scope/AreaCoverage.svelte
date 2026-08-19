@@ -1,16 +1,53 @@
 <script lang="ts">
-  import type { AlertArea, ChannelPreference } from '$lib/types';
+  import { MapPin } from '@lucide/svelte';
+
+  import LocationPickerModal from '$lib/components/LocationPickerModal.svelte';
+  import type { AlertArea, ChannelPreference, UnitSystem } from '$lib/types';
   import { scopeList, toggleScopeList, type ChannelChange } from './scope';
 
   let {
     channel,
     areas,
-    onchannelchange
+    unitSystem = 'imperial',
+    onchannelchange,
+    onareaadd
   }: {
     channel: ChannelPreference;
     areas: AlertArea[];
+    unitSystem?: UnitSystem;
     onchannelchange: ChannelChange;
+    onareaadd?: (area: AlertArea) => void;
   } = $props();
+
+  let picking = $state(false);
+
+  // Somewhere to open the map when there is nothing saved yet. A first pin has
+  // to land somewhere, and the middle of the ocean is a worse guess than the
+  // place this app is about.
+  const BRICKELL = { latitude: 25.7699, longitude: -80.19005 };
+  const origin = $derived(areas[0] ?? BRICKELL);
+
+  function addPlace(latitude: number, longitude: number) {
+    picking = false;
+    if (!onareaadd) return;
+    const area: AlertArea = {
+      // Time-ordered so the id sorts by when it was dropped, and unique
+      // without asking the reader to name the place before they have looked
+      // at it.
+      id: `area.${Date.now().toString(36)}`,
+      label: `Coverage area ${areas.length + 1}`,
+      latitude,
+      longitude,
+      timeZone: areas[0]?.timeZone ?? 'America/New_York',
+      source: 'manual',
+      enabled: true,
+      weatherEnabled: true,
+      officialAlertsEnabled: true,
+      tropicalContextEnabled: true
+    };
+    onareaadd(area);
+    toggleScopeList(channel, onchannelchange, 'areaIds', area.id, true);
+  }
 </script>
 
 <fieldset class="area-coverage">
@@ -36,8 +73,29 @@
   {:else}
     <p>No named areas are configured. Add an area before enabling this channel.</p>
   {/if}
-  <a href="/map">Edit coverage on the map →</a>
+  <div class="area-actions">
+    {#if onareaadd}
+      <button class="secondary-action" type="button" onclick={() => (picking = true)}>
+        <MapPin size={16} aria-hidden="true" /> Add a place
+      </button>
+    {/if}
+    <a href="/map">Rename or remove on the map →</a>
+  </div>
 </fieldset>
+
+{#if picking}
+  <LocationPickerModal
+    title="Coverage area"
+    description="Drop a pin on the place this channel should watch. Saved places are hidden while you choose, so there is only ever one pin to move."
+    latitude={origin.latitude}
+    longitude={origin.longitude}
+    label="New coverage area"
+    {unitSystem}
+    confirmLabel="Add this place"
+    onconfirm={addPlace}
+    oncancel={() => (picking = false)}
+  />
+{/if}
 
 <style>
   .area-coverage {
@@ -110,7 +168,13 @@
     line-height: 1.35;
   }
 
-  .area-coverage > a {
+  .area-actions {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .area-actions a {
     width: fit-content;
     color: var(--channel);
     font-family: var(--font-instrument);

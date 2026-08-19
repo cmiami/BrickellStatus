@@ -16,7 +16,8 @@
     ais,
     unitSystem,
     onchannelchange,
-    onaischange
+    onaischange,
+    onareaadd
   }: {
     channel: ChannelPreference;
     areas?: AlertArea[];
@@ -24,6 +25,7 @@
     unitSystem: UnitSystem;
     onchannelchange: ChannelChange;
     onaischange: (ais: AisSettings) => void;
+    onareaadd?: (area: AlertArea) => void;
   } = $props();
 </script>
 
@@ -31,9 +33,9 @@
   {#if channel.kind === 'bridge'}
     <BridgeScopeEditor {channel} {ais} {unitSystem} {onchannelchange} {onaischange} />
   {:else if channel.kind === 'weather'}
-    <WeatherScopeEditor {channel} {areas} {unitSystem} {onchannelchange} />
+    <WeatherScopeEditor {channel} {areas} {unitSystem} {onchannelchange} {onareaadd} />
   {:else if channel.kind === 'official'}
-    <OfficialScopeEditor {channel} {areas} {onchannelchange} />
+    <OfficialScopeEditor {channel} {areas} {unitSystem} {onchannelchange} {onareaadd} />
   {:else if channel.kind === 'hurricane'}
     <HurricaneScopeEditor {channel} {onchannelchange} />
   {:else if channel.kind === 'news'}

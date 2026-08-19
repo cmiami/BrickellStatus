@@ -1,7 +1,9 @@
 <script lang="ts">
-  import LocationMap from '$lib/components/LocationMap.svelte';
+  import { MapPin } from '@lucide/svelte';
+
+  import LocationPickerModal from '$lib/components/LocationPickerModal.svelte';
   import AisOutputPanel from '$lib/components/outputs/AisOutputPanel.svelte';
-  import type { AisSettings, ChannelPreference, LocationMapPoint, UnitSystem } from '$lib/types';
+  import type { AisSettings, ChannelPreference, UnitSystem } from '$lib/types';
   import { formatDistanceKilometers } from '$lib/units';
   import { scopeBool, scopeNumber, scopeText, setScope, type ChannelChange } from './scope';
 
@@ -19,16 +21,7 @@
     onaischange: (ais: AisSettings) => void;
   } = $props();
 
-  const bridgePoint = $derived<LocationMapPoint>({
-    id: `${channel.id}.target`,
-    label: scopeText(channel, 'bridge', 'Brickell Avenue Bridge'),
-    latitude: scopeNumber(channel, 'latitude', 25.7699),
-    longitude: scopeNumber(channel, 'longitude', -80.19005),
-    detail: 'Controller discovery target',
-    kind: 'bridge',
-    enabled: channel.enabled,
-    draggable: true
-  });
+  let pickingTarget = $state(false);
 
   function set(key: string, value: string | number | boolean) {
     setScope(channel, onchannelchange, key, value);
@@ -69,22 +62,19 @@
     </label>
   </div>
 
-  <section class="bridge-map" aria-labelledby={`${channel.id}-map-heading`}>
+  <section class="bridge-target" aria-labelledby={`${channel.id}-map-heading`}>
     <header>
       <div>
         <h4 id={`${channel.id}-map-heading`}>Controller target</h4>
-        <p>Drag the marker or click the map. Bridge status reporting is discovered around this exact point.</p>
+        <p>Bridge status reporting is discovered around this exact point.</p>
       </div>
+      <button class="secondary-action" type="button" onclick={() => (pickingTarget = true)}>
+        <MapPin size={16} aria-hidden="true" /> Set on map
+      </button>
     </header>
-    <LocationMap
-      variant="compact"
-      points={[]}
-      candidate={bridgePoint}
-      selectedId={bridgePoint.id}
-      {unitSystem}
-      ariaLabel="Interactive map for selecting the bridge controller target"
-      onpick={setCoordinates}
-    />
+    <p class="bridge-target-readout">
+      {scopeNumber(channel, 'latitude', 25.7699).toFixed(5)}, {scopeNumber(channel, 'longitude', -80.19005).toFixed(5)}
+    </p>
     <details>
       <summary>Advanced coordinates</summary>
       <div class="coordinate-fields">
@@ -107,6 +97,23 @@
   <AisOutputPanel {ais} {unitSystem} {onaischange} />
 </div>
 
+{#if pickingTarget}
+  <LocationPickerModal
+    title="Controller target"
+    description="Drop the pin on the span itself. Bridge status reporting is discovered around this exact point, so a pin on the wrong side of the river finds the wrong bridge."
+    latitude={scopeNumber(channel, 'latitude', 25.7699)}
+    longitude={scopeNumber(channel, 'longitude', -80.19005)}
+    label={scopeText(channel, 'bridge', 'Bridge target')}
+    {unitSystem}
+    confirmLabel="Use this point"
+    onconfirm={(latitude, longitude) => {
+      setCoordinates(latitude, longitude);
+      pickingTarget = false;
+    }}
+    oncancel={() => (pickingTarget = false)}
+  />
+{/if}
+
 <style>
   .bridge-scope {
     display: grid;
@@ -124,30 +131,30 @@
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .bridge-map {
+  .bridge-target {
     display: grid;
     overflow: hidden;
     border: 1px solid var(--rule-strong);
   }
 
-  .bridge-map > header {
+  .bridge-target > header {
     padding: 16px;
     color: var(--white);
     background: var(--marine);
   }
 
-  .bridge-map h4,
-  .bridge-map p {
+  .bridge-target h4,
+  .bridge-target p {
     margin: 0;
   }
 
-  .bridge-map h4 {
+  .bridge-target h4 {
     font-size: var(--type-section);
     line-height: 1;
     text-transform: uppercase;
   }
 
-  .bridge-map p {
+  .bridge-target p {
     max-width: 70ch;
     margin-top: 5px;
     color: var(--nav-muted);
@@ -155,13 +162,13 @@
     line-height: 1.4;
   }
 
-  .bridge-map details {
+  .bridge-target details {
     padding: 14px 16px 16px;
     background: var(--frost);
     border-top: 1px solid var(--rule-strong);
   }
 
-  .bridge-map summary {
+  .bridge-target summary {
     width: fit-content;
     color: var(--channel);
     font-family: var(--font-instrument);

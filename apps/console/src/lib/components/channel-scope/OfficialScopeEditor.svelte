@@ -1,18 +1,20 @@
 <script lang="ts">
   import SwitchField from '$lib/components/SwitchField.svelte';
-  import type { AlertArea, ChannelPreference } from '$lib/types';
+  import type { AlertArea, ChannelPreference, UnitSystem } from '$lib/types';
   import AreaCoverage from './AreaCoverage.svelte';
   import { scopeBool, scopeList, setScope, toggleScopeList, type ChannelChange } from './scope';
 
-  let { channel, areas, onchannelchange }: {
+  let { channel, areas, unitSystem, onchannelchange, onareaadd }: {
     channel: ChannelPreference;
     areas: AlertArea[];
+    unitSystem: UnitSystem;
     onchannelchange: ChannelChange;
+    onareaadd?: (area: AlertArea) => void;
   } = $props();
 </script>
 
 <div class="official-scope">
-  <AreaCoverage {channel} {areas} {onchannelchange} />
+  <AreaCoverage {channel} {areas} {unitSystem} {onchannelchange} {onareaadd} />
   <fieldset class="severity-register">
     <legend>Qualifying severities</legend>
     {#each ['Moderate', 'Severe', 'Extreme'] as severity}

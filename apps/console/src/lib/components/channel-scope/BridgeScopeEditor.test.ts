@@ -11,7 +11,7 @@ vi.mock('$lib/api', () => ({
     state: 'ready',
     detail: 'Armed.'
   })),
-  getPreferences: vi.fn(async () => ({ ais: { enabled: false, apiKeyConfigured: true, radiusKilometers: 12 } })),
+  getPreferences: vi.fn(async () => ({ ais: { enabled: false, provider: 'aisstream', apiKeyConfigured: true, radiusKilometers: 12 } })),
   setAisstreamApiKey: vi.fn(async () => ({ ok: true, message: 'Stored.' })),
   clearAisstreamApiKey: vi.fn(async () => ({ ok: true, message: 'Removed.' }))
 }));
@@ -40,7 +40,7 @@ function channel(): ChannelPreference {
   } as ChannelPreference;
 }
 
-const ais: AisSettings = { enabled: false, apiKeyConfigured: true, radiusKilometers: 12 };
+const ais: AisSettings = { enabled: false, provider: 'aisstream', apiKeyConfigured: true, radiusKilometers: 12 };
 
 function mount(overrides: Partial<AisSettings> = {}) {
   const onaischange = vi.fn();
