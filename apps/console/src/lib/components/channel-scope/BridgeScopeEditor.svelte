@@ -1,6 +1,6 @@
 <script lang="ts">
   import LocationMap from '$lib/components/LocationMap.svelte';
-  import SwitchField from '$lib/components/SwitchField.svelte';
+  import AisOutputPanel from '$lib/components/outputs/AisOutputPanel.svelte';
   import type { AisSettings, ChannelPreference, LocationMapPoint, UnitSystem } from '$lib/types';
   import { formatDistanceKilometers } from '$lib/units';
   import { scopeBool, scopeNumber, scopeText, setScope, type ChannelChange } from './scope';
@@ -73,7 +73,7 @@
     <header>
       <div>
         <h4 id={`${channel.id}-map-heading`}>Controller target</h4>
-        <p>Drag the marker or click the map. FL511 discovery searches around this exact point.</p>
+        <p>Drag the marker or click the map. Bridge status reporting is discovered around this exact point.</p>
       </div>
     </header>
     <LocationMap
@@ -100,28 +100,11 @@
     </details>
   </section>
 
-  <div class="source-switches">
-    <SwitchField checked={scopeBool(channel, 'useFl511', true)} label="FL511 ground truth" description="Confirm target and upstream bridge controller state." onchange={(enabled) => set('useFl511', enabled)} />
-    <SwitchField checked={scopeBool(channel, 'useUpstream', true)} label="Upstream progression" description="Use ordered upstream openings as outbound evidence." onchange={(enabled) => set('useUpstream', enabled)} />
-  </div>
-
-  <section class:configured={ais.apiKeyConfigured} class:enabled={ais.enabled} class="ais-source">
-    <div class="ais-mark" aria-hidden="true">AIS</div>
-    <div>
-      <span>Predictive vessel source</span>
-      <strong>AISStream approach evidence</strong>
-      <small>
-        {ais.apiKeyConfigured
-          ? `${formatDistanceKilometers(ais.radiusKilometers, unitSystem)} bridge-centered watch.`
-          : 'No AISStream key is configured.'}
-      </small>
-    </div>
-    {#if ais.apiKeyConfigured}
-      <SwitchField checked={ais.enabled} label={ais.enabled ? 'AIS evidence running' : 'AIS evidence parked'} description="This is the same source circuit shown in Outputs." onchange={(enabled) => onaischange({ ...ais, enabled })} />
-    {:else}
-      <a href="/outputs#aisstream">Configure AISStream in Outputs →</a>
-    {/if}
-  </section>
+  <!-- Bridge status reporting and upstream progression used to be switches
+       here. Neither is a preference: turning one off does not express an
+       intent, it just makes the forecast worse in a way nothing on screen
+       explains. The engine decides what evidence it weighs. -->
+  <AisOutputPanel {ais} {unitSystem} {onaischange} />
 </div>
 
 <style>
@@ -131,8 +114,7 @@
   }
 
   .identity-fields,
-  .coordinate-fields,
-  .source-switches {
+  .coordinate-fields {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 14px;
@@ -194,103 +176,10 @@
     margin-top: 14px;
   }
 
-  .ais-source {
-    display: grid;
-    grid-template-columns: 48px minmax(0, 1fr) minmax(230px, 0.78fr);
-    align-items: center;
-    gap: 15px;
-    padding: 16px;
-    background: var(--frost);
-    border: 1px dashed var(--steel);
-  }
-
-  .ais-source.configured {
-    background: var(--paper);
-    border-style: solid;
-    border-color: var(--rule-strong);
-  }
-
-  .ais-source.enabled {
-    box-shadow: inset 0 -3px 0 var(--success);
-  }
-
-  .ais-mark {
-    display: grid;
-    width: 46px;
-    height: 46px;
-    place-items: center;
-    color: var(--white);
-    background: var(--steel);
-    font-family: var(--font-instrument);
-    font-size: var(--type-title);
-    font-weight: 700;
-  }
-
-  .ais-source.configured .ais-mark {
-    background: var(--marine);
-  }
-
-  .ais-source.enabled .ais-mark {
-    background: var(--success);
-  }
-
-  .ais-source > div:nth-child(2) {
-    display: grid;
-    min-width: 0;
-    gap: 3px;
-  }
-
-  .ais-source span,
-  .ais-source strong {
-    font-family: var(--font-instrument);
-    text-transform: uppercase;
-  }
-
-  .ais-source span {
-    color: var(--muted);
-    font-size: var(--type-micro);
-    font-weight: 600;
-    letter-spacing: 0.07em;
-  }
-
-  .ais-source strong {
-    font-size: var(--type-title);
-    line-height: 1;
-  }
-
-  .ais-source small {
-    color: var(--muted);
-    font-size: var(--type-caption);
-    line-height: 1.4;
-  }
-
-  .ais-source > a {
-    justify-self: end;
-    color: var(--channel);
-    font-family: var(--font-instrument);
-    font-size: var(--type-label);
-    font-weight: 700;
-    text-align: right;
-    text-transform: uppercase;
-    text-underline-offset: 4px;
-  }
-
   @media (max-width: 680px) {
     .identity-fields,
-    .coordinate-fields,
-    .source-switches {
+    .coordinate-fields {
       grid-template-columns: 1fr;
-    }
-
-    .ais-source {
-      grid-template-columns: 46px minmax(0, 1fr);
-    }
-
-    .ais-source > :global(.switch-field),
-    .ais-source > a {
-      grid-column: 2;
-      justify-self: stretch;
-      text-align: left;
     }
   }
 </style>

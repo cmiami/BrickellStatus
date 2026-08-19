@@ -746,7 +746,7 @@ async fn live_fl511_becomes_authoritative_bridge_evidence() {
         snapshot
             .evidence
             .iter()
-            .any(|item| item.source_label == "Florida 511")
+            .any(|item| item.source_label == "Bridge status reporting")
     );
     let intervals = engine
         .store
@@ -2550,7 +2550,7 @@ async fn a_scheduled_vessel_movement_never_appears_as_a_bridge_reading() {
         snapshot
             .evidence
             .iter()
-            .any(|strip| strip.source_label.contains("511")),
+            .any(|strip| strip.source_label == "Bridge status reporting"),
         "the bascule reading itself must still be shown"
     );
 }

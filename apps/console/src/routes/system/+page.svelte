@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Check, Clipboard, Database, RefreshCw, ShieldCheck, TriangleAlert } from '@lucide/svelte';
 
+  import SystemTabs from '$lib/components/SystemTabs.svelte';
   import { refreshSources } from '$lib/api';
   import { notice, snapshot } from '$lib/state';
 
@@ -80,6 +81,7 @@
 </svelte:head>
 
 <section class="page-sheet system-page">
+  <SystemTabs />
   <header class="page-heading-row">
     <div>
       <p class="registration-label">Engine room</p>

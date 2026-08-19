@@ -1965,10 +1965,14 @@ fn evidence_snapshots(
                     |item| item.observation_id.0.clone(),
                 ),
                 channel_id: "bridge.brickell".into(),
+                // Named for what it is rather than who runs it. Which agency
+                // publishes bridge state is an integration detail behind an
+                // adapter, and a reader deciding whether to drive at the span
+                // cannot do anything with the provider's name.
                 source_label: if view.source_id.starts_with("aisstream.") {
                     "AISStream".into()
                 } else {
-                    "Florida 511".into()
+                    "Bridge status reporting".into()
                 },
                 source_id: view.source_id,
                 title: view.item.title,

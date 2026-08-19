@@ -11,13 +11,14 @@
   } from '@lucide/svelte';
   import { page } from '$app/stores';
 
+  // The rail is for places you go to decide something. The log and the output
+  // desk are places you go to check on the machine, so they live under System
+  // rather than taking a seat of their own.
   const items = [
     { href: '/', label: 'Live', icon: Clock3 },
-    { href: '/log', label: 'Log', icon: BookOpenText },
     { href: '/channels', label: 'Channels', icon: RadioTower },
     { href: '/map', label: 'Map', icon: MapPinned },
     { href: '/policy', label: 'Policy', icon: SlidersHorizontal },
-    { href: '/outputs', label: 'Outputs', icon: MonitorUp },
     { href: '/system', label: 'System', icon: Database }
   ];
 
@@ -29,7 +30,7 @@
 <aside class="app-nav" aria-label="Primary">
   <a class="brand-mark" href="/" aria-label="BrickellStatus live console">
     <BellRing size={26} strokeWidth={1.6} aria-hidden="true" />
-    <span class="brand-word">TENDER’S<br />LOG</span>
+    <span class="brand-word">BRICKELL<br />STATUS</span>
   </a>
 
   <nav>

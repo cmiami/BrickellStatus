@@ -5,9 +5,22 @@
   import { clearAisstreamApiKey, getAisstreamStatus, getPreferences, setAisstreamApiKey } from '$lib/api';
   import { notice, preferences } from '$lib/state';
   import { formatDistanceKilometers } from '$lib/units';
-  import type { AisStreamStatus, AppPreferences } from '$lib/types';
+  import type { AisSettings, AisStreamStatus, UnitSystem } from '$lib/types';
 
-  let { draft = $bindable() }: { draft: AppPreferences } = $props();
+  // Lives on the Brickell Bridge channel now rather than the output desk.
+  // AIS is evidence the bridge forecast is built from, not a place frames
+  // are delivered to, and it was previously configurable in two places.
+  let {
+    ais,
+    unitSystem,
+    onaischange
+  }: { ais: AisSettings; unitSystem: UnitSystem; onaischange: (ais: AisSettings) => void } = $props();
+
+  /// Hands every change straight back up. The channels desk saves as it goes,
+  /// so there is no local draft to keep in step and nothing to press.
+  function update(patch: Partial<AisSettings>) {
+    onaischange({ ...ais, ...patch });
+  }
 
   let apiKey = $state('');
   let keyBusy = $state(false);
@@ -21,21 +34,10 @@
     detail: 'Checking the local AIS source circuit…'
   });
 
-  const settingsDirty = $derived(
-    Boolean(
-      $preferences &&
-        (draft.ais.enabled !== $preferences.ais.enabled ||
-          draft.ais.radiusKilometers !== $preferences.ais.radiusKilometers)
-    )
-  );
-  const bridgePreference = $derived(draft.profile.channels.find((channel) => channel.id === 'bridge.brickell'));
-  const bridgeTargetName = $derived(
-    typeof bridgePreference?.scope.bridge === 'string' ? bridgePreference.scope.bridge : 'Saved bridge target'
-  );
   const radiusDisplayValue = $derived(
-    draft.unitSystem === 'metric'
-      ? draft.ais.radiusKilometers.toFixed(0)
-      : (draft.ais.radiusKilometers * 0.621_371).toFixed(1)
+    unitSystem === 'metric'
+      ? ais.radiusKilometers.toFixed(0)
+      : (ais.radiusKilometers * 0.621_371).toFixed(1)
   );
 
   $effect(() => {
@@ -70,7 +72,7 @@
   }
 
   function reconcileCredential(configured: boolean) {
-    draft.ais.apiKeyConfigured = configured;
+    update({ apiKeyConfigured: configured });
     preferences.update((current) =>
       !current || current.ais.apiKeyConfigured === configured
         ? current
@@ -87,7 +89,7 @@
     } catch (error) {
       const message = error instanceof Error ? error.message : 'AISStream source health is unavailable.';
       status = {
-        configured: draft.ais.apiKeyConfigured,
+        configured: ais.apiKeyConfigured,
         enabled: Boolean($preferences?.ais.enabled),
         state: 'degraded',
         detail: message
@@ -101,8 +103,11 @@
   async function reloadSecretState(forceParked = false) {
     const saved = await getPreferences();
     preferences.update((current) => current ? { ...current, ais: structuredClone(saved.ais) } : saved);
-    draft.ais.apiKeyConfigured = saved.ais.apiKeyConfigured;
-    if (forceParked) draft.ais.enabled = saved.ais.enabled;
+    update(
+      forceParked
+        ? { apiKeyConfigured: saved.ais.apiKeyConfigured, enabled: saved.ais.enabled }
+        : { apiKeyConfigured: saved.ais.apiKeyConfigured }
+    );
   }
 
   async function storeKey() {
@@ -150,25 +155,23 @@
       <h2 id="aisstream-heading">AISStream vessel watch</h2>
       <p>Real WebSocket positions normalized into time-decaying bridge approach evidence.</p>
     </div>
-    <span class="status-word" data-state={settingsDirty ? 'unconfigured' : stateTone(status.state)}>
-      {settingsDirty ? 'Unsaved edit' : stateLabel(status.state)}
-    </span>
+    <span class="status-word" data-state={stateTone(status.state)}>{stateLabel(status.state)}</span>
   </header>
 
   <div class="ais-work">
     <div class="ais-config">
-      <section class:enabled={draft.ais.enabled} class="ais-circuit-gate" aria-labelledby="ais-circuit-title">
+      <section class:enabled={ais.enabled} class="ais-circuit-gate" aria-labelledby="ais-circuit-title">
         <div class="circuit-glyph" aria-hidden="true"><Radar size={25} strokeWidth={1.45} /></div>
         <div>
           <span>Optional predictive source</span>
           <h3 id="ais-circuit-title">Vessel evidence circuit</h3>
-          <p>Saving starts or stops the backend worker. FL511 continues independently.</p>
+          <p>The backend worker follows this switch. Bridge status reporting continues independently.</p>
         </div>
         <SwitchField
-          checked={draft.ais.enabled}
-          label={draft.ais.enabled ? 'AISStream enabled' : 'AISStream disabled'}
-          description={draft.ais.enabled ? 'Save to run the bridge-centered worker.' : 'All AIS network work is parked.'}
-          onchange={(enabled) => (draft.ais.enabled = enabled)}
+          checked={ais.enabled}
+          label={ais.enabled ? 'AISStream enabled' : 'AISStream disabled'}
+          description={ais.enabled ? 'The bridge-centered worker is running.' : 'All AIS network work is parked.'}
+          onchange={(enabled) => update({ enabled })}
         />
       </section>
 
@@ -178,31 +181,31 @@
             <span class="coverage-ring outer"></span><span class="coverage-ring middle"></span><span class="coverage-ring inner"></span>
             <span class="coverage-axis horizontal"></span><span class="coverage-axis vertical"></span>
             <span class="bridge-fix"><Crosshair size={22} strokeWidth={1.7} /></span>
-            <span class="coverage-readout"><strong>{radiusDisplayValue}</strong><small>{draft.unitSystem === 'metric' ? 'KM' : 'MI'}</small></span>
+            <span class="coverage-readout"><strong>{radiusDisplayValue}</strong><small>{unitSystem === 'metric' ? 'KM' : 'MI'}</small></span>
           </div>
-          <figcaption><span>Center fix</span><strong>{bridgeTargetName}</strong><small>Coverage follows the saved bridge pin.</small></figcaption>
+          <figcaption><span>Center fix</span><strong>{'the saved bridge pin'}</strong><small>Coverage follows the saved bridge pin.</small></figcaption>
         </figure>
 
         <div class="coverage-control">
           <div><span>Approach envelope</span><h3 id="coverage-heading">Listening radius</h3><p>A wider radius sees vessels earlier and admits more unrelated traffic.</p></div>
           <label class="radius-control" for="ais-radius">
-            <span><b>Coverage radius</b><output for="ais-radius">{formatDistanceKilometers(draft.ais.radiusKilometers, draft.unitSystem)}</output></span>
-            <input id="ais-radius" type="range" min="2" max="30" step="1" bind:value={draft.ais.radiusKilometers} aria-valuetext={`${formatDistanceKilometers(draft.ais.radiusKilometers, draft.unitSystem)} around ${bridgeTargetName}`} />
-            <small><span>{formatDistanceKilometers(2, draft.unitSystem)} · harbor</span><span>{formatDistanceKilometers(12, draft.unitSystem)} · balanced</span><span>{formatDistanceKilometers(30, draft.unitSystem)} · wide</span></small>
+            <span><b>Coverage radius</b><output for="ais-radius">{formatDistanceKilometers(ais.radiusKilometers, unitSystem)}</output></span>
+            <input id="ais-radius" type="range" min="2" max="30" step="1" value={ais.radiusKilometers} oninput={(event) => update({ radiusKilometers: Number((event.currentTarget as HTMLInputElement).value) })} aria-valuetext={`${formatDistanceKilometers(ais.radiusKilometers, unitSystem)} around ${'the saved bridge pin'}`} />
+            <small><span>{formatDistanceKilometers(2, unitSystem)} · harbor</span><span>{formatDistanceKilometers(12, unitSystem)} · balanced</span><span>{formatDistanceKilometers(30, unitSystem)} · wide</span></small>
           </label>
           <a href="/channels?channel=bridge.brickell">Move or rename the bridge target →</a>
         </div>
       </section>
 
       <section class="ais-secret-register" aria-labelledby="ais-key-heading">
-        <div class="secret-proof-mark" data-configured={draft.ais.apiKeyConfigured}>
-          {#if draft.ais.apiKeyConfigured}<ShieldCheck size={23} strokeWidth={1.45} aria-hidden="true" />{:else}<KeyRound size={23} strokeWidth={1.45} aria-hidden="true" />{/if}
+        <div class="secret-proof-mark" data-configured={ais.apiKeyConfigured}>
+          {#if ais.apiKeyConfigured}<ShieldCheck size={23} strokeWidth={1.45} aria-hidden="true" />{:else}<KeyRound size={23} strokeWidth={1.45} aria-hidden="true" />{/if}
         </div>
-        <div class="ais-secret-copy"><span>Local secret</span><h3 id="ais-key-heading">AISStream API key</h3><p>{draft.ais.apiKeyConfigured ? 'A key is stored in the app’s private local credential file.' : 'No key is stored.'}</p></div>
-        <label class="ais-key-field" for="aisstream-key"><span class="visually-hidden">AISStream API key</span><input id="aisstream-key" type="password" bind:value={apiKey} maxlength="4096" autocomplete="new-password" placeholder={draft.ais.apiKeyConfigured ? 'Replace saved key' : 'Paste API key'} /></label>
+        <div class="ais-secret-copy"><span>Local secret</span><h3 id="ais-key-heading">AISStream API key</h3><p>{ais.apiKeyConfigured ? 'A key is stored in the app’s private local credential file.' : 'No key is stored.'}</p></div>
+        <label class="ais-key-field" for="aisstream-key"><span class="visually-hidden">AISStream API key</span><input id="aisstream-key" type="password" bind:value={apiKey} maxlength="4096" autocomplete="new-password" placeholder={ais.apiKeyConfigured ? 'Replace saved key' : 'Paste API key'} /></label>
         <div class="secret-actions">
-          <button class="secondary-action" onclick={storeKey} disabled={keyBusy || !apiKey.trim()}>{keyBusy ? 'Securing' : draft.ais.apiKeyConfigured ? 'Replace key' : 'Store key'}</button>
-          {#if draft.ais.apiKeyConfigured}
+          <button class="secondary-action" onclick={storeKey} disabled={keyBusy || !apiKey.trim()}>{keyBusy ? 'Securing' : ais.apiKeyConfigured ? 'Replace key' : 'Store key'}</button>
+          {#if ais.apiKeyConfigured}
             {#if removalArmed}
               <button class="remove-secret-action is-armed" onclick={removeKey} disabled={keyBusy}>Confirm removal</button><button class="cancel-secret-action" onclick={() => (removalArmed = false)} disabled={keyBusy}>Keep it</button>
             {:else}<button class="remove-secret-action" onclick={() => (removalArmed = true)} disabled={keyBusy}>Remove key</button>{/if}
@@ -217,7 +220,6 @@
       <div class="health-verdict" data-state={status.state} role="status" aria-live="polite">
         <div class="health-radar"><Radar size={28} strokeWidth={1.35} aria-hidden="true" /></div>
         <span>Saved worker health</span><h3 id="ais-health-heading">{stateLabel(status.state)}</h3><p>{status.detail}</p>
-        {#if settingsDirty}<small>Visible settings are not live until saved.</small>{/if}
       </div>
       <dl class="ais-facts">
         <div><dt>Source</dt><dd>AISStream</dd></div>

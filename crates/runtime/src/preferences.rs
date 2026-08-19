@@ -117,8 +117,6 @@ pub fn default_channel_preferences() -> Vec<ChannelPreference> {
                 ("longitude".into(), json!(-80.19005)),
                 ("radiusMeters".into(), json!(250)),
                 ("timeZone".into(), json!("America/New_York")),
-                ("useFl511".into(), json!(true)),
-                ("useUpstream".into(), json!(true)),
             ]),
         },
         ChannelPreference {

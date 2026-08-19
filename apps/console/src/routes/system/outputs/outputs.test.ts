@@ -117,24 +117,6 @@ describe('WhatsApp recipient consent', () => {
   });
 });
 
-describe('AISStream source desk', () => {
-  it('stages the real source gate without claiming the saved worker changed', async () => {
-    const configured = preferencesFixture();
-    preferences.set(configured);
-
-    render(OutputsPage);
-
-    const sourceGate = screen.getByRole('switch', { name: /AISStream disabled/i });
-    expect(sourceGate).toHaveAttribute('aria-checked', 'false');
-    expect(screen.getByText(/saved bridge-centered bounding box/i)).toBeInTheDocument();
-
-    await fireEvent.click(sourceGate);
-
-    expect(sourceGate).toHaveAttribute('aria-checked', 'true');
-    expect(screen.getByText('Unsaved edit')).toBeInTheDocument();
-  });
-});
-
 describe('display connection safety', () => {
   it('starts in Preview and explains the unauthenticated BLE frame boundary', () => {
     const configured = preferencesFixture();

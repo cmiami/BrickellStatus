@@ -218,7 +218,13 @@ impl CollectorFactory for CredentialFreeCollectorFactory {
                     )));
                 }
 
-                if scope_bool(&channel.scope, "useFl511", true, &channel.id)? {
+                // Bridge status reporting and upstream progression are always
+                // on. They were scope switches, but neither expressed an
+                // intent a reader could hold — turning one off only made the
+                // forecast worse, silently. A stored `false` from before this
+                // is ignored rather than honoured, so nobody is left with a
+                // permanently degraded estimate and no control to undo it.
+                {
                     let mut config = Fl511Config::brickell_and_upstream();
                     let target = config
                         .bridges
@@ -235,11 +241,6 @@ impl CollectorFactory for CredentialFreeCollectorFactory {
                         25.0..=10_000.0,
                         &channel.id,
                     )?;
-                    if !scope_bool(&channel.scope, "useUpstream", true, &channel.id)? {
-                        config
-                            .bridges
-                            .retain(|selector| selector.relation == BridgeRelation::Target);
-                    }
                     registrations.push(
                         CollectorRegistration::new(
                             format!("fl511.{}", channel.id),
@@ -968,12 +969,18 @@ mod tests {
     }
 
     #[test]
-    fn ais_can_run_when_fl511_is_disabled() {
+    fn a_stored_bridge_reporting_switch_no_longer_parks_the_source() {
+        // These were switches once. A profile written back then can still be
+        // carrying `false`, and honouring it now would leave that reader with
+        // a permanently worse forecast and nothing on screen to undo it.
         let mut preferences = AppPreferences::default();
         preferences.ais.enabled = true;
         preferences.profile.channels[0]
             .scope
             .insert("useFl511".into(), json!(false));
+        preferences.profile.channels[0]
+            .scope
+            .insert("useUpstream".into(), json!(false));
         let ids = CredentialFreeCollectorFactory::new(
             "BrickellStatus fixture (+https://example.invalid)",
         )
@@ -986,15 +993,15 @@ mod tests {
         .map(|registration| registration.id)
         .collect::<Vec<_>>();
         assert!(ids.iter().any(|id| id == "aisstream.bridge.brickell"));
-        assert!(!ids.iter().any(|id| id.starts_with("fl511.")));
+        assert!(
+            ids.iter().any(|id| id.starts_with("fl511.")),
+            "bridge status reporting runs whatever an old profile says"
+        );
     }
 
     #[test]
     fn source_enablement_and_configured_rss_feeds_come_from_scope() {
         let mut preferences = AppPreferences::default();
-        preferences.profile.channels[0]
-            .scope
-            .insert("useFl511".into(), json!(false));
         preferences.profile.channels[3].enabled = false;
         preferences.profile.channels[4]
             .scope
@@ -1002,7 +1009,6 @@ mod tests {
         preferences.profile.channels[5].enabled = true;
 
         let ids = collector_ids(&preferences);
-        assert!(!ids.iter().any(|id| id.starts_with("fl511.")));
         assert!(!ids.iter().any(|id| id.starts_with("nhc.")));
         assert!(ids.iter().any(|id| id.starts_with("rss.")));
         assert!(
@@ -1044,19 +1050,6 @@ mod tests {
                 .iter()
                 .any(|id| id.starts_with("yahoo_chart."))
         );
-    }
-
-    #[test]
-    fn rejects_a_non_boolean_fl511_toggle() {
-        let mut preferences = AppPreferences::default();
-        preferences.profile.channels[0]
-            .scope
-            .insert("useFl511".into(), json!("yes"));
-        let factory =
-            CredentialFreeCollectorFactory::new("TenderStatus fixture (test@example.invalid)")
-                .unwrap();
-        let result = factory.build(&preferences);
-        assert!(matches!(result, Err(RuntimeError::Configuration(_))));
     }
 
     #[test]

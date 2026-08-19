@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SystemTabs from '$lib/components/SystemTabs.svelte';
   import BasculeMark from '$lib/components/BasculeMark.svelte';
   import { Download, Search, SlidersHorizontal } from '@lucide/svelte';
 
@@ -106,12 +107,13 @@
 </svelte:head>
 
 <section class="page-sheet log-page">
+  <SystemTabs />
   <header class="page-heading-row">
     <div>
       <p class="registration-label">Durable history</p>
       <h1 class="sheet-heading">See what changed, and when</h1>
       <p class="sheet-intro">
-        This ledger records FL511 bridge state intervals and durable WhatsApp outcomes. Routine polling stays out;
+        This ledger records bridge state intervals and durable WhatsApp outcomes. Routine polling stays out;
         bridge changes and material delivery revisions stay in.
       </p>
     </div>
@@ -157,7 +159,7 @@
       <section class="history-section" aria-labelledby="bridge-history-heading">
         <header class="register-heading">
           <div>
-            <p class="registration-label">FL511 observations</p>
+            <p class="registration-label">Bridge status reporting</p>
             <h2 id="bridge-history-heading">Bridge openings</h2>
           </div>
           <p>Target and upstream open/closed intervals retained for prediction history.</p>
@@ -209,7 +211,7 @@
         {:else}
           <div class="empty-log compact-empty">
             <h3>No bridge intervals match</h3>
-            <p>FL511 state changes will appear here after the next matching observation.</p>
+            <p>Bridge state changes will appear here after the next matching observation.</p>
           </div>
         {/if}
       </section>
