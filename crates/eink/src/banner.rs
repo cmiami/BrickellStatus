@@ -3,7 +3,7 @@
 //! The firmware speaks one line on the wire:
 //!
 //! ```text
-//! READY INK1 296x128 4736 9f3c2ab E290
+//! READY INK1 296x128 4736 9f3c2ab E290 26B4
 //! ```
 //!
 //! Geometry, payload size, the build it was compiled from, and the board its
@@ -16,7 +16,7 @@
 //! which one it is. That case is spoken plainly:
 //!
 //! ```text
-//! READY INK1 0x0 0 9f3c2ab E290 MISMATCH
+//! READY INK1 0x0 0 9f3c2ab E290 26B4 MISMATCH
 //! ```
 //!
 //! No geometry, because there is nothing this image can correctly draw; the
@@ -45,6 +45,11 @@ pub struct DeviceBanner {
     pub mismatch: bool,
     /// Build identity, when the firmware is new enough to report one.
     pub build: Option<String>,
+    /// Four hex characters naming this individual board, when the firmware is
+    /// new enough to report them. Older firmware omits it, which is an absence
+    /// rather than a disagreement: the board is still usable, it just cannot be
+    /// told apart from another one of the same model.
+    pub board_id: Option<String>,
 }
 
 /// What the firmware stamps into its banner when it cannot name its own source
@@ -59,7 +64,7 @@ impl DeviceBanner {
             return Self::default();
         }
         let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-        // `READY INK1 <w>x<h> <payload> <build> <board> [MISMATCH]`. What the
+        // `READY INK1 <w>x<h> <payload> <build> <board> <id> [MISMATCH]`. What the
         // firmware can draw is read from the geometry rather than from the
         // name, because the geometry is what every frame must match.
         let panel = tokens.get(2).and_then(|token| parse_dimensions(token));
@@ -75,15 +80,27 @@ impl DeviceBanner {
             // Firmware old enough to omit the board name is firmware from
             // before there was a second board, so what it draws is what it is.
             .or(panel);
+        // Scanned rather than read at a fixed index. Firmware that reports a
+        // board id pushes MISMATCH one place to the right, and firmware that
+        // predates the id does not; a positional read would silently stop
+        // seeing the mismatch on exactly the boards that report it.
         let mismatch = tokens
+            .iter()
+            .skip(5)
+            .any(|token| token.eq_ignore_ascii_case("MISMATCH"));
+        let board_id = tokens
             .get(6)
-            .is_some_and(|token| token.eq_ignore_ascii_case("MISMATCH"));
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .filter(|value| !value.eq_ignore_ascii_case("MISMATCH"))
+            .map(str::to_owned);
         Self {
             saw_ready: true,
             panel,
             board,
             mismatch,
             build,
+            board_id,
         }
     }
 }
@@ -110,6 +127,27 @@ mod tests {
 
     /// A build on the wrong board draws nothing and says which board it is on,
     /// which is the whole of what the app needs to put that right.
+    #[test]
+    fn a_banner_names_the_individual_board() {
+        let banner = DeviceBanner::parse("READY INK1 296x128 4736 9f3c2ab E290 26B4");
+        assert_eq!(banner.board_id.as_deref(), Some("26B4"));
+        assert!(!banner.mismatch);
+    }
+
+    #[test]
+    fn a_mismatch_is_still_seen_when_an_id_precedes_it() {
+        let banner = DeviceBanner::parse("READY INK1 0x0 0 9f3c2ab E290 26B4 MISMATCH");
+        assert!(banner.mismatch);
+        assert_eq!(banner.board_id.as_deref(), Some("26B4"));
+    }
+
+    #[test]
+    fn firmware_without_an_id_reports_none_rather_than_mismatch_text() {
+        let banner = DeviceBanner::parse("READY INK1 0x0 0 9f3c2ab E290 MISMATCH");
+        assert!(banner.mismatch);
+        assert_eq!(banner.board_id, None);
+    }
+
     #[test]
     fn a_mismatched_build_names_the_board_it_landed_on() {
         let banner = DeviceBanner::parse("READY INK1 0x0 0 9f3c2ab E290 MISMATCH");

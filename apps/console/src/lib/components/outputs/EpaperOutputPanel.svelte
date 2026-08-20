@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { invoke } from '@tauri-apps/api/core';
   import {
-    Activity,
     Bluetooth,
     BluetoothConnected,
     BluetoothSearching,
@@ -9,10 +9,8 @@
     Check,
     CircleDotDashed,
     MonitorUp,
-    Power,
     RefreshCw,
     Send,
-    ShieldAlert,
     Unplug,
     Usb
   } from '@lucide/svelte';
@@ -31,7 +29,8 @@
     type AppPreferences,
     type DisplayConnectionStatus,
     type DisplayDeviceCandidate,
-    type DisplaySettings
+    type DisplaySettings,
+    type FirmwareStatus
   } from '$lib/types';
 
   let { draft = $bindable() }: { draft: AppPreferences } = $props();
@@ -44,6 +43,8 @@
     detail: 'Checking the local transport…'
   });
   let deviceCandidates = $state<DisplayDeviceCandidate[]>([]);
+  let firmware = $state<FirmwareStatus | null>(null);
+  let reflashing = $state(false);
 
   const transports: Array<{
     id: DisplaySettings['transport'];
@@ -51,10 +52,10 @@
     detail: string;
     icon: typeof Cable;
   }> = [
-    { id: 'preview', label: 'Render only', detail: 'Render frames without opening hardware.', icon: MonitorUp },
-    { id: 'auto', label: 'Automatic', detail: 'Use a device you explicitly scan for and select.', icon: Cable },
-    { id: 'usb', label: 'USB only', detail: 'Native serial with INK1 acknowledgement.', icon: Usb },
-    { id: 'ble', label: 'Bluetooth only', detail: 'Direct in-app GATT connection.', icon: Bluetooth }
+    { id: 'preview', label: 'No panel', detail: 'Draw frames on screen only. Nothing is sent to hardware.', icon: MonitorUp },
+    { id: 'auto', label: 'Whichever works', detail: 'Use the panel you picked, over USB or Bluetooth.', icon: Cable },
+    { id: 'usb', label: 'USB cable', detail: 'Only talk to the panel over the cable.', icon: Usb },
+    { id: 'ble', label: 'Bluetooth', detail: 'Only talk to the panel over Bluetooth.', icon: Bluetooth }
   ];
 
   // Whatever board answered. Nothing here asks which one it is, and nothing
@@ -62,6 +63,17 @@
   const panel = $derived(deviceStatus.panel ?? 'e213');
   const geometry = $derived(PANEL_GEOMETRY[panel]);
   const detected = $derived(Boolean(deviceStatus.panel));
+
+  // The board reports which panel it is, but not which revision of that panel
+  // it carries -- same controller, same wiring, nothing to read back. So when a
+  // board has more than one build, the only way to settle it is to write one
+  // and look at the screen. That makes "write the other one" a permanent
+  // control here, not a prompt that disappears once the flash succeeds.
+  const otherBuild = $derived(
+    firmware?.variants.find(
+      (variant) => variant.panel === panel && variant.id !== firmware?.recommendedVariantId
+    ) ?? null
+  );
 
   const epaperOutput = $derived($snapshot?.outputs.find((output) => output.id === 'epaper'));
   const settingsDirty = $derived(
@@ -84,7 +96,18 @@
         }
       }
     };
+    const refreshFirmware = async () => {
+      try {
+        const status = await invoke<FirmwareStatus>('get_firmware_status');
+        if (!disposed) firmware = status;
+      } catch {
+        // No Tauri bridge, or no bundled firmware: the reflash control simply
+        // does not appear rather than showing an error nobody can act on.
+        if (!disposed) firmware = null;
+      }
+    };
     void refresh();
+    void refreshFirmware();
     const timer = window.setInterval(() => void refresh(), 5_000);
     return () => {
       disposed = true;
@@ -110,7 +133,7 @@
     try {
       deviceCandidates = await scanDisplayDevices();
       if (!deviceCandidates.length) {
-        notice.set({ ok: false, message: 'No panel transport was discovered. Wake the board, allow Bluetooth, or connect USB and scan again.' });
+        notice.set({ ok: false, message: 'No panel found. Switch the board on, allow Bluetooth, or plug in the USB cable and look again.' });
       }
     } catch (error) {
       notice.set({ ok: false, message: error instanceof Error ? error.message : 'Device scan failed.' });
@@ -153,6 +176,20 @@
     }
   }
 
+  async function flashOtherBuild() {
+    if (!firmware?.port || !otherBuild) return;
+    reflashing = true;
+    try {
+      await invoke('flash_firmware', { variantId: otherBuild.id, port: firmware.port });
+      firmware = await invoke<FirmwareStatus>('get_firmware_status');
+      notice.set({ ok: true, message: `Wrote ${otherBuild.label}. Look at the panel: if it is still blank or scrambled, write the other one back.` });
+    } catch (error) {
+      notice.set({ ok: false, message: error instanceof Error ? error.message : 'The panel build could not be written.' });
+    } finally {
+      reflashing = false;
+    }
+  }
+
   async function disconnectDevice() {
     deviceBusy = 'disconnect';
     try {
@@ -187,7 +224,7 @@
   <div class="epaper-work">
     <div class="transport-work">
       <fieldset>
-        <legend>Connection strategy</legend>
+        <legend>How to connect</legend>
         <div class="transport-register">
           {#each transports as transport}
             {@const TransportIcon = transport.icon}
@@ -212,7 +249,6 @@
             {/if}
           </div>
           <div>
-            <span>Live device circuit</span>
             <h3 id="device-setup-heading">
               {deviceStatus.state === 'connected'
                 ? `${deviceStatus.transport === 'ble' ? 'Bluetooth LE' : 'USB'} connected`
@@ -221,8 +257,8 @@
                   : deviceStatus.state === 'unavailable'
                     ? 'Transport unavailable'
                     : deviceStatus.state === 'error'
-                      ? 'Connection needs attention'
-                      : 'Ready to discover'}
+                      ? "Can't reach the panel"
+                      : 'Not connected'}
             </h3>
             <p>{deviceStatus.detail}</p>
           </div>
@@ -236,27 +272,21 @@
           {/if}
         </header>
 
-        <ol class="pairing-steps">
-          <li><span>01</span><Power size={20} strokeWidth={1.45} aria-hidden="true" /><div><strong>Power the board</strong><small>It should show <code>READY / USB + BLE</code>.</small></div></li>
-          <li class:complete={deviceCandidates.length > 0 || deviceStatus.state === 'connected'}>
-            <span>02</span><BluetoothSearching size={20} strokeWidth={1.45} aria-hidden="true" />
-            <div><strong>Discover a route</strong><small>Choose and save a hardware mode, then scan.</small></div>
-            <button class="scan-action" onclick={scanDevices} disabled={deviceBusy !== null || draft.display.transport === 'preview' || settingsDirty}>
-              <RefreshCw size={16} class={deviceBusy === 'scan' ? 'spinning' : undefined} aria-hidden="true" />
-              {deviceBusy === 'scan' ? 'Scanning' : settingsDirty ? 'Save settings first' : 'Scan nearby'}
-            </button>
-          </li>
-          <li class:complete={deviceStatus.state === 'connected' && Boolean(deviceStatus.lastAckAt)}><span>03</span><Activity size={20} strokeWidth={1.45} aria-hidden="true" /><div><strong>Prove the screen</strong><small>Only an <code>ACK INK1</code> marks the route healthy.</small></div></li>
-        </ol>
+        <div class="find-panel">
+          <p>Plug the panel in or switch it on, then look for it. Each board shows its own four-character code on screen, so you can tell two of them apart.</p>
+          <button class="scan-action" onclick={scanDevices} disabled={deviceBusy !== null || draft.display.transport === 'preview' || settingsDirty}>
+            <RefreshCw size={16} class={deviceBusy === 'scan' ? 'spinning' : undefined} aria-hidden="true" />
+            {deviceBusy === 'scan' ? 'Looking' : settingsDirty ? 'Save your changes first' : 'Find my panel'}
+          </button>
+        </div>
 
-        <aside class="ble-boundary" aria-labelledby="ble-boundary-heading">
-          <ShieldAlert size={22} strokeWidth={1.45} aria-hidden="true" />
-          <div><h4 id="ble-boundary-heading">Bluetooth frame writes are not authenticated</h4><p>INK1 does not authenticate GATT clients. <code>ACK INK1</code> confirms a complete frame; it does not prove who sent it.</p></div>
-        </aside>
 
         {#if deviceCandidates.length}
           <div class="device-candidates" aria-label="Discovered display devices">
-            <header><span>Discovered now</span><strong>{deviceCandidates.length.toString().padStart(2, '0')}</strong></header>
+            <header>
+              <span>Panels found — match the code on the screen</span>
+              <strong>{deviceCandidates.length.toString().padStart(2, '0')}</strong>
+            </header>
             {#each deviceCandidates as device (device.id)}
               <article>
                 <div class="candidate-transport">{#if device.transport === 'ble'}<Bluetooth size={20} strokeWidth={1.45} aria-hidden="true" />{:else}<Usb size={20} strokeWidth={1.45} aria-hidden="true" />{/if}<span>{device.transport === 'ble' ? 'BLE' : 'USB'}</span></div>
@@ -267,19 +297,12 @@
           </div>
         {/if}
 
-        <details class="advanced-transport">
-          <summary>Advanced transport selectors</summary>
-          <div class="connection-fields">
-            <label class="field"><span>USB serial port</span><input bind:value={draft.display.serialPort} placeholder="auto" maxlength="180" disabled={draft.display.transport === 'ble' || draft.display.transport === 'preview'} /><small class="field-note">Use <code>auto</code> to discover the Espressif interface.</small></label>
-            <label class="field"><span>Bluetooth device name</span><input bind:value={draft.display.bleName} maxlength="64" disabled={draft.display.transport === 'usb' || draft.display.transport === 'preview'} /><small class="field-note">Any board advertising the INK1 service is found whatever it is named; this only pins discovery to one of them.</small></label>
-          </div>
-        </details>
       </section>
 
       <div class="timing-register">
-        <label class="field"><span>Routine dwell</span><input type="number" min="10" max="180" bind:value={draft.display.dwellSeconds} /><small class="field-note">Seconds per normal frame.</small></label>
-        <label class="field"><span>Return home after</span><input type="number" min="1" max="20" bind:value={draft.display.returnHomeAfter} /><small class="field-note">Routine frames before home.</small></label>
-        <label class="field"><span>Full refresh cadence</span><input type="number" min="1" max="100" bind:value={draft.display.fullRefreshEvery} /><small class="field-note">Frames between ghost-clearing refreshes.</small></label>
+        <label class="field"><span>Seconds per frame</span><input type="number" min="10" max="180" bind:value={draft.display.dwellSeconds} /><small class="field-note">How long each frame stays up.</small></label>
+        <label class="field"><span>Frames before home</span><input type="number" min="1" max="20" bind:value={draft.display.returnHomeAfter} /><small class="field-note">How many frames before it returns to the bridge.</small></label>
+        <label class="field"><span>Full refresh every</span><input type="number" min="1" max="100" bind:value={draft.display.fullRefreshEvery} /><small class="field-note">Frames between full wipes that clear ghosting.</small></label>
       </div>
 
       <!-- Which way up the board is screwed down. The preview stays upright
@@ -288,7 +311,7 @@
       <fieldset class="orientation">
         <legend>Which way up</legend>
         <div role="radiogroup" aria-label="Panel orientation">
-          {#each [{ id: 'upright', label: 'Upright', hint: 'Cable on the left' }, { id: 'inverted', label: 'Inverted', hint: 'Cable on the right' }] as option (option.id)}
+          {#each [{ id: 'upright', label: 'Upright' }, { id: 'inverted', label: 'Upside down' }] as option (option.id)}
             <button
               type="button"
               role="radio"
@@ -297,16 +320,27 @@
               onclick={() => (draft.display.orientation = option.id as 'upright' | 'inverted')}
             >
               <b>{option.label}</b>
-              <span>{option.hint}</span>
             </button>
           {/each}
         </div>
-        <small class="field-note">Turn the frame over when the board is mounted the other way round. The panel is bonded to the board, so this is the only rotation it can sit at.</small>
+        <small class="field-note">Pick whichever matches the panel in front of you.</small>
       </fieldset>
 
+      {#if otherBuild}
+        <div class="panel-rescue">
+          <div>
+            <strong>Screen blank or scrambled?</strong>
+            <span>Two versions of this panel exist and the board cannot tell them apart. Write the other one and look at the screen again.</span>
+          </div>
+          <button class="secondary-action" onclick={flashOtherBuild} disabled={reflashing || !firmware?.port}>
+            {reflashing ? 'Writing…' : `Write ${otherBuild.label}`}
+          </button>
+        </div>
+      {/if}
+
       <div class="test-line">
-        <div><strong>{deviceStatus.state === 'connected' ? 'Ready for a physical proof' : (epaperOutput?.detail ?? 'No device report')}</strong><span>A test succeeds only after the board acknowledges the complete frame.</span></div>
-        <button class="secondary-action action-with-icon" onclick={sendFrame} disabled={displayBusy || deviceStatus.state !== 'connected' || settingsDirty}><Send size={16} aria-hidden="true" /> {displayBusy ? 'Sending frame' : 'Send current frame'}</button>
+        <div><strong>{deviceStatus.state === 'connected' ? 'Connected and ready to test' : (epaperOutput?.detail ?? 'No panel connected')}</strong><span>The test passes only once the panel confirms it got the whole frame.</span></div>
+        <button class="secondary-action action-with-icon" onclick={sendFrame} disabled={displayBusy || deviceStatus.state !== 'connected' || settingsDirty}><Send size={16} aria-hidden="true" /> {displayBusy ? 'Sending' : 'Send a test frame'}</button>
       </div>
     </div>
 

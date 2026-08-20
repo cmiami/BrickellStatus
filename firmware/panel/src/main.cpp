@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#include <esp_mac.h>
 #include <heltec-eink-modules.h>
 
 #include <array>
@@ -87,6 +88,29 @@ const PanelWiring *attached = nullptr;
 bool driving = false;
 
 char bannerLine[96] = "READY";
+
+/// Four hex characters naming this particular board, and nothing else.
+///
+/// Every board running this firmware used to advertise the same Bluetooth name,
+/// because the name was built from the panel model alone. Two boards on one
+/// desk were then indistinguishable in a picker, and pinning a connection to a
+/// name could not pick between them.
+///
+/// The last two octets of the factory MAC settle it. They are unique per board,
+/// they survive a reflash -- which a random suffix would not, and reflashing is
+/// exactly what someone does while working out which panel revision they have
+/// -- and the host already reads this MAC while flashing, so it can work out
+/// the same four characters without asking the board for them.
+char boardId[5] = "0000";
+
+void composeBoardId() {
+  uint8_t mac[6] = {0};
+  // The factory MAC, read straight from efuse. This starts no radio: the board
+  // brings up neither Wi-Fi nor LoRa, and reading the address does not change
+  // that.
+  if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) return;
+  snprintf(boardId, sizeof(boardId), "%02X%02X", mac[4], mac[5]);
+}
 
 BaseDisplay *makeDisplay() {
 #if defined(Vision_Master_E290)
@@ -279,8 +303,8 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
 void setupBle() {
 #if BRICKELLSTATUS_ENABLE_BLE
   char name[32];
-  snprintf(name, sizeof(name), "InkDock %s",
-           attached != nullptr ? attached->name : kBuiltFor.name);
+  snprintf(name, sizeof(name), "InkDock %s %s",
+           attached != nullptr ? attached->name : kBuiltFor.name, boardId);
   NimBLEDevice::init(name);
   NimBLEDevice::setPower(ESP_PWR_LVL_P3);
   NimBLEServer *server = NimBLEDevice::createServer();
@@ -315,10 +339,15 @@ void drawWaitingScreen() {
   display->setTextSize(1);
   display->setCursor(15, 53);
   display->print("READY / USB + BLE");
+  // The board's own name, on the board. This is the only place the two things
+  // nothing else can settle are both answered at once: reading it at all proves
+  // this build drives this panel revision, and what it says is the entry to
+  // pick out of a list of otherwise identical boards.
   display->setCursor(15, 72);
-  char geometry[32];
-  snprintf(geometry, sizeof(geometry), "INK1 / %u x %u", kWidth, kHeight);
-  display->print(geometry);
+  char identity[32];
+  snprintf(identity, sizeof(identity), "BOARD %s / %u x %u", boardId, kWidth,
+           kHeight);
+  display->print(identity);
   display->setCursor(15, 91);
   display->print("NO WI-FI / NO LORA");
   display->update();
@@ -337,12 +366,13 @@ void composeBanner() {
   // what the firmware is about to drive, and what the app should keep writing.
   const char *board = attached != nullptr ? attached->name : kBuiltFor.name;
   if (driving) {
-    snprintf(bannerLine, sizeof(bannerLine), "READY INK1 %ux%u %u %s %s",
+    snprintf(bannerLine, sizeof(bannerLine), "READY INK1 %ux%u %u %s %s %s",
              kWidth, kHeight, static_cast<unsigned>(kPayloadSize),
-             BRICKELLSTATUS_BUILD_ID, board);
+             BRICKELLSTATUS_BUILD_ID, board, boardId);
   } else {
-    snprintf(bannerLine, sizeof(bannerLine), "READY INK1 0x0 0 %s %s MISMATCH",
-             BRICKELLSTATUS_BUILD_ID, board);
+    snprintf(bannerLine, sizeof(bannerLine),
+             "READY INK1 0x0 0 %s %s %s MISMATCH", BRICKELLSTATUS_BUILD_ID,
+             board, boardId);
   }
 }
 
@@ -381,6 +411,7 @@ void setup() {
   Serial.begin(115200);
   Serial.setTimeout(50);
 
+  composeBoardId();
   attached = probePanel();
   // Only a positive identification of the *other* board stops this build from
   // driving. A probe that could not tell falls back to the board this image was
