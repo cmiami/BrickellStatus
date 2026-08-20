@@ -98,7 +98,7 @@ quarantine attribute globally.
 After that explicit first launch, the app opens normally for that user.
 
 Closing the main window hides it; it does not stop collection, prediction,
-delivery, or E213 rotation. Use the BrickellStatus menu-bar item to see the
+delivery, or panel rotation. Use the BrickellStatus menu-bar item to see the
 current USB/BLE state and choose **Open BrickellStatus** or **Quit
 BrickellStatus**. Only the explicit Quit action stops the background runtime.
 

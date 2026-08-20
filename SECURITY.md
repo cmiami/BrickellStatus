@@ -47,7 +47,7 @@ on operating-system account and disk protection for that database; it does not
 provide application-level database encryption. Treat a copied database as
 sensitive even when API secrets have been removed.
 
-## E213 Bluetooth boundary
+## Panel Bluetooth boundary
 
 The desktop opens an application-level GATT connection to the public INK1
 service. It does not create or require an operating-system pairing or bonded
@@ -59,7 +59,7 @@ a complete frame arrived; they do not authenticate the sender.
 The connected indicator therefore means that this app holds a working GATT
 session, not that the display is a trusted endpoint. Even when the app selects
 USB, a powered board continues advertising BLE. Treat displayed content as
-spoofable and do not use the E213 as the sole authority for a safety or security
+spoofable and do not use the panel as the sole authority for a safety or security
 decision.
 
 ## High-value security boundaries

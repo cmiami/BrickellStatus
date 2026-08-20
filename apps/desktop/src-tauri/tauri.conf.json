@@ -55,7 +55,7 @@
     "copyright": "Copyright \u00a9 2026 BrickellStatus contributors",
     "category": "Utility",
     "shortDescription": "A configurable personal signal console.",
-    "longDescription": "BrickellStatus monitors user-selected signals, predicts Brickell Avenue Bridge openings, and routes trusted updates to desktop, WhatsApp, and a Heltec E213 display.",
+    "longDescription": "BrickellStatus monitors user-selected signals, predicts Brickell Avenue Bridge openings, and routes trusted updates to desktop, WhatsApp, and a Heltec E213 or E290 e-paper display.",
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper",
