@@ -206,7 +206,7 @@ fn draw_state_band(frame: &mut MonoFrame, snapshot: &LiveSnapshot) {
 
 /// The countdown, which is the whole reason a prediction beats a camera.
 fn draw_timing(frame: &mut MonoFrame, snapshot: &LiveSnapshot) {
-    let predictive = matches!(snapshot.state, SnapshotState::Watch | SnapshotState::Likely);
+    let predictive = matches!(snapshot.state, SnapshotState::Likely);
     let headline = match (predictive, snapshot.eta) {
         // A range is the honest form: the river runs between three and six
         // knots and the vessel class is rarely known.
@@ -394,15 +394,14 @@ fn draw_rail(frame: &mut MonoFrame, snapshot: &LiveSnapshot, config: &RenderConf
 }
 
 /// Rungs on the bridge ladder, one per state.
-const STATE_SLOTS: usize = 5;
+const STATE_SLOTS: usize = 4;
 
 const fn state_slot(state: SnapshotState) -> usize {
     match state {
         SnapshotState::Likely => 0,
         SnapshotState::Open => 1,
-        SnapshotState::Watch => 2,
-        SnapshotState::Clear => 3,
-        SnapshotState::Offline => 4,
+        SnapshotState::Clear => 2,
+        SnapshotState::Offline => 3,
     }
 }
 
@@ -428,7 +427,6 @@ mod tests {
     fn every_state_renders_nonempty_physical_frame() {
         for state in [
             SnapshotState::Clear,
-            SnapshotState::Watch,
             SnapshotState::Likely,
             SnapshotState::Open,
             SnapshotState::Offline,

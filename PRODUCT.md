@@ -21,7 +21,7 @@ This is a user-programmable signal instrument, not a feed firehose or binary bri
 ## Operating Context
 
 - Users check status shortly before or during a drive and may only have a few seconds to read it.
-- Meaningful stages are Clear, Watch, Likely, and Open. Predictive confidence distinguishes High from Very High without inventing an unobserved intermediate state.
+- Meaningful stages are Clear, Likely, and Open. There is deliberately no middle "something might happen" stage: it fired on evidence too weak to act on, which is what teaches a reader to stop believing the channel. Either the evidence supports saying an opening is likely, or the instrument stays quiet and shows the context without raising urgency. Predictive confidence distinguishes High from Very High without inventing an unobserved intermediate state.
 - Legal opening windows are context and a confidence modifier, never proof that an opening will occur.
 - AISStream vessel movement and upstream bridge progression are predictive signals; FL511 or equivalent controller status is ground truth.
 - WhatsApp is the preferred message channel. USB and Bluetooth are the desired display transports.

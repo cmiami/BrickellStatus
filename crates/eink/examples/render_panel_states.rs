@@ -139,15 +139,6 @@ fn render_panel(panel: PanelModel, out: &std::path::Path) {
                 bridge(panel, SnapshotState::Clear, None, false),
             ),
             (
-                "watch + eta range".into(),
-                bridge(
-                    panel,
-                    SnapshotState::Watch,
-                    Some(EtaRange::new(6, 9)),
-                    false,
-                ),
-            ),
-            (
                 "likely + eta range".into(),
                 bridge(
                     panel,
@@ -180,15 +171,6 @@ fn render_panel(panel: PanelModel, out: &std::path::Path) {
             (
                 "clear + stale".into(),
                 bridge(panel, SnapshotState::Clear, None, true),
-            ),
-            (
-                "watch + stale".into(),
-                bridge(
-                    panel,
-                    SnapshotState::Watch,
-                    Some(EtaRange::new(11, 18)),
-                    true,
-                ),
             ),
         ],
         out.join(format!("panel-states-bridge-{label}.png")),

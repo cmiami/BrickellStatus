@@ -1531,7 +1531,6 @@ const fn notice_state_key(state: NoticeState) -> &'static str {
         NoticeState::Alert => "alert",
         NoticeState::Resolved => "resolved",
         NoticeState::Clear => "clear",
-        NoticeState::Watch => "watch",
         NoticeState::Likely => "likely",
         NoticeState::Open => "open",
         NoticeState::AllClear => "all_clear",

@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 pub enum BridgeState {
     #[default]
     Clear,
-    Watch,
     Likely,
     Open,
 }

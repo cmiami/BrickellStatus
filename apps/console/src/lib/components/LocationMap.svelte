@@ -70,6 +70,14 @@
     const element = document.createElement('button');
     element.type = 'button';
     element.className = `location-map-pin location-map-pin--${point.kind ?? 'saved'}`;
+    // Also inline, not only in the stylesheet. MapLibre measures this element to
+    // work out how far to shift it for the requested anchor, and it measures at
+    // the moment the marker is added. An element measured before its CSS applies
+    // measures 0x0, so the anchor shift is zero and every mark sits a fixed
+    // number of screen pixels from its coordinate -- which does not look like a
+    // constant offset, it looks like the marks sliding around as you zoom.
+    element.style.width = '34px';
+    element.style.height = '34px';
     if (point.enabled === false) element.classList.add('is-disabled');
     if (point.id === selectedId || point.id === candidate?.id) element.classList.add('is-selected');
     element.setAttribute('aria-label', `${point.label}. Select location.`);
@@ -352,16 +360,6 @@
 <div class:compact={variant === 'compact'} class="location-map-shell">
   <div bind:this={mapHost} class="location-map" role="application" aria-label={ariaLabel}></div>
 
-  <div class="map-registration" aria-hidden="true">
-    <span><Globe2 size={15} strokeWidth={1.6} /> Global coverage</span>
-    <strong>{activePoint?.label ?? 'Drag anywhere on Earth'}</strong>
-    <small>
-      {activePoint
-        ? `${activePoint.latitude.toFixed(4)} · ${activePoint.longitude.toFixed(4)}`
-        : 'Search, pan, zoom, then click to set a precise point'}
-    </small>
-  </div>
-
   {#if radar}
     <button
       type="button"
@@ -443,7 +441,6 @@
     content: '';
   }
 
-  .map-registration,
   .map-instruction,
   .map-corridor-key,
   .map-radar-toggle,
@@ -524,43 +521,9 @@
     opacity: 0.72;
   }
 
-  .map-registration {
-    top: 22px;
-    left: 22px;
-    display: grid;
-    width: min(330px, calc(100% - 96px));
-    gap: 5px;
-    padding: 15px 17px 16px;
-    color: var(--white);
-    background: var(--marine);
-    border: 1px solid var(--nav-subdued);
-    box-shadow: var(--strip-shadow);
-  }
 
-  .map-registration > span {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    color: var(--nav-muted);
-    font-family: var(--font-instrument);
-    font-size: var(--type-micro);
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
 
-  .map-registration strong {
-    overflow-wrap: anywhere;
-    font-family: var(--font-instrument);
-    font-size: var(--type-title);
-    line-height: 1;
-    text-transform: uppercase;
-  }
 
-  .map-registration small {
-    color: var(--nav-muted);
-    font-size: var(--type-caption);
-  }
 
   .map-instruction {
     right: 15px;
@@ -772,11 +735,6 @@
       min-height: 440px;
     }
 
-    .map-registration {
-      top: 14px;
-      left: 14px;
-      width: calc(100% - 76px);
-    }
 
     .map-corridor-key {
       top: 118px;

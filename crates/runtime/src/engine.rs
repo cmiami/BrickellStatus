@@ -562,6 +562,12 @@ impl RuntimeEngine {
 
         let mut preferences = self.preferences.read().await.clone();
         preferences.ais.api_key_configured = configured;
+        // The key decides here too, not only in the startup reconcile above.
+        // Setting the configured flag alone left a freshly saved key switched
+        // off until the next launch -- and deleting a key parks `enabled`, so
+        // replacing one landed exactly there: a stored key, a disabled source,
+        // and a mutation reporting that the live source was armed.
+        preferences.ais.enabled = configured;
         validate_preferences(&preferences)?;
         let registrations = self.factory.build(&preferences)?;
         let active_sources = active_source_map(&registrations)?;
@@ -2111,7 +2117,6 @@ fn availability_dto(value: AvailabilityStatus) -> AvailabilityDto {
 fn bridge_state_dto(value: brickellstatus_model::BridgeState) -> BridgeStateDto {
     match value {
         brickellstatus_model::BridgeState::Clear => BridgeStateDto::Clear,
-        brickellstatus_model::BridgeState::Watch => BridgeStateDto::Possible,
         brickellstatus_model::BridgeState::Likely => BridgeStateDto::Likely,
         brickellstatus_model::BridgeState::Open => BridgeStateDto::Open,
     }
@@ -2160,17 +2165,6 @@ fn bridge_interval_dto(
 fn decision_copy(state: BridgeStateDto) -> (&'static str, &'static str, &'static str) {
     match state {
         BridgeStateDto::Clear => ("Road open", "No opening expected.", "Traffic is moving."),
-        // Not "Watch". A driver cannot act on a request to watch, and a state
-        // whose own advice was "Nothing to do yet" spent the largest type on
-        // the page saying nothing. For the person deciding whether to drive,
-        // this state and Clear have the same answer — the road is open — so it
-        // says so, and spends its detail on the one thing that differs: there
-        // is traffic on the river that has not yet earned a prediction.
-        BridgeStateDto::Possible => (
-            "Road open",
-            "Vessels on the river, no opening predicted.",
-            "Traffic is moving.",
-        ),
         // Status, not advice. Whether another route exists, and whether it is
         // worth taking, is something the driver knows and this app does not.
         BridgeStateDto::Likely => (

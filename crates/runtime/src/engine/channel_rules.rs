@@ -16,7 +16,7 @@ fn channel_urgency(
         ChannelKindDto::Bridge => match decision.state {
             BridgeStateDto::Open => UrgencyDto::Emergency,
             BridgeStateDto::Likely => UrgencyDto::HeadsUp,
-            BridgeStateDto::Clear | BridgeStateDto::Possible => UrgencyDto::Routine,
+            BridgeStateDto::Clear => UrgencyDto::Routine,
         },
         ChannelKindDto::Official => match severity.as_deref() {
             Some("extreme") => UrgencyDto::Emergency,

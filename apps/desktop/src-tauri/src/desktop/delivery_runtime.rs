@@ -890,7 +890,6 @@ fn delivery_request_for_channel(
     let state = if is_bridge {
         match snapshot.decision.state {
             BridgeStateDto::Clear => NoticeState::Clear,
-            BridgeStateDto::Possible => NoticeState::Watch,
             BridgeStateDto::Likely => NoticeState::Likely,
             BridgeStateDto::Open => NoticeState::Open,
         }

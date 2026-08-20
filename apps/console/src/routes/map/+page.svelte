@@ -29,11 +29,7 @@
 
   let draft = $state<AppPreferences | null>(null);
   let initialized = $state(false);
-  let query = $state('');
-  let results = $state<LocationSearchResult[]>([]);
-  let searching = $state(false);
   let locating = $state(false);
-  let searchError = $state<string | null>(null);
   let candidate = $state<AlertArea | null>(null);
   let candidateEditingId = $state<string | null>(null);
   let selectedAreaId = $state<string | null>(null);
@@ -179,8 +175,6 @@
     candidate = resultToArea(result, source);
     candidateEditingId = null;
     selectedAreaId = null;
-    results = [];
-    searchError = null;
   }
 
   function stagePinnedLocation(latitude: number, longitude: number) {
@@ -208,7 +202,6 @@
     candidate = { ...$state.snapshot(area), id: `candidate.${area.id}` };
     candidateEditingId = area.id;
     selectedAreaId = null;
-    searchError = null;
   }
 
   function discardCandidate() {
@@ -251,30 +244,11 @@
     }
     candidate = null;
     candidateEditingId = null;
-    searchError = null;
   }
 
-  async function search() {
-    const value = query.trim();
-    if (value.length < 2) {
-      searchError = 'Enter at least two characters or a postal code.';
-      return;
-    }
-    searching = true;
-    searchError = null;
-    try {
-      results = await searchLocations(value);
-      if (!results.length) searchError = `No locations matched “${value}”. Try a city plus state or country.`;
-    } catch (error) {
-      searchError = error instanceof Error ? error.message : 'Location search failed.';
-    } finally {
-      searching = false;
-    }
-  }
 
   async function useDeviceLocation() {
     locating = true;
-    searchError = null;
     try {
       const position = await getDeviceLocation();
       stageResult(
@@ -296,7 +270,7 @@
           : error instanceof Error
             ? error.message
             : 'This computer could not provide a location.';
-      searchError = message;
+      notice.set({ ok: false, message });
     } finally {
       locating = false;
     }
@@ -343,75 +317,6 @@
 
   {#if draft}
     <div class="map-workbench">
-      <aside class="area-finder" aria-labelledby="finder-heading">
-        <header>
-          <p>Area finder</p>
-          <h2 id="finder-heading">Find your horizon</h2>
-          <span>{activeAreaCount} active {activeAreaCount === 1 ? 'area' : 'areas'} · local profile</span>
-        </header>
-
-        <form onsubmit={(event) => { event.preventDefault(); void search(); }}>
-          <label for="area-search">City, region, or postal code</label>
-          <div class="search-control">
-            <Search size={18} strokeWidth={1.5} aria-hidden="true" />
-            <input
-              id="area-search"
-              bind:value={query}
-              maxlength="160"
-              autocomplete="postal-code"
-              placeholder="Miami, FL or Tokyo"
-            />
-            <button type="submit" disabled={searching}>{searching ? 'Finding' : 'Search'}</button>
-          </div>
-        </form>
-
-        {#if results.length}
-          <div class="search-results" aria-label="Location search results">
-            <p>Select a result, then tune its pin</p>
-            {#each results as result (result.id)}
-              <button onclick={() => stageResult(result)}>
-                <MapPinned size={18} strokeWidth={1.5} aria-hidden="true" />
-                <span>
-                  <strong>{result.label}</strong>
-                  <small>{result.adminArea ?? result.countryCode ?? result.timeZone}</small>
-                </span>
-                <Crosshair size={17} aria-hidden="true" />
-              </button>
-            {/each}
-          </div>
-        {/if}
-
-        <button class="location-action" onclick={useDeviceLocation} disabled={locating}>
-          <LocateFixed size={20} strokeWidth={1.5} aria-hidden="true" />
-          <span>
-            <strong>{locating ? 'Asking this computer' : 'Locate this computer once'}</strong>
-            <small>Uses the OS permission prompt. No passive or background tracking.</small>
-          </span>
-        </button>
-
-        <div class="finder-note">
-          <Crosshair size={19} strokeWidth={1.5} aria-hidden="true" />
-          <p><strong>Freehand works too.</strong> Click anywhere on the map to drop a pin and name it.</p>
-        </div>
-
-        {#if searchError}
-          <p class="finder-error" role="alert">{searchError}</p>
-        {/if}
-
-        <p class="attribution">Search by Open-Meteo geocoding. Interactive map by MapLibre and OpenFreeMap.</p>
-        <aside class="network-disclosure" aria-label="Location network disclosure">
-          <Network size={17} strokeWidth={1.5} aria-hidden="true" />
-          <div>
-            <strong>What leaves this computer</strong>
-            <p>
-              Search text goes to Open-Meteo geocoding; the visible map requests OpenFreeMap tiles. After you save,
-              enabled weather sends this point to Open-Meteo and enabled U.S. official alerts send it to NWS.
-              Turning either area gate off stops that collector. There is no passive location tracking.
-            </p>
-          </div>
-        </aside>
-      </aside>
-
       {#if candidate}
         <PinModal
           area={candidate}
@@ -481,11 +386,13 @@
     <section class="area-roster" aria-labelledby="roster-heading">
       <header class="roster-heading">
         <div>
-          <p class="registration-label">Saved geography</p>
-          <h2 id="roster-heading">Area roster</h2>
-          <span>Each row decides which location-aware modules may run.</span>
+          <h2 id="roster-heading">Places you watch</h2>
+          <span>Click anywhere on the map to add one. Each place decides what gets collected for it.</span>
         </div>
-        <strong>{draft.areas.length.toString().padStart(2, '0')}</strong>
+        <button class="location-action" onclick={useDeviceLocation} disabled={locating}>
+          <LocateFixed size={18} strokeWidth={1.5} aria-hidden="true" />
+          {locating ? 'Asking this computer' : 'Use where I am'}
+        </button>
       </header>
 
       {#if draft.areas.length}
@@ -503,8 +410,8 @@
               <div class="area-switches">
                 <SwitchField
                   checked={area.enabled}
-                  label="Area active"
-                  description="Master switch; stops all area collectors when off."
+                  label="Watch this place"
+                  description="Off means nothing is collected for this place."
                   onchange={(enabled) => { area.enabled = enabled; updateArea(area); }}
                 />
                 <SwitchField
@@ -625,100 +532,7 @@
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
     border-block: 1px solid var(--marine);
-  }
-
-  .area-finder {
-    position: relative;
-    z-index: 3;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-content: start;
-    gap: 20px;
-    padding: clamp(23px, 2.6vw, 38px);
-    color: var(--white);
-    background: var(--marine);
-    border-bottom: 1px solid var(--marine);
-  }
-
-  .area-finder > header,
-  .area-finder > .search-results,
-  .area-finder > .finder-note,
-  .area-finder > .finder-error,
-  .area-finder > .attribution,
-  .area-finder > .network-disclosure {
-    grid-column: 1 / -1;
-  }
-
-  .area-finder > header {
-    padding-bottom: 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.28);
-  }
-
-  .area-finder header > p,
-  .area-finder form > label {
-    margin: 0;
-    color: var(--nav-muted);
-    font-family: var(--font-instrument);
-    font-size: var(--type-label);
-    font-weight: 600;
-    letter-spacing: 0.07em;
-    text-transform: uppercase;
-  }
-
-  .area-finder h2 {
-    margin: 5px 0 7px;
-    font-size: var(--type-section);
-    line-height: 0.95;
-    text-transform: uppercase;
-  }
-
-  .area-finder header > span,
-  .attribution {
-    color: var(--nav-muted);
-    font-size: var(--type-caption);
-  }
-
-  .area-finder form {
-    display: grid;
-    gap: 8px;
-  }
-
-  .search-control {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    align-items: center;
-    gap: 8px;
-    min-height: 48px;
-    color: var(--graphite);
-    background: var(--frost);
-    border: 1px solid var(--nav-muted);
-    padding-left: 12px;
-  }
-
-  .search-control input {
-    min-width: 0;
-    min-height: 46px;
-    color: var(--graphite);
-    background: transparent;
-    border: 0;
-    outline: 0;
-  }
-
-  .search-control button {
-    align-self: stretch;
-    color: var(--graphite);
-    background: var(--amber);
-    border-left: 1px solid var(--amber-ink);
-    padding: 0 14px;
-    font-family: var(--font-instrument);
-    font-size: var(--type-label);
-    font-weight: 700;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    cursor: pointer;
-  }
-
-  .location-action {
+  }  .location-action {
     display: grid;
     width: 100%;
     grid-template-columns: auto 1fr;
@@ -730,135 +544,7 @@
     padding: 14px 4px;
     text-align: left;
     cursor: pointer;
-  }
-
-  .location-action > span {
-    display: grid;
-    gap: 4px;
-  }
-
-  .location-action strong {
-    font-family: var(--font-instrument);
-    font-size: var(--type-title);
-    font-weight: 600;
-    text-transform: uppercase;
-  }
-
-  .location-action small {
-    color: var(--nav-muted);
-    font-size: var(--type-caption);
-    line-height: 1.4;
-  }
-
-  .search-results {
-    max-height: 255px;
-    overflow-y: auto;
-    border-top: 1px solid rgba(255, 255, 255, 0.28);
-  }
-
-  .search-results > p {
-    margin: 9px 0 3px;
-    color: var(--nav-muted);
-    font-size: var(--type-micro);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-  }
-
-  .search-results button {
-    display: grid;
-    width: 100%;
-    grid-template-columns: auto 1fr auto;
-    align-items: center;
-    gap: 10px;
-    color: var(--white);
-    background: transparent;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.23);
-    padding: 11px 3px;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .search-results button:hover {
-    color: var(--graphite);
-    background: var(--amber);
-  }
-
-  .search-results button > span {
-    display: grid;
-    min-width: 0;
-    gap: 2px;
-  }
-
-  .search-results strong {
-    overflow-wrap: anywhere;
-    font-family: var(--font-instrument);
-    font-size: var(--type-label);
-    text-transform: uppercase;
-  }
-
-  .search-results small {
-    color: inherit;
-    font-size: var(--type-micro);
-    opacity: 0.76;
-  }
-
-  .finder-note {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 10px;
-    color: var(--nav-muted);
-  }
-
-  .finder-note p,
-  .attribution {
-    margin: 0;
-    line-height: 1.45;
-  }
-
-  .finder-note strong {
-    color: var(--white);
-  }
-
-  .finder-note p {
-    font-size: var(--type-caption);
-  }
-
-  .finder-error {
-    margin: 0;
-    padding: 11px 12px;
-    color: var(--graphite);
-    background: var(--amber-sheet);
-    border: 1px solid var(--amber-ink);
-    font-size: var(--type-caption);
-    line-height: 1.4;
-  }
-
-  .network-disclosure {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 10px;
-    padding: 13px 0 0;
-    color: var(--nav-muted);
-    border-top: 1px solid rgba(255, 255, 255, 0.22);
-  }
-
-  .network-disclosure strong {
-    display: block;
-    margin-bottom: 4px;
-    color: var(--white);
-    font-family: var(--font-instrument);
-    font-size: var(--type-label);
-    letter-spacing: 0.055em;
-    text-transform: uppercase;
-  }
-
-  .network-disclosure p {
-    margin: 0;
-    font-size: var(--type-micro);
-    line-height: 1.5;
-  }
-
-  .area-roster {
+  }  .area-roster {
     margin-top: clamp(28px, 3vw, 46px);
     border-top: 1px solid var(--rule-strong);
   }
@@ -961,16 +647,7 @@
   .roster-heading div > span {
     color: var(--muted);
     font-size: var(--type-body-small);
-  }
-
-  .roster-heading > strong {
-    color: var(--marine);
-    font-family: var(--font-instrument);
-    font-size: var(--type-display-compact);
-    line-height: 0.72;
-  }
-
-  .area-row {
+  }  .area-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     border-bottom: 1px solid var(--rule-strong);
@@ -1122,23 +799,12 @@
     line-height: 1.5;
   }
 
-  @media (max-width: 1180px) {
-    .area-finder {
-      grid-template-columns: minmax(0, 1fr);
-    }
-
-    .area-finder > * {
-      grid-column: 1;
-    }
-  }
+  @media (max-width: 1180px) {  }
 
   @media (max-width: 1050px) {
     .map-workbench {
       grid-template-columns: 1fr;
-    }
-
-    .area-finder { border-right: 0; }
-  }
+    }  }
 
   @media (max-width: 860px) {
 

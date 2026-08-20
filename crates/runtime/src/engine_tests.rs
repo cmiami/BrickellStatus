@@ -1128,6 +1128,7 @@ async fn ais_secret_can_be_set_replaced_and_cleared_without_restart() {
         .await
         .unwrap();
     assert!(engine.get_preferences().await.ais.api_key_configured);
+    assert!(engine.get_preferences().await.ais.enabled);
     let armed = engine.get_aisstream_status().await.unwrap();
     assert_eq!(armed.connection_state, AisConnectionStateDto::Armed);
     assert!(armed.source_registered);
@@ -1146,6 +1147,7 @@ async fn ais_secret_can_be_set_replaced_and_cleared_without_restart() {
         .await
         .unwrap();
     assert!(engine.get_preferences().await.ais.api_key_configured);
+    assert!(engine.get_preferences().await.ais.enabled);
     assert!(
         !engine
             .state
@@ -1157,6 +1159,7 @@ async fn ais_secret_can_be_set_replaced_and_cleared_without_restart() {
 
     engine.set_aisstream_key(None).await.unwrap();
     assert!(!engine.get_preferences().await.ais.api_key_configured);
+    assert!(!engine.get_preferences().await.ais.enabled);
     let needs_key = engine.get_aisstream_status().await.unwrap();
     assert_eq!(needs_key.connection_state, AisConnectionStateDto::NeedsKey);
     assert!(!needs_key.source_registered);

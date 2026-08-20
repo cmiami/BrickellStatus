@@ -8,8 +8,6 @@ pub enum SnapshotState {
     /// No current evidence of a likely opening.
     #[default]
     Clear,
-    /// Some evidence exists, below the alert threshold.
-    Watch,
     /// Predictive evidence is strong enough to advise a route change.
     Likely,
     /// Controller evidence says the span is open.
@@ -23,7 +21,6 @@ impl SnapshotState {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Clear => "CLEAR",
-            Self::Watch => "WATCH",
             Self::Likely => "LIKELY",
             Self::Open => "BRIDGE OPEN",
             Self::Offline => "OFFLINE",
@@ -32,7 +29,7 @@ impl SnapshotState {
 
     /// Whether a numeric confidence is meaningful for this state.
     pub const fn is_predictive(self) -> bool {
-        matches!(self, Self::Watch | Self::Likely)
+        matches!(self, Self::Likely)
     }
 
     /// Whether the layout should use its hard interruption treatment.
@@ -43,7 +40,7 @@ impl SnapshotState {
     /// Plain road consequence, independent of the internal bridge state.
     pub const fn road_meaning(self) -> &'static str {
         match self {
-            Self::Clear | Self::Watch | Self::Likely => "ROAD OPEN NOW",
+            Self::Clear | Self::Likely => "ROAD OPEN NOW",
             Self::Open => "ROAD BLOCKED",
             Self::Offline => "ROAD STATUS UNKNOWN",
         }

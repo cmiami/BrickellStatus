@@ -1,6 +1,5 @@
 export type BridgeState =
   | 'clear'
-  | 'possible'
   | 'likely'
   | 'open';
 

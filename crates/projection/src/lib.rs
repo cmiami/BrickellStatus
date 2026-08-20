@@ -109,7 +109,6 @@ pub fn bounded_text(value: &str, maximum: usize) -> String {
 pub fn display_snapshot(snapshot: &AppSnapshot) -> LiveSnapshot {
     let state = match snapshot.decision.state {
         BridgeStateDto::Clear => SnapshotState::Clear,
-        BridgeStateDto::Possible => SnapshotState::Watch,
         BridgeStateDto::Likely => SnapshotState::Likely,
         BridgeStateDto::Open => SnapshotState::Open,
     };

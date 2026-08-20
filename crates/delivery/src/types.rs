@@ -28,8 +28,6 @@ pub enum NoticeState {
     Resolved,
     /// No opening is currently likely.
     Clear,
-    /// Evidence exists below the outbound-alert threshold.
-    Watch,
     /// Predictive evidence supports an opening warning.
     Likely,
     /// Span is open and road traffic is blocked.
@@ -47,7 +45,6 @@ impl NoticeState {
             Self::Alert => "Alert active",
             Self::Resolved => "Alert resolved",
             Self::Clear => "No opening likely",
-            Self::Watch => "Opening possible",
             Self::Likely => "Likely to open",
             Self::Open => "Bridge open",
             Self::AllClear => "Bridge clear",
@@ -57,7 +54,7 @@ impl NoticeState {
 
     /// Whether a model confidence belongs in outbound copy.
     pub const fn is_predictive(self) -> bool {
-        matches!(self, Self::Watch | Self::Likely)
+        matches!(self, Self::Likely)
     }
 }
 

@@ -61,22 +61,29 @@ pub struct HysteresisThreshold {
     pub exit: f32,
 }
 
+/// Highest confidence reportable when a clock window is the only evidence.
+///
+/// The state is forced to `Clear` in that case, so the number beside it has to
+/// agree: leaving the raw 0.48 on a Clear reads as the instrument arguing with
+/// itself.
+pub const SCHEDULE_ONLY_CONFIDENCE_CEILING: f32 = 0.10;
+
 /// Predictive state thresholds.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BridgeThresholds {
-    /// Threshold for `watch`.
-    pub watch: HysteresisThreshold,
-    /// Threshold for `likely`.
+    /// Threshold for `likely`, the only predictive state.
+    ///
+    /// There is deliberately no lower tier. A middle "something might happen"
+    /// state fired on evidence too weak to act on, which is the failure mode
+    /// that teaches a reader to ignore the channel entirely. Either the
+    /// evidence supports saying an opening is likely, or the instrument stays
+    /// quiet and shows the context without raising urgency.
     pub likely: HysteresisThreshold,
 }
 
 impl Default for BridgeThresholds {
     fn default() -> Self {
         Self {
-            watch: HysteresisThreshold {
-                enter: 0.18,
-                exit: 0.10,
-            },
             likely: HysteresisThreshold {
                 enter: 0.58,
                 exit: 0.45,
@@ -568,12 +575,36 @@ impl BridgePredictor {
                     previous.map(|item| item.state),
                     self.config.thresholds,
                 );
-                // A clock window is context, never predictive proof. This cap also
-                // applies when the only other facts were stale/unavailable.
-                if schedule_only && selected > BridgeState::Watch {
-                    selected = BridgeState::Watch;
-                }
-                (selected, Confidence::from_score(raw_score), held)
+                // A clock window is context, never predictive proof, and
+                // PRODUCT.md is explicit that this app "does not alert solely
+                // because a legal opening slot is approaching".
+                //
+                // Capping at Watch did not honour that. Watch maps to
+                // Urgency::Notice, so an imminent slot with no vessel and no
+                // controller behind it still raised a notice -- and the default
+                // weights make that certain rather than occasional: a scheduled
+                // slot scores 0.14 + 0.34 = 0.48 against a 0.18 watch
+                // threshold, so every half-hour slot alerted at "48%
+                // confidence" on no evidence at all. That is the noise that
+                // teaches a reader to stop believing the channel.
+                //
+                // Clear keeps the slot fully visible as context -- the
+                // schedule, the next slot and the ETA all still ride along --
+                // while refusing to raise urgency without a predictive or
+                // ground-truth observation. Real evidence is unaffected: with
+                // any positive observation `schedule_only` is false and the
+                // schedule weight still lifts the score, which is exactly the
+                // "confidence modifier" role the product describes.
+                let reported_score = if schedule_only {
+                    selected = BridgeState::Clear;
+                    // Reported confidence has to agree with the state it sits
+                    // beside. Leaving 0.48 on a Clear reads as the instrument
+                    // contradicting itself.
+                    raw_score.min(SCHEDULE_ONLY_CONFIDENCE_CEILING)
+                } else {
+                    raw_score
+                };
+                (selected, Confidence::from_score(reported_score), held)
             };
 
         let previous_state = previous.map(|item| item.state);
@@ -808,15 +839,12 @@ impl Default for BridgePredictor {
 }
 
 fn validate_config(config: &BridgePredictorConfig) -> Result<(), PredictionError> {
-    let thresholds = [config.thresholds.watch, config.thresholds.likely];
+    let thresholds = [config.thresholds.likely];
     if thresholds
         .iter()
         .any(|item| !(0.0..=1.0).contains(&item.enter) || !(0.0..=item.enter).contains(&item.exit))
     {
         return Err(PredictionError::InvalidThresholds);
-    }
-    if thresholds[0].enter >= thresholds[1].enter {
-        return Err(PredictionError::UnorderedThresholds);
     }
     let decay = [
         config.decay.ais,
@@ -1153,15 +1181,12 @@ fn select_predictive_state(
 ) -> (BridgeState, bool) {
     let candidate = if score >= thresholds.likely.enter {
         BridgeState::Likely
-    } else if score >= thresholds.watch.enter {
-        BridgeState::Watch
     } else {
         BridgeState::Clear
     };
 
     let held = match previous {
         Some(BridgeState::Likely) if score >= thresholds.likely.exit => BridgeState::Likely,
-        Some(BridgeState::Watch) if score >= thresholds.watch.exit => BridgeState::Watch,
         _ => candidate,
     };
 
@@ -1227,7 +1252,6 @@ fn prediction_availability(
 fn urgency_for(state: BridgeState) -> Urgency {
     match state {
         BridgeState::Clear => Urgency::Passive,
-        BridgeState::Watch => Urgency::Notice,
         BridgeState::Likely => Urgency::TimeSensitive,
         BridgeState::Open => Urgency::Critical,
     }
@@ -1262,6 +1286,39 @@ mod tests {
 
     fn scheduled_now() -> TimestampMillis {
         millis("2026-08-14T19:10:00Z") // Friday 15:10 EDT, scheduled mode.
+    }
+
+    /// 15:20 EDT: ten minutes before the 15:30 slot, so inside the
+    /// twelve-minute imminent window. The sibling test below sits at 15:10,
+    /// twenty minutes out, which never reaches `slot_imminent` -- so it scored
+    /// 0.14 and passed whatever the cap did. This one scores
+    /// 0.14 + 0.34 = 0.48 against a 0.18 watch threshold, which is the case
+    /// that actually alerted a reader every half hour on no evidence.
+    fn imminent_slot_now() -> TimestampMillis {
+        millis("2026-08-14T19:20:00Z")
+    }
+
+    #[test]
+    fn an_imminent_slot_alone_still_does_not_alert() {
+        let prediction = BridgePredictor::default()
+            .evaluate(imminent_slot_now(), &[], None)
+            .expect("prediction");
+        assert_eq!(prediction.state, BridgeState::Clear);
+        assert_eq!(prediction.urgency, Urgency::Passive);
+        // The slot is still reported as context; it just does not raise state.
+        assert!(
+            prediction
+                .contributions
+                .iter()
+                .any(|item| item.kind == EvidenceKind::Schedule),
+            "the schedule should still be shown as context"
+        );
+        // Confidence must not contradict the state it sits beside.
+        assert!(
+            prediction.confidence.basis_points <= 1_000,
+            "schedule-only confidence was {} bps",
+            prediction.confidence.basis_points
+        );
     }
 
     #[test]
