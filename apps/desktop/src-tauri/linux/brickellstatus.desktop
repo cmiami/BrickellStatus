@@ -11,13 +11,7 @@ Terminal=false
 Categories={{categories}}
 Keywords=bridge;miami;marine;ais;weather;epaper;e-paper;esp32;heltec;notifications;
 StartupNotify=true
-# GNOME and KDE match a Wayland window to its launcher by the xdg-shell app_id,
-# which GTK takes from the program name -- the binary name, not the product
-# name. Without this line the app gets a generic icon in the dock, appears as a
-# second unnamed entry beside its own launcher, and "pin to dash" pins nothing.
 StartupWMClass={{exec}}
-# Lets GNOME Settings list the app under Notifications, so its native alerts can
-# be tuned or silenced there rather than only inside the app.
 X-GNOME-UsesNotifications=true
 {{#if mime_type}}
 MimeType={{mime_type}}

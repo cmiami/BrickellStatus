@@ -102,12 +102,21 @@ names.
 
 This is the sharpest edge in the whole Linux leg and worth stating plainly.
 
-Tauri writes RPMs with the pure-Rust `rpm` crate, **not** `rpmbuild`. Nothing
-therefore runs the automatic dependency generator that would normally read the
-built ELF and emit `Requires:` lines from its sonames. The `depends` list in
-`bundle.linux.rpm` in [`tauri.conf.json`](../apps/desktop/src-tauri/tauri.conf.json)
-is the only thing standing between a user and a package that installs cleanly
-and then fails to start.
+Tauri writes RPMs with the pure-Rust `rpm` crate, **not** `rpmbuild`, so nothing
+runs the automatic dependency generator that would normally read the built ELF
+and emit a `Requires:` line per soname.
+
+Tauri does add three sonames of its own — `libayatana-appindicator3.so.1`,
+`libwebkit2gtk-4.1.so.0` and `libgtk-3.so.0` — but those are a fixed list it
+knows about, not the result of inspecting this binary. The proof is what is
+missing from a built package: `rpm -q --requires` shows no `libudev.so.1` and
+no `libdbus-1.so.3`, even though the executable links both. `systemd-libs` and
+`dbus-libs` appear in the package only because `depends` names them.
+
+So the `depends` list in `bundle.linux.rpm` in
+[`tauri.conf.json`](../apps/desktop/src-tauri/tauri.conf.json) is most of what
+stands between a user and a package that installs cleanly and then fails to
+start.
 
 That list is `webkit2gtk4.1`, `gtk3`, `libayatana-appindicator-gtk3`,
 `dbus-libs` and `systemd-libs`, plus a `bluez` recommendation for the BLE
@@ -158,6 +167,11 @@ still needed doing:
 - **Notifications.** `X-GNOME-UsesNotifications=true` puts the app in GNOME
   Settings → Notifications, so its native alerts can be tuned or silenced
   there rather than only inside the app.
+
+The template that carries those two keys is deliberately free of comments.
+Handlebars passes `#` lines straight through, so anything explanatory written
+there is installed verbatim into `/usr/share/applications` on every machine —
+the rationale belongs in this document instead.
 
 Two known Wayland caveats belong in QA rather than in the package:
 
