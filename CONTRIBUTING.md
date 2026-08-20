@@ -82,7 +82,10 @@ and include the measured DMG size. For Windows release work, follow
 installer size. For Fedora release work, follow
 [`docs/FEDORA_RELEASE.md`](docs/FEDORA_RELEASE.md), include the measured package
 size, and say whether QA ran on GNOME, Plasma, or both — the tray and the udev
-rule behave differently across them. Release artifacts must remain at or below
+rule behave differently across them. For Android release work, follow
+[`docs/ANDROID_RELEASE.md`](docs/ANDROID_RELEASE.md) and include the measured
+APK size; that budget is **per ABI**, which is why the release splits the APK
+rather than shipping one universal binary. Release artifacts must remain at or below
 the repository's 25 MiB limit.
 
 Changing `bundle.linux.rpm.depends` deserves particular care: Tauri writes RPMs

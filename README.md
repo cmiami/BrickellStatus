@@ -71,6 +71,34 @@ app again, then go back to Privacy & Security.
 Built and tested on Fedora 44. Details, including why this is an RPM rather
 than a Flatpak, are in [`docs/FEDORA_RELEASE.md`](docs/FEDORA_RELEASE.md).
 
+### Android
+
+The APK *is* signed, so there is no stand-off to talk your way past — Android
+only needs permission to install something that did not come from the Play
+Store.
+
+1. Download `BrickellStatus_<version>_android-arm64-v8a.apk` from
+   [Releases](../../releases). Take `armeabi-v7a` instead only for a phone old
+   enough to be 32-bit.
+2. Open it. Android offers to let your browser or file manager install unknown
+   apps; grant it to **that one app**, not globally.
+3. On first launch it asks for Bluetooth and notification permission. Both are
+   optional: decline them and you lose the e-paper panel and the alerts
+   respectively, and nothing else.
+
+**The phone keeps watching after you close it.** A foreground service holds the
+collectors, the alerts and the Bluetooth link to the panel open while the app is
+backgrounded or swiped away, and the notification it must display carries the
+current river status instead of a "running" line. Reading it costs battery —
+that is the price of a warning that arrives before the bridge opens — and the
+notification has a **Stop watching** action when you would rather not pay it.
+
+One gap: the watch does not start by itself after a reboot. Open the app once.
+
+There is no USB firmware flashing and no USB panel connection on Android; the
+e-paper panel connects over Bluetooth. Details are in
+[`docs/ANDROID_RELEASE.md`](docs/ANDROID_RELEASE.md).
+
 ---
 
 ## What it is

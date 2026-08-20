@@ -1,5 +1,7 @@
 //! Native BrickellStatus companion: runtime, tray lifetime, delivery, and E213 I/O.
 
+#[cfg(target_os = "android")]
+mod android_bridge;
 pub mod firmware;
 mod secret_store;
 
@@ -36,8 +38,8 @@ use brickellstatus_eink::{
     radar_figure_from_png, render_channel_card, render_channel_card_with_radar, render_snapshot,
     series_figure,
     transport::{
-        BleConfig, BleTransport, TransportKind, TransportReceipt, UsbConfig, UsbTransport,
-        discover_ble_devices, discover_espressif_devices,
+        BleConfig, BleDeviceInfo, BleTransport, TransportError, TransportKind, TransportReceipt,
+        UsbConfig, UsbTransport, discover_ble_devices, discover_espressif_devices,
     },
 };
 pub use brickellstatus_projection::render_live_bridge_frame;
@@ -52,8 +54,13 @@ use brickellstatus_storage::{IncidentRecord, OutboxLease, OutboxRecord, Store};
 use jiff::{Timestamp, tz::TimeZone};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
+// `tauri::menu` is #[cfg(desktop)] and `tauri::tray` is
+// #[cfg(all(desktop, feature = "tray-icon"))]; neither name exists on Android.
+// `WindowEvent` does, but only the desktop close-to-tray handler names it.
+#[cfg(desktop)]
 use tauri::{
-    AppHandle, Emitter, Manager, RunEvent, State, WindowEvent,
+    WindowEvent,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
 };
@@ -65,10 +72,15 @@ use uuid::Uuid;
 
 use secret_store::LocalSecretStore;
 
+#[cfg(desktop)]
 const MENU_STATUS_ID: &str = "e213-status";
+#[cfg(desktop)]
 const MENU_DETAIL_ID: &str = "e213-detail";
+#[cfg(desktop)]
 const MENU_OPEN_ID: &str = "open-main";
+#[cfg(desktop)]
 const MENU_QUIT_ID: &str = "quit";
+#[cfg(desktop)]
 const TRAY_ID: &str = "brickellstatus-tray";
 const STATUS_EVENT: &str = "display-connection-status";
 const DISPATCH_TRACKER_KEY: &str = "desktop.whatsapp.dispatch";
@@ -133,6 +145,8 @@ impl Default for DisplayConnectionStatus {
 }
 
 impl DisplayConnectionStatus {
+    // Only a tray reads this, and mobile has none; the tests still do.
+    #[cfg_attr(mobile, allow(dead_code))]
     fn menu_lines(&self) -> (String, String) {
         let first = match (self.state, self.transport) {
             (DisplayConnectionState::Connected, Some(DisplayConnectionTransport::Usb)) => {
@@ -172,6 +186,8 @@ impl DisplayConnectionStatus {
         )
     }
 
+    // Only a tray reads this, and mobile has none; the tests still do.
+    #[cfg_attr(mobile, allow(dead_code))]
     fn tray_badge(&self) -> &'static str {
         match (self.state, self.transport) {
             (DisplayConnectionState::Connected, Some(DisplayConnectionTransport::Usb)) => "•USB",
@@ -219,8 +235,19 @@ pub struct AisStreamStatus {
     pub vessels_in_range: Option<usize>,
 }
 
-struct E213TrayState {
+/// The display connection status the whole app reads: the display worker
+/// writes it, two commands read it, and the frontend gets it as an event.
+///
+/// This used to live inside the tray state, which made the status cache a
+/// casualty of not having a tray. It is managed on every platform now, and the
+/// tray -- where there is one -- mirrors it.
+struct DisplayStatusState {
     current: StdMutex<DisplayConnectionStatus>,
+}
+
+/// The two disabled menu items whose text mirrors [`DisplayStatusState`].
+#[cfg(desktop)]
+struct E213TrayState {
     status_item: MenuItem<tauri::Wry>,
     detail_item: MenuItem<tauri::Wry>,
 }
@@ -318,6 +345,19 @@ struct DisplayController {
     attached_panel: std::sync::RwLock<PanelModel>,
     preferred_usb_port: AsyncMutex<Option<String>>,
     preferred_ble_id: AsyncMutex<Option<String>>,
+}
+
+/// BLE discovery that refuses to touch the platform adapter until it exists.
+///
+/// On Android the adapter only exists once the JNI bridge has run; reaching
+/// for it early panics inside btleplug rather than returning. Everywhere else
+/// this is a plain forward.
+async fn discover_ble(config: &BleConfig) -> Result<Vec<BleDeviceInfo>, TransportError> {
+    #[cfg(target_os = "android")]
+    if !android_bridge::bluetooth_ready() {
+        return Err(TransportError::NoBleAdapter);
+    }
+    discover_ble_devices(config).await
 }
 
 impl DisplayController {
@@ -421,10 +461,7 @@ impl DisplayController {
             device_name: preferences.display.ble_name.clone(),
             ..BleConfig::default()
         };
-        let (usb, ble) = tokio::join!(
-            discover_espressif_devices(),
-            discover_ble_devices(&ble_config)
-        );
+        let (usb, ble) = tokio::join!(discover_espressif_devices(), discover_ble(&ble_config));
         let mut devices = Vec::new();
         let mut errors = Vec::new();
         match usb {
@@ -702,6 +739,10 @@ impl DisplayController {
         device_id: Option<String>,
         configured_name: &str,
     ) -> Result<ActiveDisplay, String> {
+        #[cfg(target_os = "android")]
+        if !android_bridge::bluetooth_ready() {
+            return Err(TransportError::NoBleAdapter.to_string());
+        }
         let transport = Arc::new(BleTransport::new(BleConfig {
             device_name: configured_name.to_owned(),
             device_id,
@@ -906,11 +947,20 @@ impl Drop for DesktopState {
 }
 
 pub fn set_e213_transport_status(app: &AppHandle, status: DisplayConnectionStatus) {
-    let state = app.state::<E213TrayState>();
-    *state
+    *app.state::<DisplayStatusState>()
         .current
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = status.clone();
+    #[cfg(desktop)]
+    mirror_status_to_tray(app, &status);
+    if let Err(error) = app.emit(STATUS_EVENT, status) {
+        warn!(%error, "display status event emission failed");
+    }
+}
+
+#[cfg(desktop)]
+fn mirror_status_to_tray(app: &AppHandle, status: &DisplayConnectionStatus) {
+    let state = app.state::<E213TrayState>();
     let (status_line, detail_line) = status.menu_lines();
     if let Err(error) = state.status_item.set_text(&status_line) {
         warn!(%error, "display tray status text update failed");
@@ -929,9 +979,6 @@ pub fn set_e213_transport_status(app: &AppHandle, status: DisplayConnectionStatu
         if let Err(error) = tray.set_title(Some(status.tray_badge())) {
             warn!(%error, "display tray badge update failed");
         }
-    }
-    if let Err(error) = app.emit(STATUS_EVENT, status) {
-        warn!(%error, "display status event emission failed");
     }
 }
 
@@ -973,6 +1020,11 @@ fn firmware_root(app: &AppHandle) -> Option<std::path::PathBuf> {
     app.path()
         .resolve("firmware", tauri::path::BaseDirectory::Resource)
         .ok()
+        // `resolve` builds a path without checking it exists, so a build that
+        // bundles no firmware -- the Android one, and any dev run before
+        // `firmware:bundle` -- would otherwise report a directory that is not
+        // there and fail later with a confusing read error.
+        .filter(|path| path.is_dir())
 }
 
 /// Reports whether an attached board needs the bundled firmware.
@@ -1407,8 +1459,32 @@ impl firmware::FlashProgress for EmitProgress {
     }
 }
 
+/// What this build can physically do, so the console stops offering hardware
+/// paths the platform does not have.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlatformCapabilities {
+    /// Whether a USB serial panel connection can be opened at all.
+    usb_display: bool,
+    /// Whether this build ships firmware it could write to a board.
+    firmware_flashing: bool,
+}
+
 #[tauri::command]
-fn get_display_status(state: State<'_, E213TrayState>) -> DisplayConnectionStatus {
+fn get_platform_capabilities(app: AppHandle) -> PlatformCapabilities {
+    // Android links the serial stack but cannot open a port from an
+    // unprivileged app: available_ports() answers "Not implemented for this
+    // OS". Reporting that up front is kinder than a scan that always finds
+    // nothing, and flashing needs both a port and a bundled image.
+    let usb_display = cfg!(not(target_os = "android"));
+    PlatformCapabilities {
+        usb_display,
+        firmware_flashing: usb_display && firmware_root(&app).is_some(),
+    }
+}
+
+#[tauri::command]
+fn get_display_status(state: State<'_, DisplayStatusState>) -> DisplayConnectionStatus {
     state
         .current
         .lock()
@@ -1419,7 +1495,7 @@ fn get_display_status(state: State<'_, E213TrayState>) -> DisplayConnectionStatu
 #[tauri::command]
 async fn get_app_snapshot(
     state: State<'_, DesktopState>,
-    tray: State<'_, E213TrayState>,
+    display: State<'_, DisplayStatusState>,
 ) -> Result<AppSnapshot, String> {
     let mut snapshot = state
         .engine
@@ -1427,7 +1503,7 @@ async fn get_app_snapshot(
         .await
         .map_err(|error| error.to_string())?;
     let preferences = state.engine.get_preferences().await;
-    let display_status = tray
+    let display_status = display
         .current
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2373,13 +2449,15 @@ async fn reconcile_aisstream_secret_locked(state: &DesktopState) -> Result<AisSe
 }
 
 fn get_current_status(app: &AppHandle) -> DisplayConnectionStatus {
-    app.state::<E213TrayState>()
+    app.state::<DisplayStatusState>()
         .current
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
 }
 
+// Only a tray reads this, and mobile has none; the tests still do.
+#[cfg_attr(mobile, allow(dead_code))]
 fn clean_menu_text(value: &str) -> String {
     const MAX_CHARS: usize = 96;
     let flattened = value.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2391,6 +2469,7 @@ fn clean_menu_text(value: &str) -> String {
     output
 }
 
+#[cfg(desktop)]
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
@@ -2399,6 +2478,16 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+/// Manages the display status cache. Runs on every platform, before
+/// `install_tray`, because commands and the display worker both need it and
+/// only the mirroring is a tray concern.
+fn install_display_status(app: &mut tauri::App) {
+    app.manage(DisplayStatusState {
+        current: StdMutex::new(DisplayConnectionStatus::default()),
+    });
+}
+
+#[cfg(desktop)]
 fn install_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let initial = DisplayConnectionStatus::default();
     let (status_line, detail_line) = initial.menu_lines();
@@ -2452,7 +2541,6 @@ fn install_tray(app: &mut tauri::App) -> tauri::Result<()> {
         })
         .build(app)?;
     app.manage(E213TrayState {
-        current: StdMutex::new(initial),
         status_item,
         detail_item,
     });
@@ -2761,6 +2849,47 @@ async fn run_display_worker(
     }
 }
 
+/// One line of standing status for the Android watch notification.
+///
+/// Picks the channel the engine already ranked highest rather than deriving a
+/// second opinion here: `priority.score` exists so the panel, the alerts and
+/// this agree on what matters most right now.
+#[cfg(target_os = "android")]
+fn watch_status_copy(snapshot: &AppSnapshot) -> (String, String) {
+    let leading = snapshot
+        .channels
+        .iter()
+        .filter(|channel| channel.enabled && channel.active)
+        .max_by_key(|channel| channel.priority.score);
+    match leading {
+        Some(channel) => {
+            let title = channel
+                .signal
+                .as_ref()
+                .map_or_else(|| channel.title.clone(), |signal| signal.headline.clone());
+            (
+                bounded_text(&title, 96),
+                bounded_text(&channel.summary, 240),
+            )
+        }
+        None => {
+            let watching = snapshot
+                .channels
+                .iter()
+                .filter(|channel| channel.enabled)
+                .count();
+            (
+                "Nothing needs your attention".to_owned(),
+                match watching {
+                    0 => "No channels are enabled.".to_owned(),
+                    1 => "Watching 1 channel.".to_owned(),
+                    count => format!("Watching {count} channels."),
+                },
+            )
+        }
+    }
+}
+
 async fn run_dispatch_worker(
     app: AppHandle,
     engine: Arc<RuntimeEngine>,
@@ -2777,6 +2906,14 @@ async fn run_dispatch_worker(
         let preferences = engine.get_preferences().await;
         match engine.get_snapshot().await {
             Ok(snapshot) => {
+                // The watch notification is the only surface a backgrounded
+                // phone has, so it carries the current decision rather than a
+                // fixed "running" line.
+                #[cfg(target_os = "android")]
+                {
+                    let (title, body) = watch_status_copy(&snapshot);
+                    android_bridge::publish_status(&title, &body);
+                }
                 // Native notices do not depend on Meta. Submit them before
                 // attempting the serialized WhatsApp lane.
                 if let Err(error) =
@@ -2895,12 +3032,18 @@ pub fn run() {
                 .unwrap_or_else(|_| "info,sqlx=warn".into()),
         )
         .try_init();
-    let application = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_main_window(app);
-        }))
+    let builder = tauri::Builder::default();
+    // A phone has no second instance to fold into the first, and the plugin
+    // itself is desktop-only.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        show_main_window(app);
+    }));
+    let application = builder
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            install_display_status(app);
+            #[cfg(desktop)]
             install_tray(app)?;
             install_runtime(app)
         })
@@ -2912,6 +3055,7 @@ pub fn run() {
             refresh_sources,
             search_locations,
             get_display_status,
+            get_platform_capabilities,
             scan_display_devices,
             connect_display_device,
             disconnect_display_device,
@@ -2927,12 +3071,17 @@ pub fn run() {
             get_radar_layer,
             open_external_url,
         ])
-        .on_window_event(|window, event| {
-            if window.label() == "main"
-                && let WindowEvent::CloseRequested { api, .. } = event
+        // Closing the window hides the app to the tray rather than quitting
+        // it. On Android there is no tray to hide into, and intercepting the
+        // back gesture this way would strand the user in a live process with
+        // nothing on screen.
+        .on_window_event(|_window, _event| {
+            #[cfg(desktop)]
+            if _window.label() == "main"
+                && let WindowEvent::CloseRequested { api, .. } = _event
             {
                 api.prevent_close();
-                let _ = window.hide();
+                let _ = _window.hide();
             }
         })
         .build(tauri::generate_context!())

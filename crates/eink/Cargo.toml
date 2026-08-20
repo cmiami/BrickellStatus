@@ -11,12 +11,18 @@ description = "BrickellStatus monochrome renderer and E213/E290 USB/BLE transpor
 # wasm32-unknown-unknown, which is what lets the hosted service render frames
 # with the same code the desktop app uses.
 default = ["hardware"]
-hardware = [
+hardware = ["ble", "usb"]
+# The two paths are separable because Android has one and not the other: an
+# unrooted app cannot open /dev/tty*, so the phone build takes "ble" alone and
+# leaves the serial stack -- which links libudev -- out of the graph entirely.
+ble = ["_transport", "dep:btleplug"]
+usb = ["_transport", "dep:tokio-serial"]
+# Plumbing both paths share. Not meant to be selected on its own; it exists so
+# "ble" and "usb" can each pull it without duplicating the list.
+_transport = [
   "dep:async-trait",
-  "dep:btleplug",
   "dep:futures",
   "dep:tokio",
-  "dep:tokio-serial",
   "dep:tracing",
   "dep:uuid",
 ]
@@ -38,6 +44,20 @@ tokio = { workspace = true, optional = true }
 tokio-serial = { version = "5.5.0", optional = true }
 tracing = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
+
+# The only example that reaches a board rather than a PNG. Naming the feature
+# it needs keeps `--no-default-features` builds of this crate checkable, which
+# is the whole point of the transport features being separable.
+[[example]]
+name = "send_channel_cards"
+required-features = ["usb"]
+
+# btleplug's Android backend needs an explicit init handshake before first use,
+# and the caller has to hand it a `&JNIEnv` of the exact jni version btleplug
+# compiles against. Owning that dependency here -- and re-exporting it -- makes
+# a version mismatch structurally impossible for callers.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.19"
 
 [dev-dependencies]
 sha2.workspace = true

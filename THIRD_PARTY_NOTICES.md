@@ -20,6 +20,12 @@ that accompany their bundled dependencies.
 | [Public Sans](https://github.com/uswds/public-sans) | Interface and explanatory text, packaged through Fontsource | SIL Open Font License 1.1. Copyright © 2015 The Public Sans Project Authors. See the upstream [`LICENSE.md`](https://github.com/uswds/public-sans/blob/master/LICENSE.md). |
 | [Lucide](https://github.com/lucide-icons/lucide) | Interface symbols through `@lucide/svelte` | ISC. Copyright © Lucide Icons and Contributors. Some icons derive from Feather and remain MIT-licensed; retain Lucide's complete [combined license notice](https://github.com/lucide-icons/lucide/blob/main/LICENSE). |
 
+## Vendored source
+
+| Component | Use in BrickellStatus | License and notice |
+|---|---|---|
+| [btleplug](https://github.com/deviceplug/btleplug) (droidplug Java) | The Java half of the Android Bluetooth backend, copied verbatim into `apps/desktop/src-tauri/android/droidplug/java/` and compiled into the Android app. Includes the bundled `io.github.gedgygedgy.rust` jni-utils classes. | MIT / Apache-2.0 / BSD-3-Clause, at the recipient's option. Copyright © the btleplug contributors. These sources are not published to Maven, which is why they are vendored; see the directory's `README.md` for provenance and the resync script. |
+
 No third-party trademark is granted by the project license. Names are used
 only to identify their respective software, data, service, or hardware.
 

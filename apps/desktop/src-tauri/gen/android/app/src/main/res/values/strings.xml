@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">"BrickellStatus"</string>
+    <string name="main_activity_title">"BrickellStatus"</string>
+    <string name="watch_channel_name">"River watch"</string>
+    <string name="watch_channel_description">"Keeps collecting bridge, vessel and weather signals while the app is closed, so warnings arrive before the bridge opens."</string>
+    <string name="watch_stop">"Stop watching"</string>
+</resources>

@@ -10,6 +10,7 @@ branch="main"
 required_checks=(
   "Rust, console, and Tauri shell"
   "Fedora 44 build, tests, and RPM"
+  "Android cross-compile"
 )
 
 if ! command -v gh >/dev/null 2>&1; then

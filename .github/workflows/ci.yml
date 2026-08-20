@@ -315,3 +315,65 @@ jobs:
           test -n "$entry"
           desktop-file-validate "$entry"
           dnf -y remove "$name"
+
+  # A compile-only gate. It cross-compiles the Android library and nothing else:
+  # no Gradle, no APK, no emulator. That is enough to catch the failure this
+  # branch can actually cause -- a #[cfg(desktop)] that no longer lines up, or a
+  # dependency that stops resolving for aarch64 -- in a couple of minutes rather
+  # than the half hour a full Android build costs. The `quality` job cannot host
+  # this: it runs on macOS, which has no Android NDK.
+  android-check:
+    name: Android cross-compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/console/package-lock.json
+
+      - name: Use the locked npm release
+        run: npm install --global npm@11.18.0
+
+      - name: Install JavaScript dependencies
+        run: npm --prefix apps/console ci
+
+      # tauri::generate_context! reads console/build and resources/licenses at
+      # compile time, so even a check needs them. android:prepare deliberately
+      # skips the firmware bundle, which needs PlatformIO and which Android
+      # cannot flash anyway -- and it verifies the vendored droidplug Java still
+      # matches the btleplug the lockfile resolves.
+      - name: Prepare generated Tauri inputs
+        run: npm --prefix apps/console run android:prepare
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          rustup target add aarch64-linux-android --toolchain 1.97.1
+          rustup run 1.97.1 rustc --version
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ci-android
+
+      # ANDROID_NDK_HOME is the image's pinned default (27.x); ANDROID_NDK_LATEST_HOME
+      # floats and is deliberately not used, so this job does not change compiler
+      # under us when the runner image updates.
+      - name: Cross-compile the Android library
+        run: |
+          set -euo pipefail
+          toolchain="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$toolchain/aarch64-linux-android24-clang"
+          export CXX_aarch64_linux_android="$toolchain/aarch64-linux-android24-clang++"
+          export AR_aarch64_linux_android="$toolchain/llvm-ar"
+          export RANLIB_aarch64_linux_android="$toolchain/llvm-ranlib"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+          cargo clippy -p brickellstatus-desktop --lib \
+            --target aarch64-linux-android -- -D warnings

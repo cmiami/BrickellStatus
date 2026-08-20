@@ -12,8 +12,21 @@ apps/console/dist/
 /apps/desktop/src-tauri/resources/firmware/
 
 # Tauri bundles and signing
-apps/desktop/src-tauri/gen/
+# gen/android is the Android Gradle project and IS committed: signing, the
+# droidplug source set and the npm working directory are all hand edits that
+# `tauri android init` would otherwise discard. Everything else under gen/ is
+# generated. Note the `gen/*` form rather than `gen/` -- git will not descend
+# into an ignored directory, and gen/android carries its own .gitignore rules
+# for build output that have to be reachable.
+apps/desktop/src-tauri/gen/*
+!apps/desktop/src-tauri/gen/android/
+# Staged copies of bundle.resources; the originals live in src-tauri/resources.
+apps/desktop/src-tauri/gen/android/app/src/main/assets/
 apps/desktop/src-tauri/target/
+
+# Signing keys never belong in the repository, whatever they are called.
+*.jks
+*.keystore
 *.dmg
 *.AppImage
 *.rpm

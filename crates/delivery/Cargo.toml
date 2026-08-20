@@ -7,8 +7,8 @@ description = "Transactional delivery adapters for BrickellStatus"
 
 [dependencies]
 async-trait.workspace = true
+brickellstatus-tls = { path = "../tls" }
 reqwest.workspace = true
-rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

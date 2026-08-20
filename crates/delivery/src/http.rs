@@ -138,10 +138,8 @@ impl ReqwestExecutor {
         url: &Url,
         resolved_addresses: &[SocketAddr],
     ) -> Result<reqwest::Client, HttpError> {
-        // reqwest's provider-free rustls refuses to build a client until a
-        // process-default CryptoProvider exists; installing is idempotent.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let mut builder = reqwest::Client::builder()
+        let mut builder = brickellstatus_tls::client_builder()
+            .map_err(|_| HttpError::safe("secure HTTP client configuration failed"))?
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
