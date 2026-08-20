@@ -129,7 +129,11 @@
     z-index: 60;
     display: grid;
     place-items: center;
-    padding: 24px;
+    /* The scrim itself covers the system bars, which is what a scrim should do;
+       the card inside must not. Only matters where an inset exists -- a phone
+       in landscape, where the card is tall enough to reach the cutout. */
+    padding: calc(24px + env(safe-area-inset-top)) calc(24px + env(safe-area-inset-right))
+      calc(24px + env(safe-area-inset-bottom)) calc(24px + env(safe-area-inset-left));
     background: rgba(15, 42, 68, 0.58);
   }
 

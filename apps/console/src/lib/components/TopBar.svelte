@@ -111,7 +111,12 @@
     z-index: 20;
     top: 0;
     display: grid;
-    min-height: 72px;
+    /* Android draws the webview edge to edge, underneath the status bar, so the
+       header has to reserve that strip itself or the clock and battery land on
+       top of the title. env() resolves to 0 wherever there is no inset, which
+       is every desktop build. */
+    padding-top: env(safe-area-inset-top);
+    min-height: calc(72px + env(safe-area-inset-top));
     grid-template-columns: minmax(230px, 1fr) auto auto auto;
     align-items: stretch;
     margin-left: 104px;
@@ -284,7 +289,7 @@
 
   @media (max-width: 720px) {
     .top-bar {
-      min-height: 58px;
+      min-height: calc(58px + env(safe-area-inset-top));
       grid-template-columns: 1fr auto;
       margin-left: 0;
     }

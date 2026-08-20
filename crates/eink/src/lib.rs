@@ -24,8 +24,15 @@ mod protocol;
 pub mod radar;
 mod render;
 mod render_primitives;
-#[cfg(feature = "hardware")]
+#[cfg(feature = "_transport")]
 pub mod transport;
+
+/// btleplug's `jni`, re-exported so a caller writing the Android JNI entry
+/// point cannot bind a different version than the one BLE was compiled
+/// against -- the `&JNIEnv` handed to [`transport::init_android_bluetooth`]
+/// has to be exactly this crate's type.
+#[cfg(all(feature = "ble", target_os = "android"))]
+pub use jni;
 
 pub use banner::{DeviceBanner, UNKNOWN_BUILD};
 pub use channel::{

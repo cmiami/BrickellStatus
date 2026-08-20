@@ -8,6 +8,7 @@ import type {
   EinkPreview,
   LocationSearchResult,
   MutationResult,
+  PlatformCapabilities,
   RadarLayer
 } from './types';
 
@@ -41,6 +42,14 @@ function desktopInvoke<T>(command: string, args?: Record<string, unknown>): Prom
 export async function getRadarLayer(): Promise<RadarLayer | null> {
   if (!tauriAvailable()) return null;
   return invoke<RadarLayer | null>('get_radar_layer');
+}
+
+// What this build can physically reach. Outside the app shell there is no
+// hardware at all, so the browser preview claims the desktop capabilities and
+// lets the individual calls fail on their own terms, exactly as before.
+export async function getPlatformCapabilities(): Promise<PlatformCapabilities> {
+  if (!tauriAvailable()) return { usbDisplay: true, firmwareFlashing: false };
+  return invoke<PlatformCapabilities>('get_platform_capabilities');
 }
 
 export async function searchLocations(query: string): Promise<LocationSearchResult[]> {

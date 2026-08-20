@@ -1,0 +1,20 @@
+[package]
+name = "brickellstatus-tls"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "The TLS trust decision every BrickellStatus HTTP client shares"
+
+[dependencies]
+reqwest.workspace = true
+rustls.workspace = true
+thiserror.workspace = true
+
+# Already in Cargo.lock: rustls-platform-verifier depends on it. Naming it here
+# adds a direct edge, not a new crate to audit.
+[target.'cfg(target_os = "android")'.dependencies]
+webpki-root-certs = "1.0.9"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"

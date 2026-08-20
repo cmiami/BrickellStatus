@@ -63,10 +63,8 @@ pub struct LocationSearchService {
 impl LocationSearchService {
     pub fn new(user_agent: impl AsRef<str>) -> Result<Self, LocationSearchError> {
         let user_agent = validated_user_agent(user_agent.as_ref())?;
-        // reqwest's provider-free rustls refuses to build a client until a
-        // process-default CryptoProvider exists; installing is idempotent.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let client = reqwest::Client::builder()
+        let client = brickellstatus_tls::client_builder()
+            .map_err(|_| LocationSearchError::Client)?
             .https_only(true)
             .no_proxy()
             .redirect(Policy::none())

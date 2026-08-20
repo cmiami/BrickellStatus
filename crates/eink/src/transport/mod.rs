@@ -1,7 +1,9 @@
 //! Physical transports for complete INK1 packets.
 
 mod auto;
+#[cfg(feature = "ble")]
 mod ble;
+#[cfg(feature = "usb")]
 mod usb;
 
 use async_trait::async_trait;
@@ -12,7 +14,11 @@ use uuid::Uuid;
 use crate::{ProtocolError, RefreshMode, encode_packet, validate_packet};
 
 pub use auto::{AutoTransport, TransportPreference};
+#[cfg(all(feature = "ble", target_os = "android"))]
+pub use ble::init_android_bluetooth;
+#[cfg(feature = "ble")]
 pub use ble::{BleConfig, BleConnectionInfo, BleDeviceInfo, BleTransport, discover_ble_devices};
+#[cfg(feature = "usb")]
 pub use usb::{
     ESPRESSIF_USB_VID, UsbConfig, UsbConnectionInfo, UsbDeviceInfo, UsbTransport,
     discover_espressif_devices, discover_espressif_port,

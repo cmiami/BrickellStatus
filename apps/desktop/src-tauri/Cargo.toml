@@ -18,30 +18,50 @@ tauri-build = { version = "2.6.3", features = [] }
 brickellstatus-collectors = { path = "../../../crates/collectors" }
 brickellstatus-projection = { path = "../../../crates/projection" }
 brickellstatus-delivery = { path = "../../../crates/delivery" }
+# Takes both transports on every platform, Android included. The serial half
+# can never open a port on a phone, but serialport 4.9 builds for android and
+# its available_ports() returns Err("Not implemented for this OS"), so a scan
+# there simply finds no USB device and reports BLE alone. Selecting the "ble"
+# feature alone instead would mean roughly twenty #[cfg]s through lib.rs to
+# erase ActiveDisplay::Usb, which is a lot of edits to a 2,900-line file to
+# save a few hundred kilobytes of pure Rust. The usb/ble split in crates/eink
+# keeps that option open if the size budget ever demands it.
 brickellstatus-eink = { path = "../../../crates/eink" }
 brickellstatus-runtime = { path = "../../../crates/runtime" }
 dotenvy.workspace = true
 jiff.workspace = true
-espflash.workspace = true
-serialport.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 # Present only to install the ring process-default CryptoProvider in run().
 rustls.workspace = true
-tauri = { version = "2.11.5", features = ["tray-icon", "image-png"] }
+tauri = { version = "2.11.5", features = ["image-png"] }
 tauri-plugin-notification = "2.3.3"
 # Only the Rust-side open_url free function is used; the plugin is never
 # registered, so no JS invoke surface or capability is added.
 tauri-plugin-opener = "2.5.4"
-tauri-plugin-single-instance = "2.4.3"
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 brickellstatus-storage = { path = "../../../crates/storage" }
 url.workspace = true
 uuid.workspace = true
+
+# Everything the phone build cannot have. The predicate is spelled out in target
+# triples rather than as `cfg(desktop)` on purpose: `desktop` and `mobile` are
+# cfgs tauri-build emits for compiling source, and Cargo resolves these target
+# sections long before any build script runs. Written as cfg(desktop) this
+# section would silently apply to nothing.
+#
+# espflash drives a USB serial bootloader an unprivileged Android app cannot
+# reach, and tray-icon and single-instance are desktop shell concepts with no
+# Android counterpart.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+espflash.workspace = true
+serialport.workspace = true
+tauri = { version = "2.11.5", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2.4.3"
 
 # DPAPI keeps credentials.json unreadable off this machine and user account.
 # All three crates are already in Cargo.lock transitively, so this section

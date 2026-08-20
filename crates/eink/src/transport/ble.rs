@@ -13,6 +13,27 @@ use super::{
     TransportReceipt, device_reply, validate_for_transport,
 };
 
+/// Hands btleplug's Android backend the JVM handle it needs before first use.
+///
+/// Android BLE is a hybrid Rust/Java build: the Rust side reaches the platform
+/// adapter through JNI, and `btleplug::platform::global_adapter()` panics if
+/// this never ran. Call it exactly once, from a native method that Java
+/// invoked -- the class lookups inside resolve against whichever class loader
+/// is on the calling thread's stack, and only a Java-called thread carries the
+/// app's own loader. A Rust-spawned thread gets the system loader and the
+/// lookups fail.
+///
+/// Returning an error rather than panicking is deliberate: a device with
+/// Bluetooth switched off, or a build where the Java companion did not make it
+/// into the APK, should cost the user the e-paper output and nothing else.
+#[cfg(target_os = "android")]
+pub fn init_android_bluetooth(env: &jni::JNIEnv<'_>) -> Result<(), TransportError> {
+    btleplug::platform::init(env).map_err(|error| TransportError::Io {
+        transport: TransportKind::Ble,
+        message: error.to_string(),
+    })
+}
+
 const BLE_FRAME_ATTEMPTS: usize = 2;
 const BLE_FRAME_RETRY_DELAY: Duration = Duration::from_millis(100);
 

@@ -1,4 +1,6 @@
-name: Desktop installers (unsigned)
+# Named for what it produces rather than for the desktop alone: the Android
+# APKs it now also builds are signed, unlike every desktop artifact here.
+name: Release installers
 
 on:
   push:
@@ -384,10 +386,140 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # Android is built on Linux because GitHub's ubuntu image already carries the
+  # SDK and a pinned NDK, so unlike the Windows leg there is nothing to
+  # cross-compile around. Note there is no `fetch-depth: 0` here: that exists on
+  # the other jobs so the firmware build id can be derived from git history, and
+  # this build deliberately bundles no firmware.
+  build-android:
+    name: Android APK
+    needs: verify-ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CI: "true"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/console/package-lock.json
+
+      - name: Use the locked npm release
+        run: npm install --global npm@11.18.0
+
+      - name: Install JavaScript dependencies
+        run: npm --prefix apps/console ci
+
+      # Pinned rather than taken from the image default, which drifts. The
+      # Android Gradle Plugin supports 17 and 21; it rejects 25.
+      - name: Set up the JDK Gradle runs on
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          rustup target add aarch64-linux-android armv7-linux-androideabi --toolchain 1.97.1
+          rustup run 1.97.1 rustc --version
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: release-android
+
+      - name: Cache Gradle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('apps/desktop/src-tauri/gen/android/**/*.gradle*', 'apps/desktop/src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      # The keystore never exists in the repository. Without these secrets the
+      # Gradle config falls through to an unsigned release build rather than
+      # failing, which is what forks get.
+      - name: Materialise the release keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${ANDROID_KEYSTORE_BASE64:-}" ]]; then
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret; building an unsigned release APK."
+            exit 0
+          fi
+          keystore="$RUNNER_TEMP/release.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$keystore"
+          cat > apps/desktop/src-tauri/gen/android/keystore.properties <<EOF
+          storeFile=$keystore
+          storePassword=$ANDROID_KEYSTORE_PASSWORD
+          keyAlias=$ANDROID_KEY_ALIAS
+          keyPassword=$ANDROID_KEY_PASSWORD
+          EOF
+
+      # NDK_HOME is what the Tauri CLI reads. ANDROID_NDK_HOME is the image's
+      # pinned default; ANDROID_NDK_LATEST_HOME floats and is avoided so a
+      # runner image update cannot silently change compiler.
+      - name: Build signed APKs
+        run: |
+          set -euo pipefail
+          export NDK_HOME="$ANDROID_NDK_HOME"
+          npm --prefix apps/console run tauri:android:build
+
+      - name: Name and checksum artifacts
+        env:
+          VERSION: ${{ needs.verify-ref.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          outputs="apps/desktop/src-tauri/gen/android/app/build/outputs/apk"
+          mkdir -p dist
+          # arm64-v8a and armeabi-v7a only: x86 and x86_64 are emulator targets,
+          # and a universal APK carrying all four would blow the size budget.
+          declare -A abis=([arm64]=arm64-v8a [arm]=armeabi-v7a)
+          for abi in "${!abis[@]}"; do
+            apk="$(find "$outputs/$abi/release" -maxdepth 1 -type f -name '*.apk' -print -quit)"
+            if [[ -z "$apk" ]]; then
+              echo "No APK for $abi in $outputs/$abi/release" >&2
+              exit 1
+            fi
+            output="dist/BrickellStatus_${VERSION}_android-${abis[$abi]}.apk"
+            cp "$apk" "$output"
+            (cd dist && shasum -a 256 "$(basename "$output")" > "$(basename "$output").sha256")
+          done
+          node apps/console/scripts/check-android-artifact-size.mjs "$outputs" \
+            | tee "dist/BrickellStatus_${VERSION}_android.sizes.txt"
+
+      # Belt and braces: the file is gitignored and lives on an ephemeral
+      # runner, but a signing credential should not outlive the step that needs it.
+      - name: Remove the keystore
+        if: always()
+        run: rm -f apps/desktop/src-tauri/gen/android/keystore.properties "$RUNNER_TEMP/release.jks"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: android
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
     name: Publish tag assets
     if: github.event_name == 'push'
-    needs: [verify-ref, build, build-windows, build-linux]
+    needs: [verify-ref, build, build-windows, build-linux, build-android]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -408,9 +540,9 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/*.dmg dist/*-setup.exe dist/*.rpm --clobber --repo "$GITHUB_REPOSITORY"
+            gh release upload "$GITHUB_REF_NAME" dist/*.dmg dist/*-setup.exe dist/*.rpm dist/*.apk --clobber --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$GITHUB_REF_NAME" dist/*.dmg dist/*-setup.exe dist/*.rpm \
+            gh release create "$GITHUB_REF_NAME" dist/*.dmg dist/*-setup.exe dist/*.rpm dist/*.apk \
               --repo "$GITHUB_REPOSITORY" \
               --title "BrickellStatus $GITHUB_REF_NAME" \
               --generate-notes

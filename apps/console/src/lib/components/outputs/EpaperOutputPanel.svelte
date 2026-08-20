@@ -22,6 +22,7 @@
     connectDisplayDevice,
     disconnectDisplayDevice,
     getDisplayStatus,
+    getPlatformCapabilities,
     scanDisplayDevices,
     sendDisplayTestFrame
   } from '$lib/api';
@@ -45,7 +46,11 @@
   });
   let deviceCandidates = $state<DisplayDeviceCandidate[]>([]);
 
-  const transports: Array<{
+  // Assume USB until the backend says otherwise, so the register never flickers
+  // a smaller set of choices on a desktop that has them all.
+  let usbDisplay = $state(true);
+
+  const allTransports: Array<{
     id: DisplaySettings['transport'];
     label: string;
     detail: string;
@@ -56,6 +61,16 @@
     { id: 'usb', label: 'USB only', detail: 'Native serial with INK1 acknowledgement.', icon: Usb },
     { id: 'ble', label: 'Bluetooth only', detail: 'Direct in-app GATT connection.', icon: Bluetooth }
   ];
+
+  // On a phone there is no serial port to open, so "USB only" would be a
+  // setting that can only fail, and "Automatic" would promise a fallback with
+  // nothing to fall back from. Bluetooth is the whole story there.
+  const transports = $derived(
+    usbDisplay ? allTransports : allTransports.filter((transport) => transport.id !== 'usb' && transport.id !== 'auto')
+  );
+  const transportProse = $derived(
+    usbDisplay ? 'USB serial or Bluetooth Low Energy' : 'Bluetooth Low Energy'
+  );
 
   // Whatever board answered. Nothing here asks which one it is, and nothing
   // stores an answer: the panel is a property of the hardware on the desk.
@@ -70,6 +85,20 @@
 
   onMount(() => {
     let disposed = false;
+    void getPlatformCapabilities()
+      .then((capabilities) => {
+        if (disposed) return;
+        usbDisplay = capabilities.usbDisplay;
+        // A preference carried over from a desktop install would otherwise
+        // leave the phone pointed at a transport it cannot open.
+        if (!capabilities.usbDisplay && (draft.display.transport === 'usb' || draft.display.transport === 'auto')) {
+          draft.display.transport = 'ble';
+        }
+      })
+      .catch(() => {
+        // Capability reporting is an affordance, not a requirement; leaving the
+        // full register in place matches how this panel behaved before.
+      });
     const refresh = async () => {
       try {
         const status = await getDisplayStatus();
@@ -175,8 +204,8 @@
       </h2>
       <p>
         {detected
-          ? `${geometry.width} × ${geometry.height} monochrome frames over USB serial or Bluetooth Low Energy.`
-          : 'Monochrome frames over USB serial or Bluetooth Low Energy. The board names its own panel when it connects.'}
+          ? `${geometry.width} × ${geometry.height} monochrome frames over ${transportProse}.`
+          : `Monochrome frames over ${transportProse}. The board names its own panel when it connects.`}
       </p>
     </div>
     <span class="status-word" data-state={deviceStatus.state === 'connected' ? 'ready' : deviceStatus.state}>

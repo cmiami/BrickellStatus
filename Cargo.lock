@@ -383,6 +383,7 @@ name = "brickellstatus-collectors"
 version = "0.1.25"
 dependencies = [
  "async-trait",
+ "brickellstatus-tls",
  "chrono",
  "feed-rs",
  "futures",
@@ -406,8 +407,8 @@ name = "brickellstatus-delivery"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "brickellstatus-tls",
  "reqwest",
- "rustls",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -461,6 +462,7 @@ dependencies = [
  "embedded-graphics",
  "futures",
  "image",
+ "jni 0.19.0",
  "serde",
  "sha2 0.10.9",
  "thiserror 2.0.20",
@@ -518,11 +520,11 @@ dependencies = [
  "brickellstatus-model",
  "brickellstatus-policy",
  "brickellstatus-storage",
+ "brickellstatus-tls",
  "chrono",
  "futures",
  "jiff",
  "reqwest",
- "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -547,6 +549,16 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "brickellstatus-tls"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "rustls",
+ "thiserror 2.0.20",
+ "webpki-root-certs",
 ]
 
 [[package]]

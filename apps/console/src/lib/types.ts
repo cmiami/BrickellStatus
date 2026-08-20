@@ -465,3 +465,11 @@ export interface RadarLayer {
   maxZoom: number;
   attribution: string;
 }
+
+/** What the running platform can physically do, from `get_platform_capabilities`. */
+export interface PlatformCapabilities {
+  /** Whether a USB serial panel connection can be opened at all. */
+  usbDisplay: boolean;
+  /** Whether this build ships firmware it could write to a board. */
+  firmwareFlashing: boolean;
+}

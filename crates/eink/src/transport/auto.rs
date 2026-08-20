@@ -3,9 +3,14 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::{
-    BleConfig, BleTransport, PacketTransport, TransportError, TransportKind, TransportReceipt,
-    UsbConfig, UsbTransport, validate_for_transport,
+    PacketTransport, TransportError, TransportKind, TransportReceipt, validate_for_transport,
 };
+// Each cfg matches exactly where the names are used below: the BLE pair backs
+// both constructors, the USB pair only the one that needs both transports.
+#[cfg(feature = "ble")]
+use super::{BleConfig, BleTransport};
+#[cfg(all(feature = "ble", feature = "usb"))]
+use super::{UsbConfig, UsbTransport};
 use crate::{MonoFrame, RefreshMode, encode_packet};
 
 /// Physical path selection for the automatic frame writer.
@@ -30,10 +35,25 @@ pub struct AutoTransport {
 
 impl AutoTransport {
     /// Creates a hardware writer with both standard transports available.
+    #[cfg(all(feature = "ble", feature = "usb"))]
     pub fn hardware(preference: TransportPreference, usb: UsbConfig, ble: BleConfig) -> Self {
         Self::with_transports(
             preference,
             Some(Arc::new(UsbTransport::new(usb))),
+            Some(Arc::new(BleTransport::new(ble))),
+        )
+    }
+
+    /// Creates a writer for hosts that have Bluetooth but no serial port.
+    ///
+    /// The preference is forced rather than accepted: with no USB sink to fall
+    /// back from, `Auto` would report `AllFailed` and blame a transport the
+    /// host never had.
+    #[cfg(all(feature = "ble", not(feature = "usb")))]
+    pub fn ble_only(ble: BleConfig) -> Self {
+        Self::with_transports(
+            TransportPreference::Ble,
+            None,
             Some(Arc::new(BleTransport::new(ble))),
         )
     }

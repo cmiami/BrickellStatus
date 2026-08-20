@@ -12,10 +12,10 @@ brickellstatus-collectors = { path = "../collectors" }
 brickellstatus-model = { path = "../model" }
 brickellstatus-policy = { path = "../policy" }
 brickellstatus-storage = { path = "../storage" }
+brickellstatus-tls = { path = "../tls" }
 futures.workspace = true
 jiff.workspace = true
 reqwest.workspace = true
-rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

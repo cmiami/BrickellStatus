@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": {
+      "script": "npm run android:prepare",
+      "cwd": "../../console"
+    }
+  },
+  "app": {
+    "security": {
+      "csp": "default-src 'self' http://tauri.localhost; img-src 'self' http://tauri.localhost asset: http://asset.localhost data: blob: https://tiles.openfreemap.org https://tilecache.rainviewer.com; style-src 'self' http://tauri.localhost 'unsafe-inline'; connect-src 'self' http://tauri.localhost ipc: http://ipc.localhost https://tiles.openfreemap.org https://geocoding-api.open-meteo.com https://tilecache.rainviewer.com https://api.rainviewer.com; font-src 'self' http://tauri.localhost data:; worker-src 'self' http://tauri.localhost blob:; child-src 'self' blob:"
+    }
+  },
+  "bundle": {
+    "resources": {
+      "resources/licenses/": "licenses/",
+      "resources/firmware/": null
+    }
+  }
+}

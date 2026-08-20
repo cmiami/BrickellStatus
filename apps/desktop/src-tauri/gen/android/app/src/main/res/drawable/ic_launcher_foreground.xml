@@ -1,0 +1,45 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Adaptive icons crop the outer ~17% of the foreground for masking and
+         parallax, so the mark is scaled into the 72dp safe zone rather than
+         drawn full bleed. Paths stay in the source artboard's 512 coordinates
+         and the group does the fitting. -->
+    <group
+        android:scaleX="0.1799"
+        android:scaleY="0.1799"
+        android:translateX="7.95"
+        android:translateY="9.48">
+        <path
+            android:pathData="M82,354h348"
+            android:strokeColor="#F4F7F9"
+            android:strokeWidth="30"
+            android:strokeLineCap="square"
+            android:strokeLineJoin="miter" />
+        <path
+            android:pathData="M108,354l58,-170l90,170l90,-170l58,170"
+            android:strokeColor="#F4F7F9"
+            android:strokeWidth="30"
+            android:strokeLineCap="square"
+            android:strokeLineJoin="miter" />
+        <path
+            android:pathData="M256,106v248"
+            android:strokeColor="#F4F7F9"
+            android:strokeWidth="30"
+            android:strokeLineCap="square"
+            android:strokeLineJoin="miter" />
+        <path
+            android:pathData="M205,106h102"
+            android:strokeColor="#F4F7F9"
+            android:strokeWidth="30"
+            android:strokeLineCap="square"
+            android:strokeLineJoin="miter" />
+        <path
+            android:pathData="M73,399h366"
+            android:strokeColor="#F2A900"
+            android:strokeWidth="10"
+            android:strokeLineCap="butt" />
+    </group>
+</vector>

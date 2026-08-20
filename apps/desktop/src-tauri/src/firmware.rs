@@ -618,10 +618,12 @@ pub trait FlashProgress: Send {
     fn segment_finished(&mut self, skipped: bool);
 }
 
+#[cfg(desktop)]
 struct ProgressAdapter<'a> {
     inner: &'a mut dyn FlashProgress,
 }
 
+#[cfg(desktop)]
 impl espflash::target::ProgressCallbacks for ProgressAdapter<'_> {
     fn init(&mut self, addr: u32, total: usize) {
         self.inner.segment_started(addr, total);
@@ -644,6 +646,11 @@ impl espflash::target::ProgressCallbacks for ProgressAdapter<'_> {
 ///
 /// Blocking: espflash drives the serial bootloader synchronously, so callers on
 /// an async runtime must move this onto a blocking thread.
+///
+/// Desktop only: flashing means opening a USB serial bootloader, which an
+/// unprivileged Android app cannot do. The mobile build ships no firmware
+/// either, so `flash_firmware` refuses before it ever reaches this.
+#[cfg(desktop)]
 pub fn flash_variant(
     port_name: &str,
     variant: &FirmwareVariant,
@@ -715,6 +722,24 @@ pub fn flash_variant(
         .map_err(|error| FirmwareError::Flash {
             detail: error.to_string(),
         })
+}
+
+/// Mobile counterpart of [`flash_variant`], kept so `flash_firmware` compiles
+/// unchanged on both platforms.
+///
+/// Unreachable in practice: the Android bundle ships no firmware resource, so
+/// the command refuses at `firmware_root` long before this. It exists to keep
+/// the one call site free of platform branching.
+#[cfg(mobile)]
+pub fn flash_variant(
+    port_name: &str,
+    _variant: &FirmwareVariant,
+    _progress: &mut dyn FlashProgress,
+) -> Result<(), FirmwareError> {
+    Err(FirmwareError::Port {
+        port: port_name.to_owned(),
+        detail: "flashing a board over USB is not available on this device".to_owned(),
+    })
 }
 
 #[cfg(test)]
