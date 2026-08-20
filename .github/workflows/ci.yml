@@ -194,10 +194,18 @@ jobs:
       # dbus-devel), and what builds the C dependencies sqlx and ring carry.
       #
       # Deliberately absent, against Tauri's published Fedora list: openssl-devel
-      # (this workspace is rustls end to end), libxdo-devel and librsvg2-devel
-      # (no crate in Cargo.lock links either), and any appindicator -devel
-      # package -- libappindicator-sys 0.9 dlopens the tray library at runtime,
-      # so it is a package dependency of the RPM, not a build dependency here.
+      # (this workspace is rustls end to end), and libxdo-devel and
+      # librsvg2-devel (no crate in Cargo.lock links either).
+      #
+      # libayatana-appindicator-gtk3-devel is NOT optional, for a reason that
+      # is easy to reason past: libappindicator-sys 0.9 dlopens the tray
+      # library, so cargo links and the binary builds without it. The Tauri
+      # CLI then shells out to `pkg-config --libs-only-L
+      # ayatana-appindicator3-0.1` while bundling, to record which tray
+      # library the package needs, and panics with "Can't detect any
+      # appindicator library" when the .pc file is missing. That is a
+      # build-host requirement even though nothing links against it, and it
+      # fires only after a full release compile.
       - name: Install build and runner dependencies
         run: |
           set -euo pipefail
@@ -205,6 +213,7 @@ jobs:
             git tar gzip xz zstd findutils which ca-certificates \
             gcc gcc-c++ make pkgconf-pkg-config \
             webkit2gtk4.1-devel systemd-devel dbus-devel \
+            libayatana-appindicator-gtk3-devel \
             desktop-file-utils \
             rustup python3.13 python3-pip python-pip-wheel
           dnf clean all

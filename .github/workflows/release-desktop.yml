@@ -293,6 +293,7 @@ jobs:
             git tar gzip xz zstd findutils which ca-certificates \
             gcc gcc-c++ make pkgconf-pkg-config \
             webkit2gtk4.1-devel systemd-devel dbus-devel \
+            libayatana-appindicator-gtk3-devel \
             rustup python3.13 python3-pip python-pip-wheel
           dnf clean all
           # bundle_firmware.py derives the firmware build id by shelling out to

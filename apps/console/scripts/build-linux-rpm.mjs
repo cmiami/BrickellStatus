@@ -85,6 +85,19 @@ const REQUIRED_MODULES = [
     module: 'dbus-1',
     package: 'dbus-devel',
     reason: 'the BlueZ and tray bridges'
+  },
+  // Checked even though nothing links against it. libappindicator-sys dlopens
+  // the tray library, so cargo builds a working binary without this present --
+  // and then the Tauri CLI runs `pkg-config --libs-only-L
+  // ayatana-appindicator3-0.1` while bundling and panics with "Can't detect any
+  // appindicator library". Catching it here costs a second; missing it costs
+  // the whole release compile first. Either module satisfies the CLI, which
+  // falls back to the older one, so this passes if either is installed.
+  {
+    module: 'ayatana-appindicator3-0.1',
+    alternative: 'appindicator3-0.1',
+    package: 'libayatana-appindicator-gtk3-devel',
+    reason: 'the tray library the bundler records as a package dependency'
   }
 ];
 
@@ -93,7 +106,12 @@ if (!available('pkg-config', ['--version'])) {
 }
 
 const missing = REQUIRED_MODULES.filter(
-  (requirement) => !available('pkg-config', ['--exists', requirement.module])
+  (requirement) =>
+    !available('pkg-config', ['--exists', requirement.module]) &&
+    !(
+      requirement.alternative &&
+      available('pkg-config', ['--exists', requirement.alternative])
+    )
 );
 if (missing.length > 0) {
   throw new Error(

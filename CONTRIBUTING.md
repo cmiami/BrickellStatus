@@ -35,7 +35,8 @@ Required versions are intentionally pinned where reproducibility matters:
   cross-building the Windows installer (see
   [`docs/WINDOWS_RELEASE.md`](docs/WINDOWS_RELEASE.md));
 - on Fedora, `sudo dnf install webkit2gtk4.1-devel systemd-devel dbus-devel
-  gcc gcc-c++ make pkgconf-pkg-config` for a Linux desktop build (see
+  libayatana-appindicator-gtk3-devel gcc gcc-c++ make pkgconf-pkg-config` for a
+  Linux desktop build (see
   [`docs/FEDORA_RELEASE.md`](docs/FEDORA_RELEASE.md)).
 
 ```sh

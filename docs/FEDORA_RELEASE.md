@@ -53,16 +53,50 @@ The build dependencies, and why each is there:
 | `systemd-devel` | `libudev`, which `serialport` uses to enumerate ports |
 | `dbus-devel` | `libdbus-1`, reached by `tao` and by `btleplug` for BlueZ |
 | `gcc`, `gcc-c++`, `make` | the C in `libsqlite3-sys` and `ring` |
-| `pkgconf-pkg-config` | how all three `-devel` packages are found |
+| `libayatana-appindicator-gtk3-devel` | its `.pc` file, which the Tauri CLI probes while bundling |
+| `pkgconf-pkg-config` | how every `-devel` package above is found |
 
-Four packages from Tauri's published Fedora list are deliberately **absent**:
+Three packages from Tauri's published Fedora list are deliberately **absent**:
 
 - `openssl-devel` — this workspace is rustls end to end. `cargo tree -i
   openssl-sys` must stay empty.
 - `libxdo-devel` and `librsvg2-devel` — no crate in `Cargo.lock` links either.
-- any appindicator `-devel` package — `libappindicator-sys` 0.9 `dlopen`s
-  `libayatana-appindicator3.so.1` at runtime rather than linking it, so the
-  tray library is a dependency of the *package*, not of the build.
+
+### The appindicator trap
+
+`libayatana-appindicator-gtk3-devel` looks like a fourth candidate for that
+list and is not one. The reasoning that puts it there is seductive and wrong,
+so it is written down here.
+
+`libappindicator-sys` 0.9 `dlopen`s `libayatana-appindicator3.so.1` at runtime
+rather than linking it. Nothing in `Cargo.lock` links the library, no `.so` is
+needed to link, and `cargo build --release` produces a complete, working
+binary without the `-devel` package installed. Every signal available from the
+Rust side says the package is a runtime dependency of the *artifact*, not a
+build dependency.
+
+Then the Tauri CLI bundles, and runs this:
+
+```sh
+pkg-config --libs-only-L ayatana-appindicator3-0.1   # then appindicator3-0.1
+```
+
+It needs the library path to record which tray library the package depends on.
+With no `.pc` file it finds neither and panics — `Can't detect any appindicator
+library` — from `tauri-cli/src/interface/rust.rs`. So the `-devel` package is a
+build-host requirement despite nothing linking against it, and the failure
+lands **after** the full release compile, roughly seven minutes in.
+
+`build-linux-rpm.mjs` therefore checks for that pkg-config module in its
+preflight alongside the three it genuinely links, which turns seven wasted
+minutes into an immediate error naming the `dnf` command. Either module
+satisfies the CLI, so the preflight accepts either.
+
+Which branch the CLI takes also decides what the package should require:
+finding `ayatana-appindicator3-0.1` makes it record
+`libayatana-appindicator3.so.1`, owned on Fedora 44 by
+`libayatana-appindicator-gtk3` — which is what `bundle.linux.rpm.depends`
+names.
 
 ## The package's runtime dependencies are hand-written
 
@@ -142,7 +176,7 @@ On Fedora 44:
 
 ```sh
 sudo dnf install webkit2gtk4.1-devel systemd-devel dbus-devel \
-  gcc gcc-c++ make pkgconf-pkg-config
+  libayatana-appindicator-gtk3-devel gcc gcc-c++ make pkgconf-pkg-config
 npm --prefix apps/console ci
 npm --prefix apps/console run tauri:build:linux
 ```
