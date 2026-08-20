@@ -1472,11 +1472,21 @@ struct PlatformCapabilities {
 
 #[tauri::command]
 fn get_platform_capabilities(app: AppHandle) -> PlatformCapabilities {
+    // Neither phone platform can drive a panel over the cable, for different
+    // reasons, and both end in the same place: BLE is the only transport, and
+    // flashing is impossible because it needs a serial bootloader.
+    //
     // Android links the serial stack but cannot open a port from an
     // unprivileged app: available_ports() answers "Not implemented for this
-    // OS". Reporting that up front is kinder than a scan that always finds
-    // nothing, and flashing needs both a port and a bundled image.
-    let usb_display = cfg!(not(target_os = "android"));
+    // OS". iOS does not link it at all -- espflash and serialport are excluded
+    // from the build for both phone targets in Cargo.toml -- because iOS
+    // exposes no USB serial interface to a sandboxed app in the first place.
+    //
+    // Written as `mobile` rather than as a list of triples so a future phone
+    // target inherits the honest answer instead of claiming a cable it has no
+    // way to open. Reporting this up front is kinder than a scan that always
+    // finds nothing, and flashing needs both a port and a bundled image.
+    let usb_display = cfg!(not(mobile));
     PlatformCapabilities {
         usb_display,
         firmware_flashing: usb_display && firmware_root(&app).is_some(),

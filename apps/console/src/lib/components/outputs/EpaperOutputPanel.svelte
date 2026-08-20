@@ -50,6 +50,8 @@
   // Assume USB until the backend says otherwise, so the register never flickers
   // a smaller set of choices on a desktop that has them all.
   let usbDisplay = $state(true);
+  // Writing firmware needs a serial bootloader, which no phone can reach.
+  let flashingSupported = $state(true);
 
   const allTransports: Array<{
     id: DisplaySettings['transport'];
@@ -85,9 +87,11 @@
   // and look at the screen. That makes "write the other one" a permanent
   // control here, not a prompt that disappears once the flash succeeds.
   const otherBuild = $derived(
-    firmware?.variants.find(
-      (variant) => variant.panel === panel && variant.id !== firmware?.recommendedVariantId
-    ) ?? null
+    !flashingSupported
+      ? null
+      : firmware?.variants.find(
+          (variant) => variant.panel === panel && variant.id !== firmware?.recommendedVariantId
+        ) ?? null
   );
 
   const epaperOutput = $derived($snapshot?.outputs.find((output) => output.id === 'epaper'));
@@ -101,6 +105,7 @@
       .then((capabilities) => {
         if (disposed) return;
         usbDisplay = capabilities.usbDisplay;
+        flashingSupported = capabilities.firmwareFlashing;
         // A preference carried over from a desktop install would otherwise
         // leave the phone pointed at a transport it cannot open.
         if (!capabilities.usbDisplay && (draft.display.transport === 'usb' || draft.display.transport === 'auto')) {

@@ -346,9 +346,6 @@
     </div>
     <!-- Says what is true right now, and asks for nothing. It is a status
          line, not a banner: nothing to dismiss and nothing to press. -->
-    <p class="save-state" aria-live="polite">
-      {$saving ? 'Saving' : unsaved ? 'Saving shortly' : 'All changes saved'}
-    </p>
   </header>
 
   {#if draft}
@@ -869,18 +866,4 @@
       grid-template-columns: 1fr;
       gap: 8px;
     }
-  }
-
-  /* A status line, not a control: it says what is true and asks for nothing. */
-  .save-state {
-    flex: 0 0 auto;
-    align-self: center;
-    margin: 0;
-    color: var(--muted);
-    font-family: var(--font-instrument);
-    font-size: var(--type-label);
-    font-weight: 650;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-  }
-</style>
+  }</style>

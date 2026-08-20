@@ -49,10 +49,11 @@ describe('persistPreferences', () => {
     await expect(persistPreferences(draft)).resolves.toEqual({ ok: true, message: 'saved' });
     expect(get(preferences)).toBe(saved);
     expect(get(snapshot)).toBe(live);
-    // Settings apply as they are typed, so a save is not news. Announcing each
-    // one put a banner in front of the reader for something they had just done
-    // on purpose, and made them dismiss it to carry on.
-    expect(get(notice)).toBeNull();
+    // Confirmation is transient: it appears and clears itself. The alternative
+    // tried before this was a permanent indicator on each desk, which read as a
+    // greyed-out Save button -- the one affordance this app must never appear
+    // to have. Writes are debounced, so this is one notice per burst of edits.
+    expect(get(notice)).toEqual({ ok: true, message: 'Saved.' });
   });
 
   it('still speaks up when a save fails', async () => {

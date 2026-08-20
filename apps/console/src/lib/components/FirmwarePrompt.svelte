@@ -1,12 +1,17 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
+
+  import { getPlatformCapabilities } from '$lib/api';
   import { onMount } from 'svelte';
 
   import { PANEL_GEOMETRY, type FirmwareStatus, type FirmwareVariantSummary } from '$lib/types';
 
   let status = $state<FirmwareStatus | null>(null);
   let dismissed = $state(false);
+  // A phone cannot write firmware: there is no serial bootloader to reach.
+  // Offering the flash anyway would fail after the reader agreed to it.
+  let flashingSupported = $state(true);
   let flashing = $state(false);
   let written = $state(0);
   let total = $state(0);
@@ -30,6 +35,7 @@
   let lastWritten = $state<FirmwareVariantSummary | null>(null);
 
   const prompted = $derived(
+    flashingSupported &&
     !dismissed &&
       !!status &&
       !!status.port &&
@@ -79,6 +85,9 @@
   }
 
   onMount(() => {
+    void getPlatformCapabilities()
+      .then((capabilities) => (flashingSupported = capabilities.firmwareFlashing))
+      .catch(() => (flashingSupported = false));
     void refresh();
     const poll = setInterval(refresh, 15_000);
     const unlisten = listen<{ stage: string; written: number; total: number }>(

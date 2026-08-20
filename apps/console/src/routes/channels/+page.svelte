@@ -126,15 +126,6 @@
       <a class="secondary-action" href="/map"><MapPinned size={17} aria-hidden="true" /> Open map</a>
       <!-- No Save button: every change on this page applies itself. The status
            exists so "applied" is something the reader can see, not assume. -->
-      <p class="apply-state" aria-live="polite" data-state={$saving || unsaved ? 'working' : 'applied'}>
-        {#if $saving}
-          <Save size={15} aria-hidden="true" /> Applying…
-        {:else if unsaved}
-          <Save size={15} aria-hidden="true" /> Applying changes
-        {:else}
-          <Check size={15} aria-hidden="true" /> All changes applied
-        {/if}
-      </p>
     </div>
   </header>
 
@@ -793,26 +784,4 @@
     .live-preview {
       padding: 24px 16px;
     }
-  }
-
-  .apply-state {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    margin: 0;
-    padding: 9px 12px;
-    color: var(--muted);
-    background: var(--frost);
-    border: 1px solid var(--rule);
-    font-family: var(--font-instrument);
-    font-size: var(--type-micro);
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-  }
-
-  .apply-state[data-state='applied'] {
-    color: var(--success);
-    border-color: var(--success);
-  }
-</style>
+  }</style>

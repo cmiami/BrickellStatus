@@ -1,6 +1,7 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { getPlatformCapabilities } from '$lib/api';
 import type { FirmwareStatus } from '$lib/types';
 
 const invoke = vi.fn();
@@ -10,6 +11,11 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async () => () => {})
+}));
+// A desktop build: the prompt only offers a flash where one is possible, so
+// these cases have to say which platform they are standing on.
+vi.mock('$lib/api', () => ({
+  getPlatformCapabilities: vi.fn(async () => ({ usbDisplay: true, firmwareFlashing: true }))
 }));
 
 const E213_V11 = { id: 'vision-master-e213-v11', label: 'Panel v1.1', panel: 'e213', panelRevision: 'v11', totalBytes: 529_104 } as const;
@@ -132,5 +138,22 @@ describe('FirmwarePrompt', () => {
     render(FirmwarePrompt);
 
     expect(await screen.findByText(/this board is an E290/i)).toBeInTheDocument();
+  });
+
+  it('offers nothing on a platform that cannot write firmware', async () => {
+    // A phone reaches no serial bootloader, so a flash it agreed to would fail
+    // after the fact. The prompt stays away rather than asking for consent it
+    // cannot honour.
+    vi.mocked(getPlatformCapabilities).mockResolvedValueOnce({
+      usbDisplay: false,
+      firmwareFlashing: false
+    });
+    serve(status({ board: 'e213', recommendedVariantId: 'vision-master-e213-v11' }));
+
+    const { default: FirmwarePrompt } = await import('./FirmwarePrompt.svelte');
+    render(FirmwarePrompt);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByRole('button', { name: /flash|write/i })).toBeNull();
   });
 });

@@ -55,10 +55,12 @@ export async function persistPreferences(next: AppPreferences): Promise<Mutation
       const [savedPreferences, nextSnapshot] = await Promise.all([getPreferences(), getSnapshot()]);
       preferences.set(savedPreferences);
       snapshot.set(nextSnapshot);
-      // Saving is not news. Settings apply as they are typed, so announcing
-      // each one is a banner per keystroke-batch that the reader has to dismiss
-      // to carry on — and the desk already says "All changes saved" quietly.
-      // A failure still speaks up, because that is something to act on.
+      // Confirmation is transient and self-clearing. The desks used to carry a
+      // quiet permanent indicator instead, which read as a greyed-out Save
+      // button -- the exact affordance this app does not have and should never
+      // appear to. Writes are debounced, so this is one notice per burst of
+      // edits rather than per keystroke, and it leaves on its own.
+      notice.set({ ok: true, message: 'Saved.' });
       return result;
     }
     notice.set(result);

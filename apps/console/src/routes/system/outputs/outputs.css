@@ -2,7 +2,6 @@
     padding-inline: clamp(18px, 3vw, 48px);
   }
 
-  .save-action,
   .action-with-icon {
     display: inline-flex;
     align-items: center;
@@ -629,21 +628,7 @@
   .three-fields,
   .timing-register {
     grid-template-columns: repeat(3, 1fr);
-  }
-
-  .save-state {
-    flex: 0 0 auto;
-    margin: 0;
-    align-self: center;
-    color: var(--muted);
-    font-family: var(--font-instrument);
-    font-size: var(--type-label);
-    font-weight: 650;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-  }
-
-  .orientation {
+  }  .orientation {
     margin: 28px 0 0;
     padding: 0;
     border: 0;

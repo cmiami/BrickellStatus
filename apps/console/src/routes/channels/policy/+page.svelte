@@ -104,9 +104,6 @@
         scarce permission to interrupt; channel content and destinations stay independently configurable.
       </p>
     </div>
-    <p class="save-state" aria-live="polite">
-      {$saving ? 'Saving' : unsaved ? 'Saving shortly' : 'All changes saved'}
-    </p>
   </header>
 
   {#if draft}
@@ -394,17 +391,4 @@
 
     .policy-section {
       padding-inline: 16px;
-    }  }
-
-  .save-state {
-    flex: 0 0 auto;
-    align-self: center;
-    margin: 0;
-    color: var(--muted);
-    font-family: var(--font-instrument);
-    font-size: var(--type-label);
-    font-weight: 650;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-  }
-</style>
+    }  }</style>

@@ -74,9 +74,6 @@
     </div>
     <!-- Says what is true right now, and asks for nothing. It is a status
          line, not a banner: nothing to dismiss and nothing to press. -->
-    <p class="save-state" aria-live="polite">
-      {$saving ? 'Saving' : unsaved ? 'Saving shortly' : 'All changes saved'}
-    </p>
   </header>
 
   {#if draft}
