@@ -1,0 +1,30 @@
+# Hands the ESP32-S3 panel's serial node to whoever is logged in at this seat.
+#
+# BrickellStatus does two things over USB serial: it drives a running panel
+# (crates/eink/src/transport/usb.rs) and it flashes a blank one
+# (apps/desktop/src-tauri/src/firmware.rs). Both open the tty node directly.
+# Fedora ships those nodes root:dialout 0660, so without a rule the app lists
+# the board and then fails to open it -- the worst of both, because the device
+# is visibly present and still unusable.
+#
+# TAG+="uaccess" asks systemd-logind to put an ACL for the active local session
+# on the node. That is narrower than the usual advice of adding the account to
+# the dialout group, which grants that account every serial device on the
+# machine, permanently, whether or not it is the session sitting at the
+# keyboard. It also survives a Wayland session with no shell involvement and
+# takes effect on the next replug rather than the next logout.
+#
+# The vendor below is the one the app itself matches on. USB-UART bridge chips
+# (CP210x, CH340, FTDI) are deliberately absent: the app's discovery filter
+# does not recognise them either, so a rule for them would open devices that
+# never appear in the picker.
+
+ACTION!="add|change", GOTO="brickellstatus_end"
+SUBSYSTEM!="tty", GOTO="brickellstatus_end"
+
+# Espressif: ESP32-S3 native USB, both the USB-Serial-JTAG peripheral a blank
+# board exposes in download mode and the TinyUSB CDC port the flashed firmware
+# brings up (ARDUINO_USB_CDC_ON_BOOT=1 in firmware/panel/platformio.ini).
+ATTRS{idVendor}=="303a", TAG+="uaccess"
+
+LABEL="brickellstatus_end"

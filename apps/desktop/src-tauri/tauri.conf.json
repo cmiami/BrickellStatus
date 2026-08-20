@@ -71,6 +71,31 @@
         "startMenuFolder": "BrickellStatus"
       }
     },
+    "linux": {
+      "rpm": {
+        "release": "1",
+        "compression": {
+          "type": "zstd",
+          "level": 19
+        },
+        "depends": [
+          "webkit2gtk4.1",
+          "gtk3",
+          "libayatana-appindicator-gtk3",
+          "dbus-libs",
+          "systemd-libs"
+        ],
+        "recommends": [
+          "bluez"
+        ],
+        "desktopTemplate": "linux/brickellstatus.desktop",
+        "postInstallScript": "linux/post-install.sh",
+        "postRemoveScript": "linux/post-remove.sh",
+        "files": {
+          "/usr/lib/udev/rules.d/70-brickellstatus-espressif.rules": "linux/70-brickellstatus-espressif.rules"
+        }
+      }
+    },
     "macOS": {
       "minimumSystemVersion": "12.0",
       "hardenedRuntime": true,

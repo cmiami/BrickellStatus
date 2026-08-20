@@ -33,7 +33,10 @@ Required versions are intentionally pinned where reproducibility matters:
 - PlatformIO only for e-paper panel firmware work;
 - `brew install nsis llvm` plus `cargo install --locked cargo-xwin` only for
   cross-building the Windows installer (see
-  [`docs/WINDOWS_RELEASE.md`](docs/WINDOWS_RELEASE.md)).
+  [`docs/WINDOWS_RELEASE.md`](docs/WINDOWS_RELEASE.md));
+- on Fedora, `sudo dnf install webkit2gtk4.1-devel systemd-devel dbus-devel
+  gcc gcc-c++ make pkgconf-pkg-config` for a Linux desktop build (see
+  [`docs/FEDORA_RELEASE.md`](docs/FEDORA_RELEASE.md)).
 
 ```sh
 git clone https://github.com/cmiami/BrickellStatus.git
@@ -75,8 +78,15 @@ delivery test, and the board-identification probe is only proven on a board.
 For macOS release work, follow [`docs/MACOS_RELEASE.md`](docs/MACOS_RELEASE.md)
 and include the measured DMG size. For Windows release work, follow
 [`docs/WINDOWS_RELEASE.md`](docs/WINDOWS_RELEASE.md) and include the measured
-installer size. Release artifacts must remain at or below the repository's
-25 MiB limit.
+installer size. For Fedora release work, follow
+[`docs/FEDORA_RELEASE.md`](docs/FEDORA_RELEASE.md), include the measured package
+size, and say whether QA ran on GNOME, Plasma, or both — the tray and the udev
+rule behave differently across them. Release artifacts must remain at or below
+the repository's 25 MiB limit.
+
+Changing `bundle.linux.rpm.depends` deserves particular care: Tauri writes RPMs
+without rpmbuild, so that list is the package's *entire* dependency metadata and
+nothing generates it from the built binary.
 
 ## Product contracts worth defending
 
