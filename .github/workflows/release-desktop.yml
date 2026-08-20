@@ -269,10 +269,124 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # The Fedora package is the one artifact that cannot be cross-built: it links
+  # the host's WebKitGTK, libudev and libdbus, and it names its runtime
+  # dependencies as Fedora packages. So it is built on Fedora, in a container,
+  # because GitHub offers no Fedora runner. See docs/FEDORA_RELEASE.md.
+  build-linux:
+    name: Fedora 44 x86_64 RPM
+    needs: verify-ref
+    runs-on: ubuntu-latest
+    # Pinned by digest, like every action here. Refresh with:
+    #   docker buildx imagetools inspect fedora:44 --format '{{.Manifest.Digest}}'
+    container: fedora:44@sha256:6c75d5bf57cb0fa5aa4b92c6a83c86c791644496d9ac230de7711f5b8ec3b898
+    timeout-minutes: 75
+    env:
+      CI: "true"
+    steps:
+      # dnf before checkout: the Fedora image has no git for actions/checkout to
+      # call. The list is explained in ci.yml's fedora-linux job.
+      - name: Install build and runner dependencies
+        run: |
+          set -euo pipefail
+          dnf -y install \
+            git tar gzip xz zstd findutils which ca-certificates \
+            gcc gcc-c++ make pkgconf-pkg-config \
+            webkit2gtk4.1-devel systemd-devel dbus-devel \
+            rustup python3.13 python3-pip python-pip-wheel
+          dnf clean all
+          # bundle_firmware.py derives the firmware build id by shelling out to
+          # git. In a container the mounted workspace can trip git's
+          # dubious-ownership guard, and it would surface as a build-id failure
+          # rather than as anything git-shaped.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history for the firmware build id; see the macOS job above.
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/console/package-lock.json
+
+      - name: Use the locked npm release
+        run: npm install --global npm@11.18.0
+
+      - name: Install JavaScript dependencies
+        run: npm --prefix apps/console ci
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.97.1
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustc" --version
+
+      - name: Cache PlatformIO
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-fedora44-${{ hashFiles('firmware/panel/platformio.ini') }}
+          restore-keys: pio-fedora44-
+
+      - name: Install PlatformIO
+        run: |
+          set -euo pipefail
+          python3.13 -m venv /opt/platformio
+          /opt/platformio/bin/python -m pip install --upgrade pip
+          /opt/platformio/bin/python -m pip install platformio==6.1.18
+          echo "/opt/platformio/bin" >> "$GITHUB_PATH"
+
+      - name: Build panel firmware
+        run: python3 firmware/panel/scripts/bundle_firmware.py
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: release-fedora44
+
+      - name: Build unsigned RPM
+        run: npm --prefix apps/console run tauri:build:linux
+
+      - name: Name and checksum artifact
+        env:
+          VERSION: ${{ needs.verify-ref.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_dir="target/release/bundle/rpm"
+          package="$(find "$bundle_dir" -maxdepth 1 -type f -name '*.rpm' -print -quit)"
+          if [[ -z "$package" ]]; then
+            echo "No RPM found in $bundle_dir" >&2
+            exit 1
+          fi
+          mkdir -p dist
+          output="dist/BrickellStatus_${VERSION}_fedora44-x86_64.rpm"
+          cp "$package" "$output"
+          node apps/console/scripts/check-linux-artifact-size.mjs target/release \
+            | tee "dist/BrickellStatus_${VERSION}_fedora44-x86_64.sizes.txt"
+          (cd dist && sha256sum "$(basename "$output")" > "$(basename "$output").sha256")
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fedora44-x86_64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
     name: Publish tag assets
     if: github.event_name == 'push'
-    needs: [verify-ref, build, build-windows]
+    needs: [verify-ref, build, build-windows, build-linux]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -293,9 +407,9 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/*.dmg dist/*-setup.exe --clobber --repo "$GITHUB_REPOSITORY"
+            gh release upload "$GITHUB_REF_NAME" dist/*.dmg dist/*-setup.exe dist/*.rpm --clobber --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$GITHUB_REF_NAME" dist/*.dmg dist/*-setup.exe \
+            gh release create "$GITHUB_REF_NAME" dist/*.dmg dist/*-setup.exe dist/*.rpm \
               --repo "$GITHUB_REPOSITORY" \
               --title "BrickellStatus $GITHUB_REF_NAME" \
               --generate-notes

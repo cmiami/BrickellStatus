@@ -3,7 +3,14 @@ set -euo pipefail
 
 repository="${1:-cmiami/BrickellStatus}"
 branch="main"
-required_check="Rust, console, and Tauri shell"
+# Every check that must pass before main accepts a merge. Each string must
+# match a job's `name:` in ci.yml exactly: GitHub matches status contexts by
+# that display name, so renaming a job silently un-gates it rather than
+# failing loudly.
+required_checks=(
+  "Rust, console, and Tauri shell"
+  "Fedora 44 build, tests, and RPM"
+)
 
 if ! command -v gh >/dev/null 2>&1; then
   echo "GitHub CLI (gh) is required." >&2
@@ -28,6 +35,11 @@ if ! gh api "repos/${repository}/branches/${branch}" >/dev/null; then
   exit 1
 fi
 
+contexts_json=""
+for check in "${required_checks[@]}"; do
+  contexts_json+="${contexts_json:+, }\"${check}\""
+done
+
 gh api \
   --method PUT \
   -H "Accept: application/vnd.github+json" \
@@ -37,7 +49,7 @@ gh api \
 {
   "required_status_checks": {
     "strict": true,
-    "contexts": ["${required_check}"]
+    "contexts": [${contexts_json}]
   },
   "enforce_admins": true,
   "required_pull_request_reviews": {

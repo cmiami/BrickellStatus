@@ -171,3 +171,138 @@ jobs:
 
       - name: Test Rust workspace
         run: cargo test --workspace
+
+  # The only pre-release signal that the Rust code builds and runs on Linux.
+  # Linux is the one desktop platform whose system libraries the app links
+  # against at build time -- WebKitGTK for the webview, libudev for serial-port
+  # enumeration, libdbus for the tray and BlueZ bridges -- so none of it is
+  # proven by the macOS or Windows legs, which link none of them. GitHub has no
+  # Fedora runner, so this runs in the same container the release job uses.
+  fedora-linux:
+    name: Fedora 44 build, tests, and RPM
+    runs-on: ubuntu-latest
+    # Pinned by digest for the same reason every action here is pinned by SHA.
+    # Refresh with:
+    #   docker buildx imagetools inspect fedora:44 --format '{{.Manifest.Digest}}'
+    container: fedora:44@sha256:6c75d5bf57cb0fa5aa4b92c6a83c86c791644496d9ac230de7711f5b8ec3b898
+    timeout-minutes: 75
+    steps:
+      # dnf runs before checkout because the Fedora image ships no git and
+      # actions/checkout shells out to it. The rest splits three ways: what the
+      # runner's own actions need (tar, gzip, xz, zstd for the caches), what
+      # cargo needs to link (webkit2gtk4.1-devel, systemd-devel for libudev,
+      # dbus-devel), and what builds the C dependencies sqlx and ring carry.
+      #
+      # Deliberately absent, against Tauri's published Fedora list: openssl-devel
+      # (this workspace is rustls end to end), libxdo-devel and librsvg2-devel
+      # (no crate in Cargo.lock links either), and any appindicator -devel
+      # package -- libappindicator-sys 0.9 dlopens the tray library at runtime,
+      # so it is a package dependency of the RPM, not a build dependency here.
+      - name: Install build and runner dependencies
+        run: |
+          set -euo pipefail
+          dnf -y install \
+            git tar gzip xz zstd findutils which ca-certificates \
+            gcc gcc-c++ make pkgconf-pkg-config \
+            webkit2gtk4.1-devel systemd-devel dbus-devel \
+            desktop-file-utils \
+            rustup python3.13 python3-pip python-pip-wheel
+          dnf clean all
+          # bundle_firmware.py derives the firmware build id by shelling out to
+          # git. In a container the mounted workspace can trip git's
+          # dubious-ownership guard, and it would surface as a build-id failure
+          # rather than as anything git-shaped.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The firmware build id is derived from history; see release-desktop.yml.
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/console/package-lock.json
+
+      - name: Use the locked npm release
+        run: npm install --global npm@11.18.0
+
+      - name: Install JavaScript dependencies
+        run: npm --prefix apps/console ci
+
+      # Fedora ships rustup as a package, so the toolchain arrives without
+      # piping a shell script from the network. rust-toolchain.toml still
+      # decides the version; this only puts rustup somewhere cargo can find it.
+      - name: Install the pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.97.1
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustc" --version
+
+      # PlatformIO goes in a venv on Fedora's python3.13 rather than through
+      # actions/setup-python: the pinned interpreter is already a package here,
+      # and setup-python would drop an Ubuntu-built CPython into a Fedora
+      # userland to run the one toolchain in this repo that is version-sensitive.
+      - name: Cache PlatformIO
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-fedora44-${{ hashFiles('firmware/panel/platformio.ini') }}
+          restore-keys: pio-fedora44-
+
+      - name: Install PlatformIO
+        run: |
+          set -euo pipefail
+          python3.13 -m venv /opt/platformio
+          /opt/platformio/bin/python -m pip install --upgrade pip
+          /opt/platformio/bin/python -m pip install platformio==6.1.18
+          echo "/opt/platformio/bin" >> "$GITHUB_PATH"
+
+      - name: Build panel firmware
+        run: python3 firmware/panel/scripts/bundle_firmware.py
+
+      # tauri.conf.json points at three generated paths; see the quality job.
+      - name: Prepare generated Tauri inputs
+        run: npm --prefix apps/console run desktop:prepare
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ci-fedora44
+
+      - name: Test Rust workspace
+        run: cargo test --workspace
+
+      - name: Build the unsigned RPM
+        run: npm --prefix apps/console run tauri:build:linux
+
+      - name: Check payload and size
+        run: npm --prefix apps/console run size:linux
+
+      # The single check that proves the most: `depends` in tauri.conf.json is
+      # a hand-written list, because Tauri writes RPMs with the pure-Rust `rpm`
+      # crate rather than rpmbuild and so never runs the automatic dependency
+      # generator. A name that no longer resolves on Fedora 44 is invisible
+      # until someone tries to install the release -- unless dnf tries here.
+      - name: Install the package and validate its desktop entry
+        run: |
+          set -euo pipefail
+          package="$(find target/release/bundle/rpm -maxdepth 1 -name '*.rpm' -print -quit)"
+          # Asked of the package rather than hardcoded: Tauri derives the RPM
+          # name from productName, and guessing its casing here would turn a
+          # passing install into a failing query.
+          name="$(rpm -qp --queryformat '%{NAME}' "$package")"
+          dnf -y install "$package"
+          rpm -q "$name"
+          test -f /usr/lib/udev/rules.d/70-brickellstatus-espressif.rules
+          entry="$(rpm -ql "$name" | grep '[.]desktop$')"
+          test -n "$entry"
+          desktop-file-validate "$entry"
+          dnf -y remove "$name"

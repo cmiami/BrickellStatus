@@ -15,8 +15,9 @@
 ## The app is unsigned. Your OS will refuse to open it the first time.
 
 There is no code-signing certificate behind these builds, so macOS Gatekeeper
-and Windows SmartScreen block them until you approve the app by hand. This is
-expected, and it takes about twenty seconds.
+and Windows SmartScreen block them until you approve the app by hand, and dnf
+warns that the Fedora package is unsigned. This is expected, and it takes about
+twenty seconds.
 
 ### macOS
 
@@ -46,6 +47,29 @@ app again, then go back to Privacy & Security.
 3. The installer runs per-user: no administrator prompt, and the app lands in
    your Start Menu. Windows 11 already ships the WebView2 runtime the app uses;
    on a machine without it, the installer fetches it automatically.
+
+### Fedora
+
+1. Download `BrickellStatus_<version>_fedora44-x86_64.rpm` from
+   [Releases](../../releases) and install it:
+
+   ```sh
+   sudo dnf install ./BrickellStatus_<version>_fedora44-x86_64.rpm
+   ```
+
+2. dnf reports the package is **not signed**. Confirm the SHA-256 against the
+   release page if you want the check the signature would have given you, then
+   accept. Everything it pulls in — WebKitGTK, GTK 3, the tray library — comes
+   from Fedora's own repositories.
+3. Launch **BrickellStatus** from the overview. It runs natively on Wayland.
+   The tray icon needs KDE Plasma, or GNOME with the AppIndicator extension;
+   the window and notifications work either way.
+4. To flash or drive an e-paper panel, just plug it in. The package installs a
+   udev rule that hands the board to whoever is logged in at the machine, so
+   there is no `dialout` group to join and nothing to log out of.
+
+Built and tested on Fedora 44. Details, including why this is an RPM rather
+than a Flatpak, are in [`docs/FEDORA_RELEASE.md`](docs/FEDORA_RELEASE.md).
 
 ---
 
@@ -97,11 +121,17 @@ cargo test --workspace                       # Rust tests
 npm --prefix apps/console test               # console tests
 npm --prefix apps/console run tauri:build:mac  # unsigned DMG
 npm --prefix apps/console run tauri:build:win  # unsigned Windows installer, cross-compiled
+npm --prefix apps/console run tauri:build:linux  # unsigned Fedora RPM, builds on Fedora
 ```
 
 The Windows executable and NSIS installer are cross-compiled from macOS — no
 Windows machine involved except for testing. The one-time toolchain setup and
 the QA protocol live in [`docs/WINDOWS_RELEASE.md`](docs/WINDOWS_RELEASE.md).
+
+The Fedora package is the one artifact that cannot be cross-built: it links the
+host's WebKitGTK, libudev and libdbus and names its dependencies as Fedora
+packages, so it builds on Fedora — in CI, inside a pinned `fedora:44`
+container. See [`docs/FEDORA_RELEASE.md`](docs/FEDORA_RELEASE.md).
 
 `desktop:prepare` generates the three inputs the Tauri build needs — bundled
 license texts, the panel firmware bundle, and the compiled frontend — and runs
