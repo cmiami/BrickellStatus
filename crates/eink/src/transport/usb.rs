@@ -249,6 +249,29 @@ pub async fn discover_espressif_port() -> Result<Option<String>, TransportError>
         .map(|device| device.port))
 }
 
+/// Drops the `/dev/tty.*` twin of a device that also offers `/dev/cu.*`.
+///
+/// macOS exposes one USB serial device under two nodes. They are the same
+/// hardware, so listing both offered a picker with each board in it twice, and
+/// the two entries did not behave alike: opening `cu` returns immediately,
+/// while opening `tty` blocks waiting for carrier detect that a CDC device
+/// never asserts, so choosing the wrong twin sat there and then timed out.
+///
+/// `cu` is the outbound node and the one to open. A `tty` entry is kept only
+/// when nothing offers the matching `cu`, so a platform that names things
+/// differently still lists its devices.
+fn prefer_callout_nodes(devices: &mut Vec<UsbDeviceInfo>) {
+    let callouts: std::collections::HashSet<String> = devices
+        .iter()
+        .filter_map(|device| device.port.strip_prefix("/dev/cu."))
+        .map(str::to_owned)
+        .collect();
+    devices.retain(|device| match device.port.strip_prefix("/dev/tty.") {
+        Some(suffix) => !callouts.contains(suffix),
+        None => true,
+    });
+}
+
 /// Lists compatible Espressif USB serial interfaces without opening them.
 pub async fn discover_espressif_devices() -> Result<Vec<UsbDeviceInfo>, TransportError> {
     tokio::task::spawn_blocking(|| {
@@ -290,6 +313,7 @@ pub async fn discover_espressif_devices() -> Result<Vec<UsbDeviceInfo>, Transpor
                 _ => None,
             })
             .collect::<Vec<_>>();
+        prefer_callout_nodes(&mut devices);
         devices.sort_by(|left, right| left.port.cmp(&right.port));
         Ok(devices)
     })

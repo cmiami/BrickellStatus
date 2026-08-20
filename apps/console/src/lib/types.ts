@@ -339,7 +339,6 @@ export interface DisplaySettings {
   serialPort: string;
   bleName: string;
   dwellSeconds: number;
-  returnHomeAfter: number;
   fullRefreshEvery: number;
   orientation: 'upright' | 'inverted';
 }

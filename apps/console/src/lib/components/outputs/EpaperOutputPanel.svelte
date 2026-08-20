@@ -263,7 +263,11 @@
             <p>{deviceStatus.detail}</p>
           </div>
           <div class="status-facts">
-            <span>{deviceStatus.deviceName ?? `InkDock ${geometry.label}`}</span>
+            <!-- No invented fallback. This used to print "InkDock <panel>",
+                 which is another project's name and, once boards started
+                 advertising their own, was wrong on every board as well as
+                 unrelated to what the picker would show. -->
+            <span>{deviceStatus.deviceName ?? 'No panel connected'}</span>
             <strong>{deviceStatus.transport?.toUpperCase() ?? 'NO LINK'}</strong>
             {#if deviceStatus.lastAckAt}<small>Last ACK {new Date(deviceStatus.lastAckAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>{/if}
           </div>
@@ -301,7 +305,6 @@
 
       <div class="timing-register">
         <label class="field"><span>Seconds per frame</span><input type="number" min="10" max="180" bind:value={draft.display.dwellSeconds} /><small class="field-note">How long each frame stays up.</small></label>
-        <label class="field"><span>Frames before home</span><input type="number" min="1" max="20" bind:value={draft.display.returnHomeAfter} /><small class="field-note">How many frames before it returns to the bridge.</small></label>
         <label class="field"><span>Full refresh every</span><input type="number" min="1" max="100" bind:value={draft.display.fullRefreshEvery} /><small class="field-note">Frames between full wipes that clear ghosting.</small></label>
       </div>
 

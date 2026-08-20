@@ -302,9 +302,18 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
 
 void setupBle() {
 #if BRICKELLSTATUS_ENABLE_BLE
+  // The name a person will actually look for, which is this project's name and
+  // the four characters that separate one board from another.
+  //
+  // It does not fit in the advertisement. That packet holds 31 bytes, and the
+  // flags plus this service's 128-bit UUID spend 21 of them, leaving room for
+  // about eight characters -- which is why even "InkDock 26B4" came back as
+  // "Data length exceeded" and left the board advertising no name at all. The
+  // scan response is a second 31-byte packet for exactly this, and every
+  // scanner asks for it, so the name goes there and the UUID stays where a
+  // filtering scanner can see it without asking twice.
   char name[32];
-  snprintf(name, sizeof(name), "InkDock %s %s",
-           attached != nullptr ? attached->name : kBuiltFor.name, boardId);
+  snprintf(name, sizeof(name), "BrickellStatus %s", boardId);
   NimBLEDevice::init(name);
   NimBLEDevice::setPower(ESP_PWR_LVL_P3);
   NimBLEServer *server = NimBLEDevice::createServer();
@@ -323,8 +332,10 @@ void setupBle() {
 
   NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
   advertising->addServiceUUID(kServiceUuid);
-  advertising->setName(name);
   advertising->enableScanResponse(true);
+  NimBLEAdvertisementData scanResponse;
+  scanResponse.setName(name);
+  advertising->setScanResponseData(scanResponse);
   advertising->start();
 #endif
 }
@@ -337,19 +348,30 @@ void drawWaitingScreen() {
   display->setCursor(14, 18);
   display->print("BrickellStatus");
   display->setTextSize(1);
-  display->setCursor(15, 53);
+  display->setCursor(15, 50);
   display->print("READY / USB + BLE");
-  // The board's own name, on the board. This is the only place the two things
-  // nothing else can settle are both answered at once: reading it at all proves
-  // this build drives this panel revision, and what it says is the entry to
-  // pick out of a list of otherwise identical boards.
-  display->setCursor(15, 72);
-  char identity[32];
-  snprintf(identity, sizeof(identity), "BOARD %s / %u x %u", boardId, kWidth,
-           kHeight);
-  display->print(identity);
-  display->setCursor(15, 91);
-  display->print("NO WI-FI / NO LORA");
+  display->setCursor(15, 68);
+  display->print("BLUETOOTH NAME");
+  // The exact string this board advertises, printed at the size of something
+  // meant to be read across a desk. Matching a board to its entry in a list is
+  // the whole job of this screen, so the name is shown verbatim rather than
+  // described -- what is on the glass is what appears in the picker.
+  //
+  // Reading it at all is also the proof that this build drives this panel
+  // revision: the wrong build hangs before it can draw anything.
+  // The exact string this board advertises, at the size of something meant to
+  // be read across a desk. Matching a board to an entry in a list is the whole
+  // job of this screen, so it is printed verbatim rather than described.
+  //
+  // Nothing else earns the space. "NO WI-FI / NO LORA" named two things the
+  // board never does, and the panel model and pixel count are facts a reader
+  // cannot act on -- the app already knows both, and neither helps anyone
+  // choose between two boards on a desk.
+  display->setTextSize(2);
+  display->setCursor(8, 86);
+  char advertised[32];
+  snprintf(advertised, sizeof(advertised), "BrickellStatus %s", boardId);
+  display->print(advertised);
   display->update();
 }
 

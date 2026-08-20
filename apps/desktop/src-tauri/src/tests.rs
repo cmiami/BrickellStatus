@@ -38,7 +38,7 @@ fn display_status_contract_matches_frontend() {
     let status = DisplayConnectionStatus {
         state: DisplayConnectionState::Connected,
         transport: Some(DisplayConnectionTransport::Ble),
-        device_name: Some("InkDock E213".into()),
+        device_name: Some("BrickellStatus 26B4".into()),
         detail: "ACK INK1".into(),
         last_frame_at: Some("2026-08-14T15:04:05Z".into()),
         last_ack_at: Some("2026-08-14T15:04:05Z".into()),
@@ -47,7 +47,7 @@ fn display_status_contract_matches_frontend() {
     let value = serde_json::to_value(status).unwrap();
     assert_eq!(value["state"], "connected");
     assert_eq!(value["transport"], "ble");
-    assert_eq!(value["deviceName"], "InkDock E213");
+    assert_eq!(value["deviceName"], "BrickellStatus 26B4");
     assert_eq!(value["lastAckAt"], "2026-08-14T15:04:05Z");
     // The panel travels with the status so the interface can name what was
     // detected instead of naming the board this project started with.
@@ -201,7 +201,7 @@ async fn a_board_that_dies_after_answering_stops_counting_as_proven() {
 async fn a_bluetooth_display_says_nothing_about_the_board_on_usb() {
     let display = DisplayController::new(&AppPreferences::default());
     *display.active.write().await = Some(ActiveDisplay::Ble {
-        name: "InkDock E213".into(),
+        name: "BrickellStatus 26B4".into(),
         transport: Arc::new(BleTransport::new(BleConfig::default())),
     });
     display.note_frame_acknowledged();
@@ -1558,17 +1558,18 @@ async fn rotation_honors_home_cadence_and_surface_presence() {
     let engine = RuntimeEngine::new(store, RuntimeConfig::default())
         .await
         .unwrap();
-    let mut preferences = engine.get_preferences().await;
-    preferences.display.return_home_after = 2;
+    let preferences = engine.get_preferences().await;
     let mut snapshot = engine.get_snapshot().await.unwrap();
     for channel in &mut snapshot.channels {
         channel.enabled = matches!(
             channel.id.as_str(),
             "bridge.brickell" | "weather.miami" | "news.local"
         );
-        // Something to say. Rotation is no longer a standing reservation: a
-        // channel earns its slot by having material, and only the anchor is
-        // exempt.
+        // Rotation *is* a standing reservation, which is what distinguishes it
+        // from ActiveOnly. A channel with nothing urgent still renders its
+        // summary, so its slot is not blank -- and requiring material here made
+        // the two presences behave identically, leaving a reader who had set
+        // every channel to Rotation watching one frame forever.
         channel.active = channel.id != "bridge.brickell";
         channel.destinations = vec![DestinationIdDto::Epaper];
         channel.presence = if channel.id == "bridge.brickell" {
@@ -1590,27 +1591,39 @@ async fn rotation_honors_home_cadence_and_surface_presence() {
     assert_eq!(slot(&snapshot, 3).as_deref(), Some("bridge.brickell"));
     assert_eq!(slot(&snapshot, 4).as_deref(), Some("weather.miami"));
 
-    // A channel with nothing to report gives its slot back rather than
-    // spending it on its own empty state.
+    // Quiet is not absent. A Rotation channel keeps its turn with nothing
+    // urgent to report, because the card still carries its summary -- today's
+    // weather is worth a glance whether or not it crossed an alert threshold.
     let mut quiet = snapshot.clone();
     for channel in &mut quiet.channels {
+        channel.active = false;
+    }
+    assert_eq!(slot(&quiet, 1).as_deref(), Some("weather.miami"));
+    assert_eq!(slot(&quiet, 2).as_deref(), Some("news.local"));
+
+    // ActiveOnly is where "wait until there is something" lives, and it still
+    // means exactly that. This is the distinction the previous rule erased.
+    let mut on_demand = quiet.clone();
+    for channel in &mut on_demand.channels {
         if channel.id == "news.local" {
-            channel.active = false;
+            channel.presence = SurfacePresence::ActiveOnly;
         }
     }
     for index in 0..6 {
         assert_ne!(
-            slot(&quiet, index).as_deref(),
+            slot(&on_demand, index).as_deref(),
             Some("news.local"),
-            "a quiet channel took slot {index}"
+            "an inactive active-only channel took slot {index}"
         );
     }
 
-    // With nothing else to say, the anchor holds the panel — which is the one
+    // With every other channel off the panel, the anchor holds it — the one
     // thing always worth reading.
     let mut silent = quiet.clone();
     for channel in &mut silent.channels {
-        channel.active = false;
+        if channel.id != "bridge.brickell" {
+            channel.presence = SurfacePresence::Off;
+        }
     }
     for index in 0..4 {
         assert_eq!(slot(&silent, index).as_deref(), Some("bridge.brickell"));

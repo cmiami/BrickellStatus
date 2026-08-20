@@ -679,7 +679,6 @@ pub struct DisplaySettings {
     pub serial_port: String,
     pub ble_name: String,
     pub dwell_seconds: u32,
-    pub return_home_after: u32,
     pub full_refresh_every: u32,
     /// Which way up the board is mounted.
     ///

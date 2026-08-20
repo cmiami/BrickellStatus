@@ -48,7 +48,6 @@ function preferencesFixture(): AppPreferences {
       serialPort: 'auto',
       bleName: 'Tender E213',
       dwellSeconds: 30,
-      returnHomeAfter: 2,
       fullRefreshEvery: 10,
       orientation: 'upright'
     },

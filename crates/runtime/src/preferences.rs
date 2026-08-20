@@ -54,9 +54,11 @@ impl Default for AppPreferences {
                 // user explicitly chooses one from the Outputs desk.
                 transport: DisplayTransport::Preview,
                 serial_port: "auto".into(),
-                ble_name: "InkDock E213".into(),
+                // Empty on purpose: every board now advertises its own name, so a
+                // fixed default could only ever match the wrong one. Discovery
+                // finds boards by the service UUID; this pins one when asked.
+                ble_name: String::new(),
                 dwell_seconds: 28,
-                return_home_after: 2,
                 full_refresh_every: 12,
                 orientation: DisplayOrientation::default(),
             },
@@ -327,9 +329,6 @@ pub fn validate_preferences(preferences: &AppPreferences) -> Result<(), Preferen
 
     if !(5..=3_600).contains(&preferences.display.dwell_seconds) {
         return invalid("display.dwellSeconds must be between 5 and 3600");
-    }
-    if preferences.display.return_home_after > 1_000 {
-        return invalid("display.returnHomeAfter must be at most 1000");
     }
     if !(1..=1_000).contains(&preferences.display.full_refresh_every) {
         return invalid("display.fullRefreshEvery must be between 1 and 1000");
@@ -797,7 +796,7 @@ mod tests {
         assert_eq!(value["profile"]["preset"], "bridge_first");
         assert_eq!(value["profile"]["homeChannelId"], "bridge.brickell");
         assert_eq!(value["display"]["transport"], "preview");
-        assert_eq!(value["display"]["bleName"], "InkDock E213");
+        assert_eq!(value["display"]["bleName"], "");
         assert_eq!(value["whatsapp"]["tokenConfigured"], false);
         assert_eq!(value["whatsapp"]["consent"], "not_recorded");
         assert_eq!(value["whatsapp"]["consentRecipient"], Value::Null);

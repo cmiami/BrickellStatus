@@ -37,7 +37,7 @@ pub struct BleConfig {
 impl Default for BleConfig {
     fn default() -> Self {
         Self {
-            device_name: "InkDock E213".into(),
+            device_name: String::new(),
             device_id: None,
             scan_timeout: Duration::from_secs(8),
             chunk_size: 180,

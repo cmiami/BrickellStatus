@@ -331,13 +331,27 @@ impl PanelBroker {
 /// roster; the rule was never "news cannot rotate", it was "nothing with
 /// nothing to say gets the screen".
 fn panel_eligible(channel: &ChannelSnapshot, preferences: &AppPreferences) -> bool {
-    channel.enabled
-        && channel.destinations.contains(&DestinationIdDto::Epaper)
-        && !matches!(
-            channel.presence,
-            SurfacePresence::Off | SurfacePresence::MessagesOnly
-        )
-        && (channel.active || channel.id == preferences.profile.home_channel_id)
+    if !channel.enabled || !channel.destinations.contains(&DestinationIdDto::Epaper) {
+        return false;
+    }
+    // Presence already says how much of the panel a channel is entitled to, and
+    // the enum draws the distinction explicitly: `Rotation` takes its turn
+    // whatever its state, `ActiveOnly` waits until it has something.
+    //
+    // Requiring `active` on top of that collapsed the two into one. A channel
+    // set to Rotation sat out exactly like ActiveOnly, so on a quiet day the
+    // home channel was the only eligible one, `others` was empty, and the
+    // rotation returned the same frame forever -- which reads as a panel that
+    // has stopped rather than one with nothing to add. It also contradicted the
+    // product rule that being shown in rotation and being allowed to interrupt
+    // are separate decisions.
+    match channel.presence {
+        SurfacePresence::Off | SurfacePresence::MessagesOnly => false,
+        SurfacePresence::Home | SurfacePresence::Rotation => true,
+        SurfacePresence::ActiveOnly => {
+            channel.active || channel.id == preferences.profile.home_channel_id
+        }
+    }
 }
 
 /// Identity of the thing being alerted about.
@@ -358,8 +372,19 @@ fn alert_key(channel: &ChannelSnapshot) -> String {
         .map_or_else(|| channel.material_key.clone(), str::to_owned)
 }
 
-/// The ordinary cadence: the home channel every `return_home_after + 1` slots,
-/// with the rest round-robining between.
+/// The ordinary cadence: every eligible channel in turn, home included.
+///
+/// There is deliberately no "return home every N frames". A periodic detour
+/// back to the bridge answered a question nobody was asking on the frames in
+/// between, and it did it on a timer rather than when anything changed -- so it
+/// both wasted slots and still could not be relied on to be current, because
+/// the interesting moment might land in the gap.
+///
+/// The interrupt lane above already covers it properly: a bridge state change
+/// preempts whatever is showing, within milliseconds rather than at the end of
+/// a cadence, and holds the panel while it matters. That is the behaviour the
+/// detour was approximating badly, so the rotation is now a plain round-robin
+/// and the anchor earns the panel by changing rather than by counting.
 fn rotation_channel<'a>(
     snapshot: &'a AppSnapshot,
     preferences: &AppPreferences,
@@ -370,41 +395,11 @@ fn rotation_channel<'a>(
         .iter()
         .filter(|channel| panel_eligible(channel, preferences))
         .collect::<Vec<_>>();
-    let home = eligible
-        .iter()
-        .copied()
-        .find(|channel| channel.id == preferences.profile.home_channel_id)
-        .or_else(|| {
-            eligible
-                .iter()
-                .copied()
-                .find(|channel| channel.presence == SurfacePresence::Home)
-        });
-    let others = eligible
-        .iter()
-        .copied()
-        .filter(|channel| home.is_none_or(|home| home.id != channel.id))
-        .collect::<Vec<_>>();
-    if others.is_empty() {
-        return home.or_else(|| eligible.first().copied());
+    if eligible.is_empty() {
+        return None;
     }
-    let home_frequency = u64::from(preferences.display.return_home_after.max(1)) + 1;
-    if rotation_index.is_multiple_of(home_frequency)
-        && let Some(home) = home
-    {
-        return Some(home);
-    }
-    let non_home_index = if home.is_some() {
-        let cycle = rotation_index / home_frequency;
-        let position = rotation_index % home_frequency;
-        cycle
-            .saturating_mul(home_frequency.saturating_sub(1))
-            .saturating_add(position.saturating_sub(1))
-    } else {
-        rotation_index
-    };
-    let offset = usize::try_from(non_home_index % others.len() as u64).unwrap_or(0);
-    others.get(offset).copied()
+    let offset = usize::try_from(rotation_index % eligible.len() as u64).unwrap_or(0);
+    eligible.get(offset).copied()
 }
 
 /// Whether to attempt a proof frame on this pass.

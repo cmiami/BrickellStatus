@@ -26,11 +26,11 @@
   let liveSelected = $derived($snapshot?.channels.find((channel) => channel.id === selectedId));
 
   const presenceOptions: { id: SurfacePresence; label: string; detail: string }[] = [
-    { id: 'home', label: 'Home', detail: 'The display returns here after routine frames.' },
-    { id: 'rotation', label: 'Rotation', detail: 'Appears in normal user-ordered rotation.' },
-    { id: 'active_only', label: 'When active', detail: 'Appears only while material is current.' },
-    { id: 'messages_only', label: 'Messages only', detail: 'Never enters the e-paper rotation.' },
-    { id: 'off', label: 'Off', detail: 'Collected only when another enabled module needs it.' }
+    { id: 'home', label: 'Main screen', detail: 'The panel keeps coming back to this one.' },
+    { id: 'rotation', label: 'Always in the loop', detail: 'Takes its turn on the panel whether or not anything is happening.' },
+    { id: 'active_only', label: 'Only when something happens', detail: 'Stays off the panel until it has something to say.' },
+    { id: 'messages_only', label: 'Messages only', detail: 'Never on the panel. Can still send you a message.' },
+    { id: 'off', label: 'Hidden', detail: 'Never on the panel and never messages you.' }
   ];
 
   const destinations: { id: DestinationId; label: string }[] = [
@@ -248,9 +248,11 @@
 
         <section class="editor-section">
           <div class="section-copy">
-            <p class="registration-label">Presence</p>
             <h3>Where it appears</h3>
-            <p>Presence controls the console and e-paper rotation. It does not grant interrupt or message permission.</p>
+            <p>
+              This decides what the e-paper panel shows and when. It is separate from whether the
+              channel may interrupt you — that is set below.
+            </p>
           </div>
           <div class="choice-register" role="radiogroup" aria-label="Display presence">
             {#each presenceOptions as option}
@@ -307,7 +309,7 @@
                 description={destination.id === 'whatsapp'
                   ? 'Template-based, material-change-only messages.'
                   : destination.id === 'epaper'
-                    ? 'Rotation or takeover according to this channel’s presence.'
+                    ? 'Shown on the panel according to the choice above.'
                   : 'Best-effort local notification; the OS does not return a displayed or read receipt.'}
                 onchange={(enabled) => toggleDestination(destination.id, enabled)}
               />
@@ -327,7 +329,8 @@
           <div class="policy-sentence">
             <RadioTower size={19} aria-hidden="true" />
             <p>
-              <strong>{selected.title}</strong> is {selected.presence.replace('_', ' ')}. It
+              <strong>{selected.title}</strong> —
+              {presenceOptions.find((option) => option.id === selected!.presence)?.label.toLowerCase() ?? selected.presence}. It
               {selected.interruptPreset === 'off' ? ' never interrupts' : ` uses ${selected.interruptPreset.replace('_', ' ')} interrupts`}.
               {selected.destinations.length
                 ? ` Notices may route to ${selected.destinations.join(', ')}.`
