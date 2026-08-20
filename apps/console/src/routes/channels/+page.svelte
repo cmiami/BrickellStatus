@@ -4,6 +4,7 @@
   import { onMount } from 'svelte';
 
   import ChannelScopeEditor from '$lib/components/ChannelScopeEditor.svelte';
+  import ChannelTabs from '$lib/components/ChannelTabs.svelte';
   import EpaperPreview from '$lib/components/EpaperPreview.svelte';
   import SwitchField from '$lib/components/SwitchField.svelte';
   import { persistPreferences, preferences, saving, snapshot } from '$lib/state';
@@ -111,6 +112,7 @@
 <svelte:head><title>Channels · BrickellStatus</title></svelte:head>
 
 <section class="page-sheet channels-page">
+  <ChannelTabs />
   <header class="page-heading-row">
     <div>
       <p class="registration-label">Signal roster</p>

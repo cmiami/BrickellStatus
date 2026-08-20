@@ -18,7 +18,6 @@
     { href: '/', label: 'Live', icon: Clock3 },
     { href: '/channels', label: 'Channels', icon: RadioTower },
     { href: '/map', label: 'Map', icon: MapPinned },
-    { href: '/policy', label: 'Policy', icon: SlidersHorizontal },
     { href: '/system', label: 'System', icon: Database }
   ];
 

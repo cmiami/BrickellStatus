@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import {
     ArrowLeft,
     Crosshair,
@@ -7,7 +8,6 @@
     Move,
     Network,
     Plus,
-    Save,
     Search,
     Trash2
   } from '@lucide/svelte';
@@ -296,6 +296,40 @@
     if (!draft) return;
     await persistPreferences($state.snapshot(draft));
   }
+
+  // Edits apply as they are made, matching the outputs desk. A Save button asks
+  // the reader to remember they have unfinished business, then rewards pressing
+  // it with a banner to dismiss -- two chores in exchange for nothing they had
+  // not already told the app.
+  //
+  // Long enough that a number being typed is one write rather than twenty.
+  const SETTLE_MS = 700;
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function scheduleSave() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = undefined;
+      void save();
+    }, SETTLE_MS);
+  }
+
+  // Whatever is in flight goes with the reader; an edit must not die with the
+  // page just because the debounce had not fired yet.
+  onMount(() => () => {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      void save();
+    }
+  });
+
+  const unsaved = $derived(
+    !!draft && !!$preferences && JSON.stringify($state.snapshot(draft)) !== JSON.stringify($preferences)
+  );
+
+  $effect(() => {
+    if (unsaved) scheduleSave();
+  });
 </script>
 
 <svelte:head>
@@ -310,9 +344,11 @@
       <h1 class="sheet-heading">Place what you watch</h1>
       <p class="sheet-intro">Saved coverage, the Brickell target, and the last hour of vessel courses.</p>
     </div>
-    <button class="primary-action save-action" onclick={save} disabled={!draft || $saving}>
-      <Save size={17} aria-hidden="true" /> {$saving ? 'Saving map' : 'Save map settings'}
-    </button>
+    <!-- Says what is true right now, and asks for nothing. It is a status
+         line, not a banner: nothing to dismiss and nothing to press. -->
+    <p class="save-state" aria-live="polite">
+      {$saving ? 'Saving' : unsaved ? 'Saving shortly' : 'All changes saved'}
+    </p>
   </header>
 
   {#if draft}
@@ -496,16 +532,7 @@
 
   .map-page .page-heading-row {
     margin-bottom: 18px;
-  }
-
-  .back-link,
-  .save-action,
-  .row-actions button {
-    display: inline-flex;
-    align-items: center;
-  }
-
-  .back-link {
+  }  .back-link {
     gap: 6px;
     margin-bottom: 18px;
     color: var(--channel);
@@ -521,13 +548,7 @@
     color: var(--graphite);
     text-decoration: underline;
     text-underline-offset: 4px;
-  }
-
-  .save-action {
-    gap: 9px;
-  }
-
-  .map-workbench {
+  }  .map-workbench {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
@@ -848,5 +869,18 @@
       grid-template-columns: 1fr;
       gap: 8px;
     }
+  }
+
+  /* A status line, not a control: it says what is true and asks for nothing. */
+  .save-state {
+    flex: 0 0 auto;
+    align-self: center;
+    margin: 0;
+    color: var(--muted);
+    font-family: var(--font-instrument);
+    font-size: var(--type-label);
+    font-weight: 650;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
   }
 </style>
