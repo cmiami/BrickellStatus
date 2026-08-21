@@ -63,11 +63,21 @@ constexpr size_t kHeaderSize = 18;
 constexpr size_t kPacketSize = kHeaderSize + kPayloadSize;
 constexpr uint8_t kFlagFullRefresh = 0x01;
 constexpr uint32_t kFrameAssemblyTimeoutMs = 1000;
+constexpr uint32_t kBleAdvertisingHealthCheckMs = 2000;
 
-// GATT identifiers intentionally remain compatible with the proven sibling
-// InkDock firmware and existing desktop senders. Only the advertised name
-// carries the panel, so a host scanning for a board learns which one it found
-// before it connects.
+constexpr bool shouldRestoreBleAdvertising(uint8_t connectedCount,
+                                           bool advertising) {
+  return connectedCount == 0 && !advertising;
+}
+
+static_assert(shouldRestoreBleAdvertising(0, false));
+static_assert(!shouldRestoreBleAdvertising(1, false));
+static_assert(!shouldRestoreBleAdvertising(0, true));
+
+// GATT identifiers intentionally remain compatible with deployed INK1 firmware
+// and existing desktop senders. Only the advertised name carries the board
+// code, so a host scanning for a panel learns which one it found before it
+// connects.
 constexpr char kServiceUuid[] = "8b7a0000-4f4b-4a9b-9d6e-1d0c1a2b3c4d";
 constexpr char kRxUuid[] = "8b7a0001-4f4b-4a9b-9d6e-1d0c1a2b3c4d";
 constexpr char kTxUuid[] = "8b7a0002-4f4b-4a9b-9d6e-1d0c1a2b3c4d";
@@ -127,6 +137,9 @@ volatile bool framePending = false;
 volatile bool pendingFullRefresh = true;
 portMUX_TYPE frameMux = portMUX_INITIALIZER_UNLOCKED;
 NimBLECharacteristic *txCharacteristic = nullptr;
+NimBLEServer *bleServer = nullptr;
+NimBLEAdvertising *bleAdvertising = nullptr;
+uint32_t lastBleAdvertisingHealthAt = 0;
 
 uint16_t readLe16(const uint8_t *value) {
   return static_cast<uint16_t>(value[0]) |
@@ -259,6 +272,15 @@ class PacketDecoder {
 
   void pushByte(uint8_t value) {
     lastByteAt_ = millis();
+    // A host may have missed the one-time boot line while USB re-enumerated.
+    // `?` asks for the same identity again, but only between packets: a byte in
+    // an INK1 header or payload can never turn into an out-of-band reply. A
+    // wrong E213 controller build is blocked before `loop()` and stays silent,
+    // which gives the flasher an objective signal to try the other image once.
+    if (used_ == 0 && value == '?') {
+      acknowledge(bannerLine);
+      return;
+    }
     if (used_ < 4) {
       static constexpr uint8_t magic[4] = {'I', 'N', 'K', '1'};
       if (value == magic[used_]) {
@@ -300,6 +322,29 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
   }
 };
 
+/// Keeps a disconnected board discoverable even if the BLE host reports a
+/// transient advertising failure. The waiting image is e-ink and therefore
+/// cannot prove the radio is still live; this check asks the radio itself.
+void maintainBleAdvertising() {
+#if BRICKELLSTATUS_ENABLE_BLE
+  const uint32_t now = millis();
+  if (now - lastBleAdvertisingHealthAt < kBleAdvertisingHealthCheckMs) return;
+  lastBleAdvertisingHealthAt = now;
+
+  if (bleServer == nullptr || bleAdvertising == nullptr) return;
+  if (!shouldRestoreBleAdvertising(bleServer->getConnectedCount(),
+                                   bleAdvertising->isAdvertising())) {
+    return;
+  }
+
+  if (bleAdvertising->start()) {
+    Serial.println("BLE advertising restored");
+  } else {
+    Serial.println("BLE advertising retry failed");
+  }
+#endif
+}
+
 void setupBle() {
 #if BRICKELLSTATUS_ENABLE_BLE
   // The name a person will actually look for, which is this project's name and
@@ -307,18 +352,18 @@ void setupBle() {
   //
   // It does not fit in the advertisement. That packet holds 31 bytes, and the
   // flags plus this service's 128-bit UUID spend 21 of them, leaving room for
-  // about eight characters -- which is why even "InkDock 26B4" came back as
-  // "Data length exceeded" and left the board advertising no name at all. The
-  // scan response is a second 31-byte packet for exactly this, and every
-  // scanner asks for it, so the name goes there and the UUID stays where a
-  // filtering scanner can see it without asking twice.
+  // about eight characters -- which is why putting any useful panel name there
+  // came back as "Data length exceeded" and left the board advertising no
+  // name. The scan response is a second 31-byte packet for exactly this, and
+  // every scanner asks for it, so the name goes there and the UUID stays where
+  // a filtering scanner can see it without asking twice.
   char name[32];
   snprintf(name, sizeof(name), "BrickellStatus %s", boardId);
   NimBLEDevice::init(name);
   NimBLEDevice::setPower(ESP_PWR_LVL_P3);
-  NimBLEServer *server = NimBLEDevice::createServer();
-  server->setCallbacks(new ServerCallbacks());
-  NimBLEService *service = server->createService(kServiceUuid);
+  bleServer = NimBLEDevice::createServer();
+  bleServer->setCallbacks(new ServerCallbacks());
+  NimBLEService *service = bleServer->createService(kServiceUuid);
   NimBLECharacteristic *rx = service->createCharacteristic(
       kRxUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   txCharacteristic = service->createCharacteristic(
@@ -330,13 +375,16 @@ void setupBle() {
   txCharacteristic->setValue(bannerLine);
   service->start();
 
-  NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
-  advertising->addServiceUUID(kServiceUuid);
-  advertising->enableScanResponse(true);
+  bleAdvertising = NimBLEDevice::getAdvertising();
+  bleAdvertising->addServiceUUID(kServiceUuid);
+  bleAdvertising->enableScanResponse(true);
   NimBLEAdvertisementData scanResponse;
   scanResponse.setName(name);
-  advertising->setScanResponseData(scanResponse);
-  advertising->start();
+  bleAdvertising->setScanResponseData(scanResponse);
+  if (!bleAdvertising->start()) {
+    Serial.println("BLE initial advertising failed; retrying in background");
+  }
+  lastBleAdvertisingHealthAt = millis();
 #endif
 }
 
@@ -377,7 +425,7 @@ void drawWaitingScreen() {
 
 /// The line the host identifies this board by.
 ///
-/// `READY INK1 <w>x<h> <payload> <build> <board> [MISMATCH]`
+/// `READY INK1 <w>x<h> <payload> <build> <board> <id> FW<version> [MISMATCH]`
 ///
 /// The geometry is what this firmware can draw right now, so a build sitting on
 /// the wrong board reports none: there is nothing it can correctly accept. The
@@ -388,13 +436,16 @@ void composeBanner() {
   // what the firmware is about to drive, and what the app should keep writing.
   const char *board = attached != nullptr ? attached->name : kBuiltFor.name;
   if (driving) {
-    snprintf(bannerLine, sizeof(bannerLine), "READY INK1 %ux%u %u %s %s %s",
+    snprintf(bannerLine, sizeof(bannerLine),
+             "READY INK1 %ux%u %u %s %s %s FW%u",
              kWidth, kHeight, static_cast<unsigned>(kPayloadSize),
-             BRICKELLSTATUS_BUILD_ID, board, boardId);
+             BRICKELLSTATUS_BUILD_ID, board, boardId,
+             BRICKELLSTATUS_FIRMWARE_VERSION);
   } else {
     snprintf(bannerLine, sizeof(bannerLine),
-             "READY INK1 0x0 0 %s %s %s MISMATCH", BRICKELLSTATUS_BUILD_ID,
-             board, boardId);
+             "READY INK1 0x0 0 %s %s %s FW%u MISMATCH",
+             BRICKELLSTATUS_BUILD_ID, board, boardId,
+             BRICKELLSTATUS_FIRMWARE_VERSION);
   }
 }
 
@@ -467,5 +518,6 @@ void loop() {
   }
 
   renderPendingFrame();
+  maintainBleAdvertising();
   delay(5);
 }

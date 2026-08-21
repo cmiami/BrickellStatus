@@ -17,6 +17,7 @@ a contributor without an embedded toolchain must still be able to build the app.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
@@ -44,21 +45,20 @@ LAYOUT = [
     ("0x10000", "firmware.bin"),
 ]
 
-# One build per panel the app can drive. `panel` is the board a build is for,
-# which the firmware's boot probe reports back so the app can tell whether it
-# wrote the right one. `panelRevision` only means anything on the E213, whose
-# two panel controllers are electrically indistinguishable and so remain the one
-# thing hardware cannot answer for itself.
+# E213 is one product-facing panel with two internal controller images. The app
+# never asks a reader to choose between them: it requires READY from the first
+# and tries the other once on silence. `panelRevision` exists only so the image
+# that objectively answered can lead the next repair attempt.
 VARIANTS = [
     {
         "id": "vision-master-e213-v11",
-        "label": "Vision Master E213 (panel v1.1)",
+        "label": "Vision Master E213",
         "panel": "e213",
         "panelRevision": "v11",
     },
     {
         "id": "vision-master-e213",
-        "label": "Vision Master E213 (original panel)",
+        "label": "Vision Master E213",
         "panel": "e213",
         "panelRevision": "original",
     },
@@ -70,7 +70,13 @@ VARIANTS = [
     },
 ]
 
-BUILD_ID_PATHS = ["firmware/panel/src", "firmware/panel/platformio.ini"]
+BUILD_ID_PATHS = [
+    "firmware/panel/src",
+    "firmware/panel/platformio.ini",
+    "firmware/panel/scripts/build_id.py",
+    "firmware/panel/version.txt",
+]
+FIRMWARE_VERSION_PATH = FIRMWARE_ROOT / "version.txt"
 
 
 def git(*args: str) -> str:
@@ -94,6 +100,25 @@ def is_shallow() -> bool:
         return False
 
 
+def content_digest() -> str:
+    """Matches build_id.py's deterministic identity for dirty inputs."""
+    digest = hashlib.sha256()
+    files: list[Path] = []
+    for relative in BUILD_ID_PATHS:
+        candidate = REPOSITORY_ROOT / relative
+        files.extend(
+            path for path in (candidate.rglob("*") if candidate.is_dir() else [candidate])
+            if path.is_file()
+        )
+    for path in sorted(files):
+        relative = path.relative_to(REPOSITORY_ROOT).as_posix().encode()
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()[:12]
+
+
 def source_revision() -> str | None:
     """Identity of the firmware sources, matching what the device reports.
 
@@ -109,9 +134,17 @@ def source_revision() -> str | None:
         if not revision:
             return None
         dirty = git("status", "--porcelain", "--", *BUILD_ID_PATHS)
-        return f"{revision}-dirty" if dirty else revision
+        return f"{revision}-dirty-{content_digest()}" if dirty else revision
     except (subprocess.CalledProcessError, OSError):
         return None
+
+
+def firmware_version() -> int:
+    """Monotonic firmware release shared with the compiled device images."""
+    value = int(FIRMWARE_VERSION_PATH.read_text(encoding="utf-8").strip())
+    if value <= 0:
+        raise ValueError("firmware version must be a positive integer")
+    return value
 
 
 def platformio() -> str | None:
@@ -188,10 +221,11 @@ def main() -> int:
         variants.append({**variant, "images": images})
 
     manifest = {
-        # 2: variants name the board they drive, because there is now more than
-        # one board and the app picks between them without asking.
-        "schemaVersion": 2,
+        # 3: the manifest carries the same monotonic firmware version as every
+        # device banner, so upgrade ordering never depends on Git hashes.
+        "schemaVersion": 3,
         "chip": "esp32s3",
+        "firmwareVersion": firmware_version(),
         "sourceRevision": source_revision(),
         "variants": variants,
     }
@@ -211,7 +245,7 @@ def main() -> int:
     )
     print(
         f"bundled {len(variants)} variant(s), {total / 1024:.0f} KiB, "
-        f"revision {manifest['sourceRevision']}"
+        f"firmware v{manifest['firmwareVersion']} · revision {manifest['sourceRevision']}"
     )
     return 0
 

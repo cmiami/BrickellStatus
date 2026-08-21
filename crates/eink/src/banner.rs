@@ -3,11 +3,11 @@
 //! The firmware speaks one line on the wire:
 //!
 //! ```text
-//! READY INK1 296x128 4736 9f3c2ab E290 26B4
+//! READY INK1 296x128 4736 9f3c2ab E290 26B4 FW2
 //! ```
 //!
-//! Geometry, payload size, the build it was compiled from, and the board its
-//! boot-time probe found. That line is the whole of the host's device
+//! Geometry, payload size, exact source build, board identity, and an orderable
+//! firmware version. That line is the whole of the host's device
 //! identification: nobody is asked which board is plugged in, and no preference
 //! records it, because the board is the only thing that actually knows.
 //!
@@ -16,7 +16,7 @@
 //! which one it is. That case is spoken plainly:
 //!
 //! ```text
-//! READY INK1 0x0 0 9f3c2ab E290 26B4 MISMATCH
+//! READY INK1 0x0 0 9f3c2ab E290 26B4 FW2 MISMATCH
 //! ```
 //!
 //! No geometry, because there is nothing this image can correctly draw; the
@@ -45,6 +45,16 @@ pub struct DeviceBanner {
     pub mismatch: bool,
     /// Build identity, when the firmware is new enough to report one.
     pub build: Option<String>,
+    /// Monotonic firmware release, independent of the exact source build.
+    ///
+    /// Git hashes identify bytes but have no ordering. This number is what the
+    /// app uses to call a bundled image newer or a device image newer.
+    pub firmware_version: Option<u32>,
+    /// A version token was present but could not be interpreted.
+    ///
+    /// Kept distinct from legacy firmware that predates version reporting: a
+    /// malformed current identity is incompatible, not merely old.
+    pub version_malformed: bool,
     /// Four hex characters naming this individual board, when the firmware is
     /// new enough to report them. Older firmware omits it, which is an absence
     /// rather than a disagreement: the board is still usable, it just cannot be
@@ -64,7 +74,7 @@ impl DeviceBanner {
             return Self::default();
         }
         let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-        // `READY INK1 <w>x<h> <payload> <build> <board> <id> [MISMATCH]`. What the
+        // `READY INK1 <w>x<h> <payload> <build> <board> <id> FW<n> [MISMATCH]`. What the
         // firmware can draw is read from the geometry rather than from the
         // name, because the geometry is what every frame must match.
         let panel = tokens.get(2).and_then(|token| parse_dimensions(token));
@@ -91,18 +101,34 @@ impl DeviceBanner {
         let board_id = tokens
             .get(6)
             .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
             .filter(|value| !value.eq_ignore_ascii_case("MISMATCH"))
-            .map(str::to_owned);
+            .and_then(valid_board_id);
+        let version_token = tokens
+            .iter()
+            .skip(6)
+            .find(|token| token.to_ascii_uppercase().starts_with("FW"));
+        let firmware_version = version_token
+            .and_then(|token| token.get(2..))
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|version| *version > 0);
+        let version_malformed = version_token.is_some() && firmware_version.is_none();
         Self {
             saw_ready: true,
             panel,
             board,
             mismatch,
             build,
+            firmware_version,
+            version_malformed,
             board_id,
         }
     }
+}
+
+/// Stable suffix printed by current firmware: exactly two MAC octets.
+fn valid_board_id(value: &str) -> Option<String> {
+    (value.len() == 4 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| value.to_ascii_uppercase())
 }
 
 /// Reads a `250x122` geometry token into the panel it describes.
@@ -129,9 +155,22 @@ mod tests {
     /// which is the whole of what the app needs to put that right.
     #[test]
     fn a_banner_names_the_individual_board() {
-        let banner = DeviceBanner::parse("READY INK1 296x128 4736 9f3c2ab E290 26B4");
+        let banner = DeviceBanner::parse("READY INK1 296x128 4736 9f3c2ab E290 26B4 FW2");
         assert_eq!(banner.board_id.as_deref(), Some("26B4"));
+        assert_eq!(banner.firmware_version, Some(2));
+        assert!(!banner.version_malformed);
         assert!(!banner.mismatch);
+    }
+
+    #[test]
+    fn malformed_and_legacy_versions_remain_distinct() {
+        let malformed = DeviceBanner::parse("READY INK1 296x128 4736 9f3c2ab E290 26B4 FWnext");
+        assert_eq!(malformed.firmware_version, None);
+        assert!(malformed.version_malformed);
+
+        let legacy = DeviceBanner::parse("READY INK1 296x128 4736 9f3c2ab E290 26B4");
+        assert_eq!(legacy.firmware_version, None);
+        assert!(!legacy.version_malformed);
     }
 
     #[test]
@@ -146,6 +185,21 @@ mod tests {
         let banner = DeviceBanner::parse("READY INK1 0x0 0 9f3c2ab E290 MISMATCH");
         assert!(banner.mismatch);
         assert_eq!(banner.board_id, None);
+    }
+
+    #[test]
+    fn malformed_board_ids_are_never_used_as_device_identity() {
+        for value in ["26B", "26B4FF", "26-Z", "panel"] {
+            let banner =
+                DeviceBanner::parse(&format!("READY INK1 250x122 3904 abc1234 E213 {value}"));
+            assert_eq!(banner.board_id, None, "accepted malformed id {value:?}");
+        }
+        assert_eq!(
+            DeviceBanner::parse("READY INK1 250x122 3904 abc1234 E213 26b4")
+                .board_id
+                .as_deref(),
+            Some("26B4")
+        );
     }
 
     #[test]

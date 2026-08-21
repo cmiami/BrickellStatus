@@ -5,7 +5,7 @@
   import { getPlatformCapabilities } from '$lib/api';
   import { onMount } from 'svelte';
 
-  import { PANEL_GEOMETRY, type FirmwareStatus, type FirmwareVariantSummary } from '$lib/types';
+  import { PANEL_GEOMETRY, type FirmwareStatus } from '$lib/types';
 
   let status = $state<FirmwareStatus | null>(null);
   let dismissed = $state(false);
@@ -19,28 +19,18 @@
   let error = $state<string | null>(null);
   let done = $state(false);
 
-  // Which board is attached is never a question: the firmware probes its own
-  // pins at boot and says so, and the app writes the build for whatever it
-  // named. A board that has never been flashed cannot answer yet, so it is
-  // written the most likely build — and if the probe then reports a different
-  // board, the app writes the right one without asking anything.
-  //
-  // The one thing hardware cannot settle is the E213's panel revision: two
-  // controllers, identical wiring, no read-back. Nobody knows which revision is
-  // in a sealed case, and getting it wrong looks exactly like a failed flash.
-  // So that one is not asked either. The app flashes a build and asks the only
-  // question anyone can actually answer — can you read the screen? — and a "no"
-  // flashes the other one and remembers.
-  let checkingScreen = $state(false);
-  let lastWritten = $state<FirmwareVariantSummary | null>(null);
+  // E213 has two internal controller images, but they are recovery mechanics,
+  // not two panels for a reader to identify. The native flash command requires
+  // an objective READY response and tries the other E213 image once when the
+  // first is silent. The glass is never used as proof: e-paper can retain a
+  // readable image from dead firmware indefinitely.
 
-  const prompted = $derived(
-    flashingSupported &&
-    !dismissed &&
-      !!status &&
-      !!status.port &&
-      (status.requirement.state === 'required' || checkingScreen)
+  const notable = $derived(
+    status?.requirement.state === 'required' ||
+      status?.requirement.state === 'deviceNewer' ||
+      status?.requirement.state === 'differentBuild'
   );
+  const prompted = $derived(!dismissed && !!status && notable);
 
   const variant = $derived(
     status?.variants.find((item) => item.id === status?.recommendedVariantId) ??
@@ -48,29 +38,64 @@
       null
   );
 
-  // Only builds that could drive the board that is actually there. On a board
-  // with one build there is nothing to try next, so nothing is offered.
-  const alternatives = $derived(
-    status && lastWritten
-      ? status.variants.filter(
-          (item) => item.panel === lastWritten?.panel && item.id !== lastWritten?.id
-        )
-      : []
-  );
-
   const panelName = $derived(status?.board ? PANEL_GEOMETRY[status.board].label : null);
   const percent = $derived(total > 0 ? Math.min(100, Math.round((written / total) * 100)) : 0);
+  const canFlash = $derived(flashingSupported && !!status?.port && !!variant && status?.requirement.state === 'required');
+
+  function titleText(): string {
+    const requirement = status?.requirement;
+    if (requirement?.state === 'deviceNewer') return 'Update BrickellStatus';
+    if (requirement?.state === 'differentBuild') return 'Different firmware build';
+    if (requirement?.state !== 'required') return 'Panel firmware';
+    switch (requirement.reason.kind) {
+      case 'firmwareOutdated':
+        return 'Panel firmware update required';
+      case 'legacyConnection':
+        return 'Panel setup needs attention';
+      case 'wrongBoard':
+        return 'Correct panel firmware required';
+      default:
+        return 'Repair panel firmware?';
+    }
+  }
 
   function reasonText(): string {
     const requirement = status?.requirement;
+    if (requirement?.state === 'deviceNewer') {
+      return `This panel runs firmware version ${requirement.device}, newer than version ${requirement.bundled} bundled with this app. Update BrickellStatus; the panel will not be downgraded.`;
+    }
+    if (requirement?.state === 'differentBuild') {
+      return `This panel runs a different firmware build. The app cannot determine which build is newer, so it will not replace it automatically.`;
+    }
     if (requirement?.state !== 'required') return '';
     switch (requirement.reason.kind) {
       case 'notResponding':
-        return 'A board is connected but is not running BrickellStatus firmware.';
+        return 'A panel is connected but is not answering the BrickellStatus firmware identity check.';
       case 'wrongBoard':
         return `This board is an ${PANEL_GEOMETRY[requirement.reason.board].label}, and it is running the build for the other panel.`;
+      case 'firmwareOutdated':
+        return requirement.reason.device === 1
+          ? `This panel runs legacy firmware. Version ${requirement.reason.bundled} is required for reliable identity and reconnect.`
+          : `This panel runs firmware version ${requirement.reason.device}. Version ${requirement.reason.bundled} bundled with this app is newer and must be installed.`;
+      case 'incompatibleIdentity':
+        return 'The panel returned an incompatible firmware identity. Reinstall the firmware bundled with this app.';
+      case 'legacyConnection':
+        return 'The saved panel cannot be identified safely for automatic reconnect. Connect it by USB to install current firmware and restore reconnect.';
       default:
-        return `The board is running build ${requirement.reason.device}; this app ships ${requirement.reason.bundled}.`;
+        return 'The panel runs a different firmware build. Reinstall only if you intend to replace it with the build bundled in this app.';
+    }
+  }
+
+  function actionText(): string {
+    const requirement = status?.requirement;
+    if (requirement?.state !== 'required') return '';
+    switch (requirement.reason.kind) {
+      case 'firmwareOutdated':
+        return 'Update firmware';
+      case 'wrongBoard':
+        return 'Install correct firmware';
+      default:
+        return 'Repair firmware';
     }
   }
 
@@ -113,14 +138,9 @@
     total = target.totalBytes;
     try {
       await invoke('flash_firmware', { variantId: target.id, port: status.port });
-      lastWritten = target;
       done = true;
       await refresh();
-      // A board whose panel this app cannot tell apart is the only reason to
-      // keep this open. Everything else has already been settled by the device.
-      checkingScreen =
-        status?.variants.filter((item) => item.panel === target.panel).length > 1;
-      if (!checkingScreen) dismissed = true;
+      dismissed = true;
     } catch (cause) {
       error = String(cause);
     } finally {
@@ -128,41 +148,24 @@
     }
   }
 
-  // The screen is readable: this build is the remembered answer for this board.
-  function confirmScreen() {
-    checkingScreen = false;
-    dismissed = true;
-  }
-
-  // The screen is wrong: the other build for this same board is the only
-  // remaining explanation worth offering, so flash it rather than asking them
-  // to diagnose a panel they cannot see the part number of.
-  async function tryOtherPanel() {
-    const other = alternatives[0];
-    if (other) await flash(other);
-  }
 </script>
 
 {#if prompted}
   <div class="firmware" role="alertdialog" aria-modal="false" aria-labelledby="firmware-title">
     <div class="firmware-head">
       <p class="registration-label">Device firmware</p>
-      <h2 id="firmware-title">
-        {checkingScreen ? 'Can you read the display?' : 'Flash the connected board?'}
-      </h2>
-      <p class="reason">
-        {checkingScreen
-          ? 'If the screen is blank, garbled, or mirrored, this board has the other panel and needs the other build.'
-          : reasonText()}
+      <h2 id="firmware-title">{titleText()}</h2>
+      <p class="reason">{reasonText()}</p>
+      <p class="port">
+        {status?.port ?? (flashingSupported ? 'USB connection required' : 'Desktop USB connection required')}{panelName ? ` · ${panelName}` : ''}
       </p>
-      <p class="port">{status?.port}{panelName ? ` · ${panelName}` : ''}</p>
     </div>
 
     {#if flashing}
       <div class="progress" aria-live="polite">
         <div class="bar"><span style={`--progress:${percent / 100}`}></span></div>
         <small>
-          {stage === 'verifying' ? 'Verifying' : 'Writing'} · {percent}% ·
+          {stage === 'checking' ? 'Checking panel' : stage === 'verifying' ? 'Verifying write' : 'Writing'} · {percent}% ·
           do not unplug the board
         </small>
       </div>
@@ -173,19 +176,14 @@
     {/if}
 
     <div class="firmware-actions">
-      {#if checkingScreen && !flashing}
-        <button class="primary-action" onclick={confirmScreen}>Yes, it looks right</button>
-        {#if alternatives.length}
-          <button class="secondary-action" onclick={tryOtherPanel}>No — try the other panel</button>
-        {/if}
-      {:else}
-        <button class="primary-action" onclick={() => flash()} disabled={flashing || !variant}>
-          {flashing ? 'Flashing…' : 'Flash'}
-        </button>
-        <button class="secondary-action" onclick={() => (dismissed = true)} disabled={flashing}>
-          Cancel
+      {#if canFlash}
+        <button class="primary-action" onclick={() => flash()} disabled={flashing}>
+          {flashing ? 'Flashing…' : actionText()}
         </button>
       {/if}
+      <button class="secondary-action" onclick={() => (dismissed = true)} disabled={flashing}>
+        {canFlash ? 'Cancel' : 'Dismiss'}
+      </button>
     </div>
   </div>
 {/if}

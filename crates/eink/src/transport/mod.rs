@@ -17,14 +17,17 @@ pub use auto::{AutoTransport, TransportPreference};
 #[cfg(all(feature = "ble", target_os = "android"))]
 pub use ble::init_android_bluetooth;
 #[cfg(feature = "ble")]
-pub use ble::{BleConfig, BleConnectionInfo, BleDeviceInfo, BleTransport, discover_ble_devices};
+pub use ble::{
+    ANONYMOUS_BLE_DEVICE_NAME, BleConfig, BleConnectionInfo, BleDeviceInfo, BleTransport,
+    discover_ble_devices, is_durable_ble_device_name,
+};
 #[cfg(feature = "usb")]
 pub use usb::{
     ESPRESSIF_USB_VID, UsbConfig, UsbConnectionInfo, UsbDeviceInfo, UsbTransport,
     discover_espressif_devices, discover_espressif_port,
 };
 
-/// Backward-compatible InkDock GATT service UUID, shared by every panel.
+/// Backward-compatible INK1 GATT service UUID, shared by every panel.
 pub const SERVICE_UUID: Uuid = Uuid::from_u128(0x8b7a0000_4f4b_4a9b_9d6e_1d0c1a2b3c4d);
 /// Host-to-board characteristic carrying INK1 packet chunks.
 pub const RX_UUID: Uuid = Uuid::from_u128(0x8b7a0001_4f4b_4a9b_9d6e_1d0c1a2b3c4d);
@@ -65,9 +68,10 @@ pub enum TransportError {
     #[error("no Bluetooth adapter is available")]
     NoBleAdapter,
     /// Scan did not find a configured panel.
-    #[error("BLE device {name:?} was not found")]
+    #[error("the saved Bluetooth panel was not found")]
     NoBleDevice {
-        /// Advertised compatibility name used for discovery.
+        /// Advertised identity used for exact discovery. Retained for callers
+        /// that need diagnostics without putting a stale legacy name in UI.
         name: String,
     },
     /// Connected peripheral did not expose the backward-compatible service.
@@ -211,5 +215,15 @@ mod tests {
             device_reply("NACK safe\u{202e}txt\u{2066}\n".as_bytes()),
             Some(DeviceReply::Nack("NACK safetxt".into()))
         );
+    }
+
+    #[test]
+    fn a_missing_saved_panel_does_not_echo_a_stale_identity_into_ui() {
+        let error = TransportError::NoBleDevice {
+            name: "Legacy E213".into(),
+        };
+
+        assert_eq!(error.to_string(), "the saved Bluetooth panel was not found");
+        assert!(!error.to_string().contains("Legacy E213"));
     }
 }

@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/svelte';
+import { cleanup, render } from '@testing-library/svelte';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { BridgeStateInterval, RiverCorridor, VesselTrack } from '$lib/types';
@@ -6,9 +6,9 @@ import type { BridgeStateInterval, RiverCorridor, VesselTrack } from '$lib/types
 import RiverLine from './RiverLine.svelte';
 
 /**
- * A trimmed cut of the engine's real geometry. The chart places stations at
- * their actual coordinates, so the fixture must put them on the water rather
- * than at one invented point.
+ * A trimmed cut of the engine's real corridor. The schematic consumes branch
+ * identity, station order, and signed channel metres while the component keeps
+ * the display focused on routes, moving vessels, and bridge state.
  */
 function station(
   label: string,
@@ -53,12 +53,42 @@ const CORRIDOR: RiverCorridor = {
       centerline: [
         [25.771, -80.1849],
         [25.7779, -80.1799],
-        [25.7635, -80.133]
+        [25.7793, -80.1665]
       ],
       stations: [
         station('River mouth', 'mouth', 25.771, -80.1849, -530),
         station('Port entrance', 'waypoint', 25.7779, -80.1799, -1470),
-        station('Government Cut', 'waypoint', 25.7635, -80.133, -6600)
+        station('Main Channel', 'waypoint', 25.7793, -80.1665, -3000)
+      ]
+    },
+    {
+      id: 'government_cut',
+      label: 'Government Cut',
+      corridorOffsetMeters: 220,
+      centerline: [
+        [25.771, -80.1849],
+        [25.7682, -80.167],
+        [25.7622, -80.129]
+      ],
+      stations: [
+        station('River mouth', 'mouth', 25.771, -80.1849, -530),
+        station('Dodge Island', 'waypoint', 25.7682, -80.167, -2300),
+        station('Government Cut', 'waypoint', 25.7622, -80.129, -7000)
+      ]
+    },
+    {
+      id: 'south_approach',
+      label: 'South approach',
+      corridorOffsetMeters: 150,
+      centerline: [
+        [25.771, -80.1849],
+        [25.7663, -80.183],
+        [25.752, -80.181]
+      ],
+      stations: [
+        station('River mouth', 'mouth', 25.771, -80.1849, -530),
+        station('Brickell Key', 'waypoint', 25.7663, -80.183, -1200),
+        station('Rickenbacker', 'waypoint', 25.752, -80.181, -4200)
       ]
     }
   ]
@@ -114,121 +144,195 @@ const INTERVALS: BridgeStateInterval[] = [
 
 afterEach(cleanup);
 
+function compactText(node: Element | null): string {
+  return (node?.textContent ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function translatedPoint(node: Element): { x: number; y: number } {
+  const match = /translate\((-?[\d.]+) (-?[\d.]+)\)/.exec(node.getAttribute('transform') ?? '');
+  expect(match).toBeTruthy();
+  return { x: Number(match![1]), y: Number(match![2]) };
+}
+
+function transformScale(node: Element): number {
+  const match = /scale\(([\d.]+)\)/.exec(node.getAttribute('transform') ?? '');
+  expect(match).toBeTruthy();
+  return Number(match![1]);
+}
+
+function expectOctolinear(path: Element): void {
+  const points = Array.from(
+    (path.getAttribute('d') ?? '').matchAll(/[ML](-?[\d.]+)\s+(-?[\d.]+)/g),
+    (match) => ({ x: Number(match[1]), y: Number(match[2]) })
+  );
+  expect(points.length).toBeGreaterThan(1);
+  for (let index = 1; index < points.length; index += 1) {
+    const dx = Math.abs(points[index].x - points[index - 1].x);
+    const dy = Math.abs(points[index].y - points[index - 1].y);
+    expect(dx === 0 || dy === 0 || Math.abs(dx - dy) < 0.01).toBe(true);
+  }
+}
+
 describe('RiverLine', () => {
-  it('draws the water with its bridges and seaward marks named', () => {
+  it('draws octolinear routes but labels only bridges and the shared mouth', () => {
     render(RiverLine, { corridor: CORRIDOR, vesselTracks: [], intervals: INTERVALS });
 
-    // Read the drawn labels, not the accessible <title> that repeats them.
-    const drawn = Array.from(document.querySelectorAll('.station-label')).map(
-      (node) => node.textContent
-    );
-    expect(drawn).toContain('Brickell Ave');
-    expect(drawn).toContain('SW 2 Ave');
-    // The bascule FL511 cannot see is still drawn; a blind spot is worth showing.
-    expect(drawn).toContain('S Miami Ave');
-    // Seaward marks come from the approach channels.
-    expect(drawn).toContain('Government Cut');
-    // Every branch draws as a water ribbon; the approaches read lighter.
-    expect(document.querySelectorAll('.water .ribbon').length).toBe(2);
-    expect(document.querySelectorAll('.water.approach .ribbon').length).toBe(1);
-    // The mouth is one junction shared by every branch, drawn once.
-    expect(drawn.filter((label) => label === 'River mouth').length).toBe(1);
+    const routes = Array.from(document.querySelectorAll('.route'));
+    expect(routes).toHaveLength(4);
+    expect(routes.map((route) => route.getAttribute('data-role'))).toEqual([
+      'river',
+      'north',
+      'east',
+      'south'
+    ]);
+    for (const route of routes) {
+      const paths = Array.from(route.querySelectorAll('path'));
+      expect(paths).toHaveLength(3);
+      expect(new Set(paths.map((path) => path.getAttribute('d'))).size).toBe(1);
+      expectOctolinear(paths[0]);
+    }
+
+    const bridgeNames = Array.from(document.querySelectorAll('.station-label')).map(compactText);
+    const mouthNames = Array.from(document.querySelectorAll('.junction-label')).map(compactText);
+    expect(bridgeNames).toEqual(['S Miami Ave', 'SW 2 Ave', 'NW 5 St']);
+    expect(mouthNames).toEqual(['River mouth']);
+    expect(document.querySelectorAll('.stations .station')).toHaveLength(4);
+    expect(document.querySelector('.target-name')?.textContent).toBe('BRICKELL');
+
+    const visibleText = compactText(document.querySelector('.stations'));
+    for (const waypoint of [
+      'Port entrance',
+      'Main Channel',
+      'Dodge Island',
+      'Government Cut',
+      'Brickell Key',
+      'Rickenbacker'
+    ]) {
+      expect(visibleText).not.toContain(waypoint);
+    }
   });
 
-  it('centres the range rings on the Brickell span', () => {
+  it('anchors the oversized mechanical Brickell target at 690,320', () => {
     render(RiverLine, { corridor: CORRIDOR, vesselTracks: [], intervals: [] });
-    const rings = Array.from(document.querySelectorAll('.rings circle'));
-    expect(rings.length).toBeGreaterThanOrEqual(2);
-    const target = document.querySelector('.station.is-target');
-    expect(target).toBeTruthy();
-    // Every ring shares one centre, and the target span sits on it.
-    const centres = new Set(
-      rings.map((ring) => `${ring.getAttribute('cx')},${ring.getAttribute('cy')}`)
-    );
-    expect(centres.size).toBe(1);
-    const [cx, cy] = [...centres][0].split(',').map(Number);
-    const mark = target?.querySelector('g')?.getAttribute('transform') ?? '';
-    const [, x, y] = /translate\((-?[\d.]+) (-?[\d.]+)\)/.exec(mark) ?? ['', '0', '0'];
-    expect(Math.abs(Number(x) - cx)).toBeLessThan(2);
-    expect(Math.abs(Number(y) - cy)).toBeLessThan(2);
+    const target = document.querySelector('.target-station');
+    const hero = target?.querySelector('.hero-bascule');
+    const mini = document.querySelector(".stations .station[data-kind='bridge'] > g");
+
+    expect(target).toHaveAttribute('transform', 'translate(690 320)');
+    expect(target?.querySelector('.transit-bascule')).toHaveAttribute('data-scale', 'hero');
+    expect(mini?.querySelector('.transit-bascule')).toHaveAttribute('data-scale', 'mini');
+    expect(hero).toBeTruthy();
+    expect(mini).toBeTruthy();
+    expect(transformScale(hero!)).toBeGreaterThan(transformScale(mini!) * 2);
+
+    const routeAngle = Number(mini?.getAttribute('data-route-angle'));
+    const bridgeAngle = Number(mini?.getAttribute('data-bridge-angle'));
+    expect((bridgeAngle - routeAngle + 360) % 360).toBe(90);
   });
 
-  it('carries live bascule state onto the station it belongs to', () => {
+  it('joins each bridge to its live state and writes the road consequence', () => {
     render(RiverLine, { corridor: CORRIDOR, vesselTracks: [], intervals: INTERVALS });
-    const states = Array.from(document.querySelectorAll('.station')).map((node) => ({
-      title: node.querySelector('title')?.textContent ?? '',
-      state: node.getAttribute('data-state')
-    }));
-    const span = (name: string) => states.find((s) => s.title.startsWith(name));
-    expect(span('SW 2 Ave')?.state).toBe('up');
-    expect(span('Brickell Ave')?.state).toBe('down');
-    // No FL511 selector exists for this span, so it must claim no state.
-    expect(span('S Miami Ave')?.state).toBe('none');
-    // A span says what it is doing, not merely what it is called.
-    expect(span('SW 2 Ave')?.title).toContain('open');
-    expect(span('Brickell Ave')?.title).toContain('closed');
+
+    const stations = Array.from(document.querySelectorAll('.station'));
+    const station = (name: string) =>
+      stations.find((node) => node.querySelector('title')?.textContent?.startsWith(name));
+    const sw2 = station('SW 2 Ave');
+    const southMiami = station('S Miami Ave');
+    const brickell = document.querySelector('.target-station');
+
+    expect(sw2).toHaveAttribute('data-state', 'up');
+    expect(compactText(sw2?.querySelector('.station-state') ?? null)).toBe('up');
+    expect(compactText(sw2?.querySelector('title') ?? null)).toContain('Bridge up');
+    expect(southMiami).toHaveAttribute('data-state', 'none');
+    expect(compactText(southMiami?.querySelector('.station-state') ?? null)).toBe('no reading');
+    expect(brickell).toHaveAttribute('data-state', 'down');
+    expect(compactText(brickell?.querySelector('.target-state-word') ?? null)).toBe(
+      'BRIDGE down'
+    );
+    expect(compactText(brickell?.querySelector('.target-road-word') ?? null)).toBe(
+      'road moving'
+    );
+    expect(compactText(brickell?.querySelector('title') ?? null)).toContain(
+      'Bridge down. road moving.'
+    );
   });
 
-  it('places a vessel on the water and reports distance, heading and arrival', () => {
+  it('keeps direction, knots, Brickell ETA, and bridge-opening impact with the hull', () => {
     render(RiverLine, { corridor: CORRIDOR, vesselTracks: [vessel()], intervals: INTERVALS });
 
-    expect(document.querySelectorAll('.vessel').length).toBe(1);
-    const transform = document.querySelector('.vessel')?.getAttribute('transform') ?? '';
-    expect(transform).not.toContain('NaN');
-    // The hull is rotated to its course along the drawn channel.
-    const hull = document.querySelector('.vessel .hull-group')?.getAttribute('transform') ?? '';
-    expect(hull).toContain('rotate(');
-    expect(hull).not.toContain('NaN');
-    expect(screen.getByText('Downriver')).toBeTruthy();
-    expect(screen.getByText('1.2 km')).toBeTruthy();
-    expect(screen.getByText('6–9 min')).toBeTruthy();
+    const mark = document.querySelector('.vessel');
+    const ship = mark?.querySelector('.vessel-ship');
+    const callout = mark?.querySelector('.vessel-callout');
+    const railItem = document.querySelector('.manifest li');
+    const point = translatedPoint(mark!);
+
+    expect(Number.isFinite(point.x)).toBe(true);
+    expect(Number.isFinite(point.y)).toBe(true);
+    expect(ship?.getAttribute('transform')).toMatch(/^rotate\(-?[\d.]+\)$/);
+    expect(ship?.getAttribute('transform')).not.toContain('NaN');
+    expect(ship?.querySelector('.vessel-glyph')).toHaveAttribute('data-family', 'tug');
+    expect(compactText(callout?.querySelector('.vessel-tag') ?? null)).toBe('SARA');
+    expect(compactText(callout?.querySelector('.vessel-type') ?? null)).toBe('Tug');
+    expect(compactText(callout?.querySelector('.vessel-direction') ?? null)).toBe(
+      'Downriver · 3.4 kn'
+    );
+    expect(compactText(callout?.querySelector('.vessel-eta') ?? null)).toBe('6–9 min');
+    expect(compactText(callout?.querySelector('.vessel-eta-label') ?? null)).toBe('TO BRICKELL');
+    expect(compactText(callout?.querySelector('.callout-opener') ?? null)).toBe(
+      'EXPECTED OPENER'
+    );
+    expect(compactText(railItem?.querySelector('.strip-movement') ?? null)).toBe(
+      'Downriver 3.4 kn'
+    );
+    expect(compactText(railItem?.querySelector('.strip-eta') ?? null)).toBe(
+      '6–9 minTO BRICKELL'
+    );
+    expect(compactText(railItem?.querySelector('.impact') ?? null)).toContain(
+      'EXPECTED OPENER'
+    );
+
+    const copy = compactText(document.body);
+    expect(copy).not.toMatch(/AIS type|Type not broadcast/i);
+    expect(document.querySelector('.type-key')).toBeNull();
   });
 
-  it('says a commercial hull opens on signal and an ordinary one waits for a slot', () => {
+  it('uses a solid yacht silhouette and the neutral label Vessel for an unknown type', () => {
     render(RiverLine, {
       corridor: CORRIDOR,
       vesselTracks: [
-        vessel(),
         vessel({
-          mmsi: '338215012',
-          vesselName: 'BRIGHT SIDE',
-          vesselClass: 'pleasure craft',
-          sMeters: -900,
-          branch: 'north_approach',
-          openingPropensity: 3300,
-          scheduleExempt: false,
-          waitsForSlot: true,
-          predictedOpeningAt: '2026-08-17T23:00:00Z'
+          mmsi: '367354090',
+          vesselName: undefined,
+          callSign: undefined,
+          vesselClass: undefined,
+          openingPropensity: undefined,
+          predictedOpeningAt: undefined,
+          etaMinMinutes: undefined,
+          etaMaxMinutes: undefined,
+          scheduleExempt: false
         })
       ],
       intervals: INTERVALS
     });
 
-    expect(screen.getByText('opens on signal')).toBeTruthy();
-    expect(screen.getByText('waits for slot')).toBeTruthy();
-    // The commercial exemption and the learned opener are separate claims.
-    expect(screen.getAllByText('Commercial').length).toBe(1);
-    // The opener is tagged twice on purpose: once on the water, once in the
-    // ledger, so it is unmissable whichever the reader is looking at.
-    expect(document.querySelectorAll('.opener-tag').length).toBe(1);
-    expect(document.querySelectorAll('.manifest .tag.opens').length).toBe(1);
+    const mark = document.querySelector(".vessel[data-mmsi='367354090']");
+    const glyph = mark?.querySelector('.vessel-glyph');
+    const callout = mark?.querySelector('.vessel-callout');
+    const railItem = document.querySelector('.manifest li');
+
+    expect(glyph).toHaveAttribute('data-family', 'generic-motor-yacht');
+    expect(glyph?.querySelectorAll('.hull')).toHaveLength(1);
+    expect(glyph?.querySelectorAll('.house')).toHaveLength(2);
+    expect(glyph?.querySelector('text')).toBeNull();
+    expect(glyph?.querySelector('[stroke-dasharray]')).toBeNull();
+    expect(compactText(callout?.querySelector('.vessel-tag') ?? null)).toBe('367354090');
+    expect(compactText(callout?.querySelector('.vessel-type') ?? null)).toBe('Vessel');
+    expect(compactText(railItem?.querySelector('.strip-id') ?? null)).toBe('367354090');
+    expect(compactText(railItem?.querySelector('.strip-type') ?? null)).toBe('Vessel');
+    expect(compactText(document.body)).not.toMatch(/unknown type|not broadcast|AIS type/i);
   });
 
-  it('says the source is off rather than showing an empty river', () => {
-    render(RiverLine, {
-      corridor: { ...CORRIDOR, aisLive: false },
-      vesselTracks: [],
-      intervals: INTERVALS
-    });
-    expect(screen.getByText(/AIS source is off/)).toBeTruthy();
-    // The water itself is still drawn: the geometry is true regardless.
-    const drawn = Array.from(document.querySelectorAll('.station-label')).map(
-      (node) => node.textContent
-    );
-    expect(drawn).toContain('Brickell Ave');
-  });
-
-  it('says nothing about berthed craft at all', () => {
+  it('omits the vessel sidebar when there are no vessels under way', () => {
     render(RiverLine, {
       corridor: CORRIDOR,
       vesselTracks: [
@@ -237,56 +341,24 @@ describe('RiverLine', () => {
       ],
       intervals: INTERVALS
     });
-    // A hull tied up at a pier is not news. It is not drawn, not listed, and
-    // not counted — a tally of things to ignore is still something to read.
-    expect(document.querySelectorAll('.vessel').length).toBe(0);
-    expect(document.querySelectorAll('.manifest li').length).toBe(0);
-    const header = document.querySelector('.river-count')?.textContent ?? '';
-    expect(header).toMatch(/Nothing under way/);
-    expect(header).not.toMatch(/berth/i);
-    expect(document.body.textContent).not.toMatch(/berthed/i);
+
+    expect(document.querySelectorAll('.vessel')).toHaveLength(0);
+    expect(document.querySelector('.manifest-rail')).toBeNull();
+    expect(document.querySelector('.manifest')).toBeNull();
+    expect(document.querySelector('.river-body')).not.toHaveClass('has-manifest');
   });
 
-  it('shows identity only where the vessel has broadcast it', () => {
-    render(RiverLine, {
-      corridor: CORRIDOR,
-      vesselTracks: [
-        vessel({
-          mmsi: '367705810',
-          vesselName: 'SARA',
-          callSign: 'WDF7318',
-          lengthMeters: 30,
-          beamMeters: 9,
-          destination: 'MIAMI RIVER'
-        }),
-        // Broadcast nothing but a position: no name, no size, no destination.
-        vessel({
-          mmsi: '367354090',
-          sMeters: -1600,
-          branch: 'north_approach',
-          vesselName: undefined,
-          vesselClass: undefined,
-          lengthMeters: undefined,
-          beamMeters: undefined,
-          etaMinMinutes: undefined,
-          etaMaxMinutes: undefined,
-          predictedOpeningAt: undefined,
-          openingPropensity: undefined,
-          scheduleExempt: false
-        })
-      ],
+  it('states that vessel traffic is unavailable without adding source-provenance chrome', () => {
+    const { getByRole, getByText } = render(RiverLine, {
+      corridor: { ...CORRIDOR, aisLive: false },
+      vesselTracks: [],
       intervals: INTERVALS
     });
 
-    const manifest = document.querySelector('.manifest')?.textContent ?? '';
-    expect(manifest).toContain('WDF7318');
-    expect(manifest).toContain('30×9 m');
-    expect(manifest).toContain('for MIAMI RIVER');
-    // The unidentified hull falls back to its MMSI and shows no empty slots.
-    expect(manifest).toContain('367354090');
-    // No placeholder cells: an unknown field is absent, not a dash.
-    expect(manifest).not.toContain('—');
-    expect(manifest).not.toMatch(/unreported|not reported/i);
+    expect(getByText('VESSEL TRAFFIC UNAVAILABLE')).toBeTruthy();
+    expect(getByRole('heading', { name: 'Miami River vessel traffic unavailable' })).toBeTruthy();
+    expect(compactText(document.body)).not.toMatch(/AIS|broadcast|provenance/i);
+    expect(document.querySelector('.manifest-rail')).toBeNull();
   });
 
   it('falls back to the call sign before the raw MMSI', () => {
@@ -295,29 +367,60 @@ describe('RiverLine', () => {
       vesselTracks: [vessel({ vesselName: undefined, callSign: 'WDF7318' })],
       intervals: INTERVALS
     });
-    expect(document.querySelector('.manifest')?.textContent).toContain('WDF7318');
-    // And the chart labels it the same way, never as a bare MMSI.
+
+    expect(document.querySelector('.strip-id')?.textContent).toBe('WDF7318');
     expect(document.querySelector('.vessel-tag')?.textContent).toBe('WDF7318');
+    expect(compactText(document.body)).not.toContain('367705810');
   });
 
-  it('stacks vessels sharing one spot so their names never overlap', () => {
+  it('preserves clustered hull positions without inventing a visual stack', () => {
     render(RiverLine, {
       corridor: CORRIDOR,
       vesselTracks: [
         vessel({ mmsi: '111111111', vesselName: 'SARA', sMeters: 1240 }),
-        vessel({ mmsi: '222222222', vesselName: 'COSTA V', sMeters: 1250 }),
-        vessel({ mmsi: '333333333', vesselName: 'PEPIN', sMeters: 1262 })
+        vessel({
+          mmsi: '222222222',
+          vesselName: 'COSTA V',
+          sMeters: 1250,
+          openingPropensity: undefined
+        }),
+        vessel({
+          mmsi: '333333333',
+          vesselName: 'PEPIN',
+          sMeters: 1262,
+          openingPropensity: undefined
+        }),
+        vessel({
+          mmsi: '444444444',
+          vesselName: 'MIA BELLA',
+          sMeters: 1270,
+          openingPropensity: undefined
+        })
       ],
       intervals: INTERVALS
     });
-    const marks = Array.from(document.querySelectorAll('.vessel')).map((node) => {
-      const [, x, y] = /translate\((-?[\d.]+) (-?[\d.]+)\)/.exec(
-        node.getAttribute('transform') ?? ''
-      ) ?? ['', '0', '0'];
-      return { x: Number(x), y: Number(y) };
-    });
-    // One column, distinct rows: a readable list rather than a single blob.
-    expect(new Set(marks.map((mark) => mark.x)).size).toBe(1);
-    expect(new Set(marks.map((mark) => mark.y)).size).toBe(3);
+
+    const marks = Array.from(document.querySelectorAll('.vessel'));
+    const points = marks.map(translatedPoint);
+    expect(new Set(marks.map((mark) => mark.getAttribute('transform'))).size).toBe(4);
+    expect(
+      Math.max(...points.map((point) => point.x)) - Math.min(...points.map((point) => point.x))
+    ).toBeLessThan(6);
+    expect(
+      Math.max(...points.map((point) => point.y)) - Math.min(...points.map((point) => point.y))
+    ).toBeLessThan(6);
+
+    const fullCallouts = Array.from(document.querySelectorAll('.vessel-callout'));
+    expect(new Set(fullCallouts.map((node) => node.getAttribute('transform'))).size).toBe(3);
+    expect(new Set(fullCallouts.map((node) => compactText(node.querySelector('.vessel-tag'))))).toEqual(
+      new Set(['SARA', 'COSTA V', 'PEPIN'])
+    );
+    expect(compactText(document.querySelector('.vessel-mini-readout'))).toContain('MIA BELLA');
+    expect(compactText(document.querySelector('.vessel-mini-readout'))).toContain('3.4 kn');
+    expect(compactText(document.querySelector('.vessel-mini-readout'))).toContain('BRICKELL');
+    expect(
+      new Set(Array.from(document.querySelectorAll('.manifest .strip-id')).map(compactText))
+    ).toEqual(new Set(['SARA', 'COSTA V', 'PEPIN', 'MIA BELLA']));
+    expect(document.querySelectorAll('.stacked')).toHaveLength(0);
   });
 });

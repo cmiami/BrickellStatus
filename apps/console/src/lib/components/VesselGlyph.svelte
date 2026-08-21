@@ -7,7 +7,8 @@ each class — a tug's tall wheelhouse, a container stack, a mast. Every glyph i
 drawn bow-right on the same waterline in the same 44×26 box, so a fleet reads as
 one family and a hull can be mirrored to face its heading without redrawing.
 
-A class the vessel never broadcast gets the plain boat. It is not a guess.
+A class the vessel never broadcast gets the same solid Miami motor-yacht mark
+as an unrecognised AIS class. It is a visual fallback, not a type claim.
 -->
 <script lang="ts">
   let {
@@ -48,7 +49,7 @@ A class the vessel never broadcast gets the plain boat. It is not a guess.
       case 'pilot':
         return 'pilot';
       default:
-        return 'boat';
+        return 'generic-motor-yacht';
     }
   });
 </script>
@@ -107,10 +108,13 @@ A class the vessel never broadcast gets the plain boat. It is not a guess.
     <path class="hull" d="M-18 3 L15 3 L20 -2 L-18 -2 Z" />
     <rect class="house" x="-13" y="-9" width="11" height="7" />
     <path class="mast" d="M-8 -9 L-8 -14" />
-  {:else}
-    <!-- No class broadcast: a plain boat, claiming nothing about the hull. -->
-    <path class="hull" d="M-17 4 L14 4 L19 -1 L-17 -1 Z" />
-    <rect class="house" x="-6" y="-8" width="11" height="7" />
+  {:else if family === 'generic-motor-yacht'}
+    <!-- Missing or unrecognised class: one confident Miami motor-yacht profile.
+         The solid hull avoids implying that the vessel itself is uncertain or
+         absent; only its AIS classification is unknown. -->
+    <path class="hull" d="M-22 3.8 L13.5 3.8 Q18 3.2 22 -2 L-18.5 -2 Z" />
+    <path class="house" d="M-12 -2 L8 -2 L4 -9.5 L-7.5 -9.5 Z" />
+    <path class="house" d="M-5.5 -9.5 L3.5 -9.5 L0.5 -14 L-3.5 -14 Z" />
   {/if}
 </g>
 

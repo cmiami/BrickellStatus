@@ -419,12 +419,17 @@ export type PanelRevision = 'original' | 'v11';
 export type FlashRequirement =
   | { state: 'noDevice' }
   | { state: 'upToDate'; build: string }
+  | { state: 'deviceNewer'; device: number; bundled: number }
+  | { state: 'differentBuild'; version: number; device: string; bundled: string }
   | { state: 'unknownBuild' }
   | {
       state: 'required';
       reason:
         | { kind: 'notResponding' }
         | { kind: 'buildMismatch'; device: string; bundled: string }
+        | { kind: 'firmwareOutdated'; device: number; bundled: number }
+        | { kind: 'incompatibleIdentity'; device: string; bundled: string }
+        | { kind: 'legacyConnection' }
         | { kind: 'wrongBoard'; board: PanelModel };
     };
 
@@ -439,6 +444,8 @@ export interface FirmwareVariantSummary {
 export interface FirmwareStatus {
   port?: string;
   bundledBuild?: string;
+  /** Monotonic release used for upgrade ordering. */
+  bundledVersion?: number;
   /** The board that answered, when one has. */
   board?: PanelModel;
   /** The build to write to it, decided from what the board reported. */

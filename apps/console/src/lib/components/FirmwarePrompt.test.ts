@@ -26,6 +26,7 @@ function status(overrides: Partial<FirmwareStatus>): FirmwareStatus {
   return {
     port: '/dev/tty.usbmodem101',
     bundledBuild: 'abc1234',
+    bundledVersion: 2,
     variants: [E213_V11, E213_V1, E290] as unknown as FirmwareStatus['variants'],
     requirement: { state: 'required', reason: { kind: 'notResponding' } },
     ...overrides
@@ -46,7 +47,7 @@ function serve(first: FirmwareStatus, afterFlash: FirmwareStatus = first) {
 }
 
 async function flashButton() {
-  return await screen.findByRole('button', { name: /flash/i });
+  return await screen.findByRole('button', { name: /flash|update|repair|install/i });
 }
 
 describe('FirmwarePrompt', () => {
@@ -78,9 +79,7 @@ describe('FirmwarePrompt', () => {
     expect(screen.queryByRole('button', { name: /e213/i })).toBeNull();
   });
 
-  /// The one question worth asking is the one a person can answer, and only on
-  /// the board whose panel revision nothing can read back.
-  it('asks whether the screen is readable only when another build could apply', async () => {
+  it('presents E213 as one panel and leaves controller recovery to READY verification', async () => {
     serve(
       status({ board: 'e213', recommendedVariantId: 'vision-master-e213-v11' }),
       status({
@@ -94,16 +93,15 @@ describe('FirmwarePrompt', () => {
 
     (await flashButton()).click();
 
-    expect(await screen.findByText(/can you read the display/i)).toBeInTheDocument();
-    const other = await screen.findByRole('button', { name: /try the other panel/i });
-    other.click();
-
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith('flash_firmware', {
-        variantId: 'vision-master-e213',
+        variantId: 'vision-master-e213-v11',
         port: '/dev/tty.usbmodem101'
       })
     );
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(screen.queryByText(/can you read the display/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /other panel/i })).toBeNull();
   });
 
   it('closes without a question on a board that has only one build', async () => {
@@ -138,6 +136,40 @@ describe('FirmwarePrompt', () => {
     render(FirmwarePrompt);
 
     expect(await screen.findByText(/this board is an E290/i)).toBeInTheDocument();
+  });
+
+  it('notifies a BLE-connected legacy panel and requires USB before updating', async () => {
+    serve(
+      status({
+        port: undefined,
+        board: 'e290',
+        recommendedVariantId: 'vision-master-e290',
+        requirement: {
+          state: 'required',
+          reason: { kind: 'firmwareOutdated', device: 1, bundled: 2 }
+        }
+      })
+    );
+    const { default: FirmwarePrompt } = await import('./FirmwarePrompt.svelte');
+    render(FirmwarePrompt);
+
+    expect(await screen.findByText(/firmware update required/i)).toBeInTheDocument();
+    expect(screen.getByText(/USB connection required/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /update firmware/i })).toBeNull();
+  });
+
+  it('never offers to downgrade firmware newer than the desktop app', async () => {
+    serve(
+      status({
+        requirement: { state: 'deviceNewer', device: 3, bundled: 2 }
+      })
+    );
+    const { default: FirmwarePrompt } = await import('./FirmwarePrompt.svelte');
+    render(FirmwarePrompt);
+
+    expect(await screen.findByRole('heading', { name: /update BrickellStatus/i })).toBeInTheDocument();
+    expect(screen.getByText(/will not be downgraded/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /update firmware|repair firmware/i })).toBeNull();
   });
 
   it('offers nothing on a platform that cannot write firmware', async () => {

@@ -45,7 +45,23 @@
   });
   let deviceCandidates = $state<DisplayDeviceCandidate[]>([]);
   let firmware = $state<FirmwareStatus | null>(null);
-  let reflashing = $state(false);
+  let repairingFirmware = $state(false);
+
+  const durableBleName = /^BrickellStatus [0-9A-F]{4}$/;
+
+  function isDurableBleName(name: string): boolean {
+    return durableBleName.test(name) && name !== 'BrickellStatus 0000';
+  }
+
+  function panelDisplayName(status: DisplayConnectionStatus): string {
+    if (status.transport === 'ble') {
+      return status.deviceName && isDurableBleName(status.deviceName)
+        ? status.deviceName
+        : 'BrickellStatus panel';
+    }
+    if (status.transport === 'usb') return 'USB panel';
+    return 'No panel connected';
+  }
 
   // Assume USB until the backend says otherwise, so the register never flickers
   // a smaller set of choices on a desktop that has them all.
@@ -81,17 +97,16 @@
   const geometry = $derived(PANEL_GEOMETRY[panel]);
   const detected = $derived(Boolean(deviceStatus.panel));
 
-  // The board reports which panel it is, but not which revision of that panel
-  // it carries -- same controller, same wiring, nothing to read back. So when a
-  // board has more than one build, the only way to settle it is to write one
-  // and look at the screen. That makes "write the other one" a permanent
-  // control here, not a prompt that disappears once the flash succeeds.
-  const otherBuild = $derived(
+  // E213's two controller images are internal recovery candidates, not two
+  // panel choices. This single repair action starts with the recommended image;
+  // the backend requires READY and tries the other E213 controller once when
+  // needed, without treating retained pixels as proof that firmware is alive.
+  const repairBuild = $derived(
     !flashingSupported
       ? null
-      : firmware?.variants.find(
-          (variant) => variant.panel === panel && variant.id !== firmware?.recommendedVariantId
-        ) ?? null
+      : firmware?.variants.find((variant) => variant.id === firmware?.recommendedVariantId) ??
+        firmware?.variants.find((variant) => variant.panel === panel) ??
+        null
   );
 
   const epaperOutput = $derived($snapshot?.outputs.find((output) => output.id === 'epaper'));
@@ -177,6 +192,7 @@
   }
 
   async function connectDevice(device: DisplayDeviceCandidate) {
+    const remembersBleRoute = device.transport === 'ble' && isDurableBleName(device.name);
     deviceBusy = 'connect';
     deviceStatus = {
       state: 'connecting',
@@ -186,7 +202,14 @@
     };
     try {
       draft.display.transport = device.transport;
-      if (device.transport === 'usb') draft.display.serialPort = device.id.replace(/^usb:/, '');
+      if (device.transport === 'usb') {
+        draft.display.serialPort = device.id.replace(/^usb:/, '');
+      } else {
+        // A platform peripheral ID is safe for this live app session. Only the
+        // firmware's board-specific name is safe after restart; old generic or
+        // missing names can identify a different panel on the same desk.
+        draft.display.bleName = remembersBleRoute ? device.name : '';
+      }
       const saved = await persistPreferences($state.snapshot(draft));
       if (!saved.ok) {
         deviceStatus = { state: 'error', transport: device.transport, deviceName: device.name, detail: saved.message };
@@ -195,7 +218,11 @@
       deviceStatus = await connectDisplayDevice(device.id, device.transport);
       notice.set({
         ok: deviceStatus.state === 'connected',
-        message: deviceStatus.state === 'connected' ? `${deviceStatus.detail} This device is now the saved display route.` : deviceStatus.detail
+        message: deviceStatus.state === 'connected'
+          ? remembersBleRoute || device.transport === 'usb'
+            ? `${deviceStatus.detail} This device is now the saved display route.`
+            : `${deviceStatus.detail} Connected for this session; this panel does not advertise a unique name, so it cannot be remembered safely.`
+          : deviceStatus.detail
       });
     } catch (error) {
       deviceStatus = {
@@ -210,17 +237,17 @@
     }
   }
 
-  async function flashOtherBuild() {
-    if (!firmware?.port || !otherBuild) return;
-    reflashing = true;
+  async function repairPanelFirmware() {
+    if (!firmware?.port || !repairBuild) return;
+    repairingFirmware = true;
     try {
-      await invoke('flash_firmware', { variantId: otherBuild.id, port: firmware.port });
+      await invoke('flash_firmware', { variantId: repairBuild.id, port: firmware.port });
       firmware = await invoke<FirmwareStatus>('get_firmware_status');
-      notice.set({ ok: true, message: `Wrote ${otherBuild.label}. Look at the panel: if it is still blank or scrambled, write the other one back.` });
+      notice.set({ ok: true, message: 'Panel firmware was written and verified. The saved connection now follows this panel.' });
     } catch (error) {
-      notice.set({ ok: false, message: error instanceof Error ? error.message : 'The panel build could not be written.' });
+      notice.set({ ok: false, message: error instanceof Error ? error.message : 'Panel firmware could not be repaired.' });
     } finally {
-      reflashing = false;
+      repairingFirmware = false;
     }
   }
 
@@ -297,11 +324,10 @@
             <p>{deviceStatus.detail}</p>
           </div>
           <div class="status-facts">
-            <!-- No invented fallback. This used to print "InkDock <panel>",
-                 which is another project's name and, once boards started
-                 advertising their own, was wrong on every board as well as
-                 unrelated to what the picker would show. -->
-            <span>{deviceStatus.deviceName ?? 'No panel connected'}</span>
+            <!-- The picker may expose a legacy advertisement so it can be
+                 selected by exact session ID. Once connected, only the current
+                 board-specific identity deserves to become user-facing copy. -->
+            <span>{panelDisplayName(deviceStatus)}</span>
             <strong>{deviceStatus.transport?.toUpperCase() ?? 'NO LINK'}</strong>
             {#if deviceStatus.lastAckAt}<small>Last ACK {new Date(deviceStatus.lastAckAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>{/if}
           </div>
@@ -363,14 +389,14 @@
         <small class="field-note">Pick whichever matches the panel in front of you.</small>
       </fieldset>
 
-      {#if otherBuild}
+      {#if repairBuild && firmware?.port}
         <div class="panel-rescue">
           <div>
-            <strong>Screen blank or scrambled?</strong>
-            <span>Two versions of this panel exist and the board cannot tell them apart. Write the other one and look at the screen again.</span>
+            <strong>Panel not connecting?</strong>
+            <span>Reinstall and verify its firmware. E213 controller recovery is automatic.</span>
           </div>
-          <button class="secondary-action" onclick={flashOtherBuild} disabled={reflashing || !firmware?.port}>
-            {reflashing ? 'Writing…' : `Write ${otherBuild.label}`}
+          <button class="secondary-action" onclick={repairPanelFirmware} disabled={repairingFirmware}>
+            {repairingFirmware ? 'Repairing…' : 'Repair panel firmware'}
           </button>
         </div>
       {/if}

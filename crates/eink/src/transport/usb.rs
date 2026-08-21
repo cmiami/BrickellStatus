@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::Mutex,
     time::{sleep, timeout},
 };
@@ -142,7 +142,7 @@ impl UsbTransport {
             .map_err(|error| usb_io(error.to_string()))?;
 
         sleep(self.config.startup_delay).await;
-        let banner = probe_ready(&mut stream, self.config.ready_timeout).await?;
+        let banner = request_identity(&mut stream, self.config.ready_timeout).await?;
         Ok((stream, banner, port_name))
     }
 
@@ -326,10 +326,38 @@ pub async fn discover_espressif_devices() -> Result<Vec<UsbDeviceInfo>, Transpor
 /// The banner names the build on the board. Returning only "did it speak"
 /// discarded that, which is why a device running exactly the bundled firmware
 /// still reported an unknown build.
-async fn probe_ready(
-    stream: &mut SerialStream,
+/// Asks running BrickellStatus firmware to repeat its identity before waiting.
+///
+/// The boot banner remains compatible with older firmware, but it is a
+/// one-time line and USB re-enumeration can happen after it was printed. The
+/// one-byte query makes a freshly flashed image verifiable at any point. Older
+/// firmware ignores the byte, while a wrong E213 controller image is blocked
+/// before its decoder loop and remains objectively silent.
+async fn request_identity<Stream>(
+    stream: &mut Stream,
     duration: Duration,
-) -> Result<Option<String>, TransportError> {
+) -> Result<Option<String>, TransportError>
+where
+    Stream: AsyncRead + AsyncWrite + Unpin,
+{
+    stream
+        .write_all(b"?")
+        .await
+        .map_err(|error| usb_io(error.to_string()))?;
+    stream
+        .flush()
+        .await
+        .map_err(|error| usb_io(error.to_string()))?;
+    probe_ready(stream, duration).await
+}
+
+async fn probe_ready<Stream>(
+    stream: &mut Stream,
+    duration: Duration,
+) -> Result<Option<String>, TransportError>
+where
+    Stream: AsyncRead + Unpin,
+{
     let mut received = Vec::new();
     let outcome = timeout(duration, async {
         let mut chunk = [0_u8; 256];
@@ -389,5 +417,45 @@ fn usb_io(message: String) -> TransportError {
     TransportError::Io {
         transport: TransportKind::Usb,
         message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::duplex;
+
+    #[tokio::test]
+    async fn identity_query_recovers_a_repeatable_ready_banner() {
+        let (mut host, mut device) = duplex(256);
+        let responder = tokio::spawn(async move {
+            let mut query = [0_u8; 1];
+            device.read_exact(&mut query).await.unwrap();
+            assert_eq!(query, [b'?']);
+            device
+                .write_all(b"READY INK1 250x122 3904 abc1234 E213 26B4\n")
+                .await
+                .unwrap();
+        });
+
+        let banner = request_identity(&mut host, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            banner.as_deref(),
+            Some("READY INK1 250x122 3904 abc1234 E213 26B4")
+        );
+        responder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn identity_query_has_a_bounded_silent_result() {
+        let (mut host, _silent_device) = duplex(16);
+        assert_eq!(
+            request_identity(&mut host, Duration::from_millis(1))
+                .await
+                .unwrap(),
+            None
+        );
     }
 }

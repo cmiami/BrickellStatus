@@ -2,35 +2,67 @@ use brickellstatus_eink::ChannelUrgency;
 
 use super::*;
 
-/// A board that has never run our firmware speaks no banner, so the variant
-/// written to it is a guess — the first in the bundle, which is an E213 build.
-/// Guess wrong and the firmware refuses to drive the panel, e-paper keeps the
-/// factory image, and a flash that genuinely succeeded looks like it did
-/// nothing. The board settles it at boot, and the app has to act on that.
 #[test]
-fn a_board_that_is_not_the_panel_we_wrote_asks_for_the_right_build() {
-    let mismatched = DeviceBanner::parse("READY INK1 250x122 3904 abc1234 E290 MISMATCH");
+fn verified_banner_becomes_the_exact_post_flash_ble_name() {
+    let banner = DeviceBanner::parse("READY INK1 250x122 3904 abc1234 E213 26b4");
     assert_eq!(
-        correction_for(&mismatched, "vision-master-e213-v11"),
-        Some(PanelModel::E290),
-        "an E290 told to run an E213 build must ask for the E290 one"
+        verified_ble_name(&banner).as_deref(),
+        Some("BrickellStatus 26B4")
     );
 }
 
 #[test]
-fn a_board_running_the_build_it_should_is_left_alone() {
-    // No mismatch: nothing to correct, whatever the banner names.
-    let happy = DeviceBanner::parse("READY INK1 296x128 4736 abc1234 E290");
-    assert_eq!(correction_for(&happy, "vision-master-e290"), None);
+fn missing_or_malformed_board_id_never_becomes_a_reconnect_key() {
+    for line in [
+        "READY INK1 250x122 3904 abc1234 E213",
+        "READY INK1 250x122 3904 abc1234 E213 panel",
+        "READY INK1 250x122 3904 abc1234 E213 0000",
+        "READY INK1 250x122 3904 abc1234 E213 26B4 MISMATCH",
+    ] {
+        assert_eq!(
+            verified_ble_name(&DeviceBanner::parse(line)),
+            None,
+            "{line}"
+        );
+    }
+}
 
-    // Mismatch naming the board we already wrote for would mean rewriting the
-    // same image forever, so it is not a correction.
-    let same = DeviceBanner::parse("READY INK1 296x128 4736 abc1234 E290 MISMATCH");
-    assert_eq!(correction_for(&same, "vision-master-e290"), None);
+#[test]
+fn flash_recovery_never_moves_to_a_different_or_anonymous_usb_board() {
+    assert!(flash_serial_matches(None, None));
+    assert!(flash_serial_matches(None, Some("newly-observed")));
+    assert!(flash_serial_matches(Some("panel-a"), Some("panel-a")));
+    assert!(!flash_serial_matches(Some("panel-a"), Some("panel-b")));
+    assert!(!flash_serial_matches(Some("panel-a"), None));
+}
 
-    // A banner with no board named settles nothing.
-    let nameless = DeviceBanner::parse("READY INK1 250x122 3904 abc1234 NONE MISMATCH");
-    assert_eq!(correction_for(&nameless, "vision-master-e213"), None);
+#[test]
+fn every_flash_entry_point_refuses_a_detected_firmware_downgrade() {
+    let newer = DeviceBanner::parse("READY INK1 250x122 3904 future E213 26B4 FW3");
+    assert!(refuse_firmware_downgrade(&newer, 2).is_err());
+    let current = DeviceBanner::parse("READY INK1 296x128 4736 current E290 26B4 FW2");
+    assert!(refuse_firmware_downgrade(&current, 2).is_ok());
+}
+
+#[test]
+fn only_saved_legacy_wireless_routes_raise_identity_migration_attention() {
+    assert!(needs_panel_identity_migration(
+        DisplayTransport::Ble,
+        "InkDock E213"
+    ));
+    assert!(needs_panel_identity_migration(
+        DisplayTransport::Auto,
+        "INK1 panel"
+    ));
+    assert!(!needs_panel_identity_migration(
+        DisplayTransport::Ble,
+        "BrickellStatus 26B4"
+    ));
+    assert!(!needs_panel_identity_migration(
+        DisplayTransport::Usb,
+        "InkDock E213"
+    ));
+    assert!(!needs_panel_identity_migration(DisplayTransport::Ble, ""));
 }
 
 #[test]
@@ -86,6 +118,74 @@ fn exact_saved_usb_route_is_armed_for_restart_reconnect() {
     let display = DisplayController::new(&preferences);
     assert!(display.automatic_reconnect_enabled());
     assert!(!display.delivery_armed());
+}
+
+#[test]
+fn exact_saved_ble_name_is_armed_for_restart_reconnect() {
+    let mut preferences = AppPreferences::default();
+    preferences.display.transport = DisplayTransport::Ble;
+    preferences.display.ble_name = "BrickellStatus 26B4".into();
+    let display = DisplayController::new(&preferences);
+
+    assert!(display.automatic_reconnect_enabled());
+    assert!(!display.delivery_armed());
+}
+
+#[test]
+fn automatic_transport_arms_when_only_a_ble_name_is_saved() {
+    let mut preferences = AppPreferences::default();
+    preferences.display.transport = DisplayTransport::Auto;
+    preferences.display.ble_name = "BrickellStatus 26B4".into();
+    let display = DisplayController::new(&preferences);
+
+    assert!(display.automatic_reconnect_enabled());
+}
+
+#[test]
+fn bluetooth_without_a_saved_panel_stays_parked() {
+    let mut preferences = AppPreferences::default();
+    preferences.display.transport = DisplayTransport::Ble;
+    preferences.display.ble_name.clear();
+    let display = DisplayController::new(&preferences);
+
+    assert!(!display.automatic_reconnect_enabled());
+}
+
+#[test]
+fn non_unique_ble_names_never_arm_restart_reconnect() {
+    for name in [
+        "INK1 panel",
+        "InkDock E213",
+        "BrickellStatus 26b4",
+        "BrickellStatus 26B40",
+        "BrickellStatus 0000",
+    ] {
+        let mut preferences = AppPreferences::default();
+        preferences.display.transport = DisplayTransport::Ble;
+        preferences.display.ble_name = name.into();
+
+        assert!(
+            !DisplayController::new(&preferences).automatic_reconnect_enabled(),
+            "{name:?} is not a durable board identity"
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicit_ble_id_is_armed_before_the_connection_result() {
+    let display = DisplayController::new(&AppPreferences::default());
+    *display.preferred_usb_port.lock().await = Some("/dev/cu.old-panel".into());
+
+    display
+        .arm_selected_ble_route("platform-peripheral-id")
+        .await;
+
+    assert!(display.automatic_reconnect_enabled());
+    assert_eq!(
+        display.preferred_ble_id.lock().await.as_deref(),
+        Some("platform-peripheral-id")
+    );
+    assert!(display.preferred_usb_port.lock().await.is_none());
 }
 
 /// A USB display that has been opened but has not carried a frame yet, which is
@@ -200,11 +300,14 @@ async fn a_board_that_dies_after_answering_stops_counting_as_proven() {
 #[tokio::test]
 async fn a_bluetooth_display_says_nothing_about_the_board_on_usb() {
     let display = DisplayController::new(&AppPreferences::default());
+    let banner = "READY INK1 250x122 3904 abc1234 E213 26B4 FW2";
     *display.active.write().await = Some(ActiveDisplay::Ble {
         name: "BrickellStatus 26B4".into(),
         transport: Arc::new(BleTransport::new(BleConfig::default())),
+        banner: Some(banner.into()),
     });
     display.note_frame_acknowledged();
+    assert_eq!(display.ble_banner().await.as_deref(), Some(banner));
     assert_eq!(
         display.usb_route_evidence().await,
         firmware::RouteEvidence::Absent,

@@ -46,7 +46,7 @@ function preferencesFixture(): AppPreferences {
     display: {
       transport: 'preview',
       serialPort: 'auto',
-      bleName: 'Tender E213',
+      bleName: 'BrickellStatus 26B4',
       dwellSeconds: 30,
       fullRefreshEvery: 10,
       orientation: 'upright'

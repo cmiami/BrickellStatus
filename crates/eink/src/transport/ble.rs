@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, future::Future, time::Duration};
 
 use async_trait::async_trait;
 use btleplug::{
@@ -6,7 +6,12 @@ use btleplug::{
     platform::{Adapter, Manager, Peripheral},
 };
 use futures::StreamExt;
-use tokio::{sync::Mutex, time::sleep};
+use tokio::{
+    runtime::Handle,
+    sync::Mutex,
+    time::{sleep, timeout},
+};
+use tracing::warn;
 
 use super::{
     DeviceReply, PacketTransport, RX_UUID, SERVICE_UUID, TX_UUID, TransportError, TransportKind,
@@ -36,6 +41,31 @@ pub fn init_android_bluetooth(env: &jni::JNIEnv<'_>) -> Result<(), TransportErro
 
 const BLE_FRAME_ATTEMPTS: usize = 2;
 const BLE_FRAME_RETRY_DELAY: Duration = Duration::from_millis(100);
+const BLE_CONNECTION_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
+const BLE_CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
+const BLE_SERVICE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+const BLE_BANNER_READ_TIMEOUT: Duration = Duration::from_secs(2);
+const BLE_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const BLE_SCAN_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Picker label used only when a compatible advertisement has no local name.
+///
+/// It is deliberately not a durable identity: more than one old panel can
+/// advertise the public service without a name and would receive this same
+/// label.
+pub const ANONYMOUS_BLE_DEVICE_NAME: &str = "INK1 panel";
+
+/// Whether an advertised BLE name can safely be remembered across sessions.
+pub fn is_durable_ble_device_name(name: &str) -> bool {
+    let Some(board_code) = name.strip_prefix("BrickellStatus ") else {
+        return false;
+    };
+    board_code != "0000"
+        && board_code.len() == 4
+        && board_code
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
+}
 
 /// BLE scan and write configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,6 +127,34 @@ struct BleConnection {
     rx: Characteristic,
     tx: Characteristic,
     info: BleConnectionInfo,
+    cleanup: CleanupOnDrop,
+}
+
+/// A synchronous cancellation boundary for cleanup that itself has to be
+/// asynchronous. Dropping a Tokio future runs `Drop` immediately; scheduling
+/// the platform disconnect here means an outer timeout cannot skip it.
+struct CleanupOnDrop {
+    cleanup: Option<Box<dyn FnOnce() + Send + Sync + 'static>>,
+}
+
+impl CleanupOnDrop {
+    fn new(cleanup: impl FnOnce() + Send + Sync + 'static) -> Self {
+        Self {
+            cleanup: Some(Box::new(cleanup)),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.cleanup = None;
+    }
+}
+
+impl Drop for CleanupOnDrop {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup();
+        }
+    }
 }
 
 /// `btleplug` writer for the backward-compatible E213 GATT service.
@@ -116,21 +174,33 @@ impl BleTransport {
 
     async fn connect(&self) -> Result<BleConnection, TransportError> {
         let (peripheral, observed) = find_ble_device(&self.config).await?;
+        let cleanup_peripheral = peripheral.clone();
+        let cleanup = CleanupOnDrop::new(move || {
+            schedule_ble_disconnect(cleanup_peripheral);
+        });
 
-        if !peripheral
-            .is_connected()
+        let connected = timeout(BLE_CONNECTION_STATUS_TIMEOUT, peripheral.is_connected())
             .await
-            .map_err(|error| ble_io(error.to_string()))?
-        {
-            peripheral
-                .connect()
+            .map_err(|_| ble_timeout("BLE connection status"))?
+            .map_err(|error| ble_io(error.to_string()))?;
+        if !connected {
+            timeout(BLE_CONNECT_TIMEOUT, peripheral.connect())
                 .await
+                .map_err(|_| ble_timeout("BLE connection"))?
                 .map_err(|error| ble_io(error.to_string()))?;
         }
-        peripheral
-            .discover_services()
-            .await
-            .map_err(|error| ble_io(error.to_string()))?;
+
+        // Connection and verification are one ownership boundary. Every
+        // platform call has its own deadline below the worker's deadline, and
+        // `cleanup` remains armed across every await. CoreBluetooth does not
+        // disconnect merely because its Rust handle was dropped.
+        timeout(
+            BLE_SERVICE_DISCOVERY_TIMEOUT,
+            peripheral.discover_services(),
+        )
+        .await
+        .map_err(|_| ble_timeout("BLE GATT service discovery"))?
+        .map_err(|error| ble_io(error.to_string()))?;
         let characteristics = peripheral.characteristics();
         let rx = characteristics
             .iter()
@@ -148,13 +218,12 @@ impl BleTransport {
                 which: "TX",
                 uuid: TX_UUID,
             })?;
-        // Read before any frame is sent: the host has to know which panel it is
-        // drawing for before it draws, and this characteristic holds the same
-        // line the board speaks over serial at boot.
-        let banner = peripheral
-            .read(&tx)
+        // Banner reads are useful but optional, so a platform read failure or
+        // timeout does not discard an otherwise verified INK1 connection.
+        let banner = timeout(BLE_BANNER_READ_TIMEOUT, peripheral.read(&tx))
             .await
             .ok()
+            .and_then(Result::ok)
             .and_then(|value| match device_reply(&value) {
                 Some(DeviceReply::Ready(line)) => Some(line),
                 _ => None,
@@ -168,6 +237,7 @@ impl BleTransport {
                 name: observed.name,
                 banner,
             },
+            cleanup,
         })
     }
 
@@ -176,14 +246,23 @@ impl BleTransport {
     /// operating system created a bonded pairing record.
     pub async fn ensure_connected(&self) -> Result<BleConnectionInfo, TransportError> {
         let mut guard = self.connection.lock().await;
-        if let Some(connection) = guard.as_ref()
-            && connection
-                .peripheral
-                .is_connected()
-                .await
-                .map_err(|error| ble_io(error.to_string()))?
-        {
-            return Ok(connection.info.clone());
+        if let Some(mut connection) = guard.take() {
+            let connected = timeout(
+                BLE_CONNECTION_STATUS_TIMEOUT,
+                connection.peripheral.is_connected(),
+            )
+            .await
+            .map_err(|_| ble_timeout("BLE connection status"))?
+            .map_err(|error| ble_io(error.to_string()))?;
+            if connected {
+                let info = connection.info.clone();
+                *guard = Some(connection);
+                return Ok(info);
+            }
+            // The platform explicitly says this old handle has no link. Disarm
+            // it before reconnecting so dropping it cannot disconnect the new
+            // session to the same peripheral.
+            connection.cleanup.disarm();
         }
         let connection = self.connect().await?;
         let info = connection.info.clone();
@@ -194,18 +273,18 @@ impl BleTransport {
     /// Disconnects the retained GATT session, if one exists.
     pub async fn disconnect(&self) -> Result<(), TransportError> {
         let mut guard = self.connection.lock().await;
-        if let Some(connection) = guard.take()
-            && connection
-                .peripheral
-                .is_connected()
-                .await
-                .map_err(|error| ble_io(error.to_string()))?
-        {
-            connection
-                .peripheral
-                .disconnect()
-                .await
-                .map_err(|error| ble_io(error.to_string()))?;
+        if let Some(mut connection) = guard.take() {
+            let connected = timeout(
+                BLE_CONNECTION_STATUS_TIMEOUT,
+                connection.peripheral.is_connected(),
+            )
+            .await
+            .map_err(|_| ble_timeout("BLE connection status"))?
+            .map_err(|error| ble_io(error.to_string()))?;
+            if connected {
+                disconnect_platform_link(&connection.peripheral).await?;
+            }
+            connection.cleanup.disarm();
         }
         Ok(())
     }
@@ -280,13 +359,54 @@ impl BleTransport {
     }
 }
 
+fn spawn_cleanup(cleanup: impl Future<Output = ()> + Send + 'static) {
+    match Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(cleanup);
+        }
+        Err(error) => {
+            warn!(%error, "BLE cleanup could not be scheduled because the async runtime is gone");
+        }
+    }
+}
+
+fn schedule_ble_disconnect(peripheral: Peripheral) {
+    spawn_cleanup(async move {
+        if let Err(error) = disconnect_platform_link(&peripheral).await {
+            warn!(%error, "best-effort BLE link cleanup failed");
+        }
+    });
+}
+
+fn schedule_scan_stop(adapters: Vec<Adapter>) {
+    spawn_cleanup(async move {
+        if !stop_scans(&adapters).await {
+            warn!("best-effort BLE scan cleanup failed");
+        }
+    });
+}
+
+async fn disconnect_platform_link(peripheral: &Peripheral) -> Result<(), TransportError> {
+    timeout(BLE_DISCONNECT_TIMEOUT, peripheral.disconnect())
+        .await
+        .map_err(|_| ble_timeout("BLE disconnection"))?
+        .map_err(|error| ble_io(error.to_string()))
+}
+
+fn ble_timeout(waiting_for: &'static str) -> TransportError {
+    TransportError::Timeout {
+        transport: TransportKind::Ble,
+        waiting_for,
+    }
+}
+
 /// Scans every available Bluetooth adapter for peripherals advertising the
 /// compatible service or selected compatibility name.
 pub async fn discover_ble_devices(
     config: &BleConfig,
 ) -> Result<Vec<BleDeviceInfo>, TransportError> {
     let adapters = available_adapters().await?;
-    start_scans(&adapters).await?;
+    let mut scan_cleanup = start_scans(&adapters).await?;
     let started = tokio::time::Instant::now();
     let mut found = BTreeMap::<String, BleDeviceInfo>::new();
     loop {
@@ -306,7 +426,9 @@ pub async fn discover_ble_devices(
         }
         sleep(Duration::from_millis(200)).await;
     }
-    stop_scans(&adapters).await;
+    if stop_scans(&adapters).await {
+        scan_cleanup.disarm();
+    }
     Ok(found.into_values().collect())
 }
 
@@ -314,7 +436,7 @@ async fn find_ble_device(
     config: &BleConfig,
 ) -> Result<(Peripheral, BleDeviceInfo), TransportError> {
     let adapters = available_adapters().await?;
-    start_scans(&adapters).await?;
+    let mut scan_cleanup = start_scans(&adapters).await?;
     let started = tokio::time::Instant::now();
     loop {
         for adapter in &adapters {
@@ -324,24 +446,39 @@ async fn find_ble_device(
                 .map_err(|error| ble_io(error.to_string()))?
             {
                 if let Some(info) = compatible_device(&peripheral, config).await?
-                    && config
-                        .device_id
-                        .as_deref()
-                        .is_none_or(|selected| selected == info.id)
+                    && requested_device(config, &info)
                 {
-                    stop_scans(&adapters).await;
+                    if stop_scans(&adapters).await {
+                        scan_cleanup.disarm();
+                    }
                     return Ok((peripheral, info));
                 }
             }
         }
         if started.elapsed() >= config.scan_timeout {
-            stop_scans(&adapters).await;
+            if stop_scans(&adapters).await {
+                scan_cleanup.disarm();
+            }
             return Err(TransportError::NoBleDevice {
                 name: config.device_name.clone(),
             });
         }
         sleep(Duration::from_millis(200)).await;
     }
+}
+
+/// Whether this compatible advertisement is the panel the caller requested.
+///
+/// An explicit platform ID is the fastest same-session route. The firmware's
+/// unique advertised name is the stable cross-session fallback when an OS
+/// rebuilds its Bluetooth cache and hands the same board a different ID. A
+/// configured name is exact: merely advertising the public INK1 service must
+/// never make a neighbour's panel eligible for remembered reconnect.
+fn requested_device(config: &BleConfig, info: &BleDeviceInfo) -> bool {
+    let selected_id = config.device_id.as_deref();
+    selected_id.is_some_and(|id| id == info.id)
+        || (is_durable_ble_device_name(&config.device_name) && config.device_name == info.name)
+        || (selected_id.is_none() && config.device_name.trim().is_empty())
 }
 
 async fn available_adapters() -> Result<Vec<Adapter>, TransportError> {
@@ -358,7 +495,11 @@ async fn available_adapters() -> Result<Vec<Adapter>, TransportError> {
     Ok(adapters)
 }
 
-async fn start_scans(adapters: &[Adapter]) -> Result<(), TransportError> {
+async fn start_scans(adapters: &[Adapter]) -> Result<CleanupOnDrop, TransportError> {
+    // Arm this before the first adapter call. A multi-adapter failure or an
+    // outer timeout must stop every scan that may already have started.
+    let cleanup_adapters = adapters.to_vec();
+    let cleanup = CleanupOnDrop::new(move || schedule_scan_stop(cleanup_adapters));
     for adapter in adapters {
         adapter
             .start_scan(ScanFilter {
@@ -367,13 +508,18 @@ async fn start_scans(adapters: &[Adapter]) -> Result<(), TransportError> {
             .await
             .map_err(|error| ble_io(error.to_string()))?;
     }
-    Ok(())
+    Ok(cleanup)
 }
 
-async fn stop_scans(adapters: &[Adapter]) {
+async fn stop_scans(adapters: &[Adapter]) -> bool {
+    let mut stopped = true;
     for adapter in adapters {
-        let _ = adapter.stop_scan().await;
+        stopped &= matches!(
+            timeout(BLE_SCAN_STOP_TIMEOUT, adapter.stop_scan()).await,
+            Ok(Ok(()))
+        );
     }
+    stopped
 }
 
 async fn compatible_device(
@@ -394,7 +540,9 @@ async fn compatible_device(
     }
     Ok(Some(BleDeviceInfo {
         id: peripheral.id().to_string(),
-        name: properties.local_name.unwrap_or_else(|| "INK1 panel".into()),
+        name: properties
+            .local_name
+            .unwrap_or_else(|| ANONYMOUS_BLE_DEVICE_NAME.into()),
         signal_strength: properties.rssi,
     }))
 }
@@ -410,14 +558,22 @@ impl PacketTransport for BleTransport {
         let mut guard = self.connection.lock().await;
         for attempt in 0..BLE_FRAME_ATTEMPTS {
             let connected = match guard.as_ref() {
-                Some(connection) => connection
-                    .peripheral
-                    .is_connected()
-                    .await
-                    .map_err(|error| ble_io(error.to_string()))?,
+                Some(connection) => timeout(
+                    BLE_CONNECTION_STATUS_TIMEOUT,
+                    connection.peripheral.is_connected(),
+                )
+                .await
+                .map_err(|_| ble_timeout("BLE connection status"))?
+                .map_err(|error| ble_io(error.to_string()))?,
                 None => false,
             };
             if !connected {
+                if let Some(mut stale) = guard.take() {
+                    // `is_connected == false` is the proof that this handle no
+                    // longer owns a platform link. Do not let its Drop cleanup
+                    // race the replacement connection below.
+                    stale.cleanup.disarm();
+                }
                 *guard = Some(self.connect().await?);
             }
             match self
@@ -426,8 +582,12 @@ impl PacketTransport for BleTransport {
             {
                 Ok(receipt) => return Ok(receipt),
                 Err(error) => {
-                    if let Some(connection) = guard.take() {
-                        let _ = connection.peripheral.disconnect().await;
+                    if let Some(mut connection) = guard.take()
+                        && disconnect_platform_link(&connection.peripheral)
+                            .await
+                            .is_ok()
+                    {
+                        connection.cleanup.disarm();
                     }
                     let final_attempt = attempt + 1 == BLE_FRAME_ATTEMPTS;
                     if final_attempt || !retryable_frame_error(&error) {
@@ -463,7 +623,112 @@ fn ble_io(message: String) -> TransportError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
     use super::*;
+
+    fn device(id: &str, name: &str) -> BleDeviceInfo {
+        BleDeviceInfo {
+            id: id.into(),
+            name: name.into(),
+            signal_strength: None,
+        }
+    }
+
+    #[test]
+    fn remembered_ble_selection_never_accepts_a_different_service_device() {
+        let config = BleConfig {
+            device_name: "BrickellStatus 26B4".into(),
+            device_id: Some("old-platform-id".into()),
+            ..BleConfig::default()
+        };
+
+        assert!(requested_device(
+            &config,
+            &device("current-platform-id", "BrickellStatus 26B4")
+        ));
+        assert!(!requested_device(
+            &config,
+            &device("neighbour-id", "BrickellStatus 8A10")
+        ));
+    }
+
+    #[test]
+    fn an_unpinned_transport_can_still_choose_a_compatible_panel() {
+        assert!(requested_device(
+            &BleConfig::default(),
+            &device("platform-id", "BrickellStatus 26B4")
+        ));
+    }
+
+    #[test]
+    fn anonymous_picker_label_is_never_a_durable_identity() {
+        assert!(!is_durable_ble_device_name(ANONYMOUS_BLE_DEVICE_NAME));
+        assert!(!is_durable_ble_device_name("  INK1 panel  "));
+        assert!(!is_durable_ble_device_name(""));
+        assert!(!is_durable_ble_device_name("InkDock E213"));
+        assert!(!is_durable_ble_device_name("BrickellStatus 26b4"));
+        assert!(!is_durable_ble_device_name("BrickellStatus 26B40"));
+        assert!(!is_durable_ble_device_name("BrickellStatus 0000"));
+        assert!(!is_durable_ble_device_name(" BrickellStatus 26B4"));
+        assert!(is_durable_ble_device_name("BrickellStatus 26B4"));
+
+        let anonymous = device("platform-id", ANONYMOUS_BLE_DEVICE_NAME);
+        let name_only = BleConfig {
+            device_name: ANONYMOUS_BLE_DEVICE_NAME.into(),
+            ..BleConfig::default()
+        };
+        assert!(!requested_device(&name_only, &anonymous));
+
+        let exact_session_id = BleConfig {
+            device_name: ANONYMOUS_BLE_DEVICE_NAME.into(),
+            device_id: Some("platform-id".into()),
+            ..BleConfig::default()
+        };
+        assert!(requested_device(&exact_session_id, &anonymous));
+    }
+
+    #[tokio::test]
+    async fn cancelling_setup_schedules_async_link_cleanup() {
+        let setup_started = Arc::new(tokio::sync::Notify::new());
+        let cleanup_finished = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn({
+            let setup_started = Arc::clone(&setup_started);
+            let cleanup_finished = Arc::clone(&cleanup_finished);
+            async move {
+                let _cleanup = CleanupOnDrop::new(move || {
+                    spawn_cleanup(async move {
+                        cleanup_finished.notify_one();
+                    });
+                });
+                setup_started.notify_one();
+                std::future::pending::<()>().await;
+            }
+        });
+
+        setup_started.notified().await;
+        task.abort();
+        let _ = task.await;
+        timeout(Duration::from_secs(1), cleanup_finished.notified())
+            .await
+            .expect("cancellation cleanup should run on the live runtime");
+    }
+
+    #[test]
+    fn disarmed_link_cleanup_does_not_disconnect_a_retained_connection() {
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&disconnected);
+        let mut cleanup = CleanupOnDrop::new(move || {
+            observed.store(true, Ordering::Relaxed);
+        });
+        cleanup.disarm();
+        drop(cleanup);
+
+        assert!(!disconnected.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn only_transient_frame_failures_are_retried() {
