@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "Normalized public-feed and optional secret-backed signal collectors for BrickellStatus"
+# Internal to this application: never published, and the path dependencies
+# between these crates could not be published anyway.
+publish = false
 
 [features]
 # Fetching over a real network stack. On by default so nothing existing

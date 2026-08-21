@@ -349,6 +349,43 @@ async fn local_secret_store_round_trips_without_os_vault_access() {
         );
     }
 
+    // The directory, not only the file. create_dir_all leaves 0755, which lets
+    // anyone list the credential file and read its size and mtime.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    // A write publishes by rename, so no half-written file is ever visible at
+    // the real path and no temporary is left behind on success.
+    assert!(
+        !path.with_extension("tmp").exists(),
+        "a temporary credential file survived a successful write"
+    );
+
+    // Replacing a token must not widen the file: the second write goes through
+    // a fresh temporary, and its mode has to survive the rename.
+    store
+        .store_whatsapp_token("replacement-token".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.whatsapp_token().await.unwrap().as_deref(),
+        Some("replacement-token")
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
     store.delete_whatsapp_token().await.unwrap();
     assert_eq!(store.whatsapp_token().await.unwrap(), None);
     std::fs::remove_dir_all(directory).unwrap();

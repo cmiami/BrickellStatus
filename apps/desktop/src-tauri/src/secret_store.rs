@@ -155,12 +155,33 @@ fn encode_secrets(secrets: &LocalSecrets) -> Result<Vec<u8>, String> {
         .map_err(|error| format!("Local credentials could not be encoded: {error}"))
 }
 
+/// Replaces the credential file in one step, never leaving a partial one.
+///
+/// The previous version truncated in place, so a crash, a full disk or a power
+/// cut between `truncate` and `write_all` left an empty or half-written file --
+/// and the reader treats a malformed file as "no stored secrets", so the next
+/// write would quietly re-save an empty set and the tokens would be gone. A
+/// temporary file plus `rename` makes the swap atomic on every platform this
+/// ships to: either the old contents survive intact or the new ones do.
 fn write_secrets(path: &Path, secrets: &LocalSecrets) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("Local credential directory could not be created: {error}"))?;
+        // The directory itself, not just the file. create_dir_all leaves 0755,
+        // which lets anyone list the credential file and read its size and
+        // mtime even when they cannot open it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+        }
     }
     let bytes = encode_secrets(secrets)?;
+
+    // Beside the target, so the rename stays on one filesystem and is therefore
+    // atomic. A temp directory could be on another volume, where rename
+    // degrades to copy-then-delete and loses the guarantee.
+    let temporary = path.with_extension("tmp");
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -169,15 +190,28 @@ fn write_secrets(path: &Path, secrets: &LocalSecrets) -> Result<(), String> {
         options.mode(0o600);
     }
     let mut file = options
-        .open(path)
+        .open(&temporary)
         .map_err(|error| format!("Local credential file could not be opened: {error}"))?;
-    file.write_all(&bytes)
-        .map_err(|error| format!("Local credentials could not be saved: {error}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         file.set_permissions(fs::Permissions::from_mode(0o600))
             .map_err(|error| format!("Local credential permissions could not be set: {error}"))?;
+    }
+    let written = file
+        .write_all(&bytes)
+        // Durable before the rename publishes it: renaming a file whose
+        // contents are still in the page cache can survive the crash as an
+        // empty file on some filesystems, which is the failure this avoids.
+        .and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("Local credentials could not be saved: {error}"));
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("Local credentials could not be saved: {error}"));
     }
     Ok(())
 }
