@@ -472,9 +472,11 @@ impl DisplayController {
     ) -> (Vec<DisplayDeviceCandidate>, Vec<String>) {
         let _operation = self.operation.lock().await;
         let ble_config = BleConfig {
-            device_name: is_durable_ble_device_name(&preferences.display.ble_name)
-                .then(|| preferences.display.ble_name.clone())
-                .unwrap_or_default(),
+            device_name: if is_durable_ble_device_name(&preferences.display.ble_name) {
+                preferences.display.ble_name.clone()
+            } else {
+                String::new()
+            },
             ..BleConfig::default()
         };
         let (usb, ble) = tokio::join!(discover_espressif_devices(), discover_ble(&ble_config));
@@ -539,13 +541,13 @@ impl DisplayController {
                 // the OS connection attempt so one transient failure starts the
                 // reconnect ladder without requiring an app restart.
                 self.arm_selected_ble_route(id).await;
-                let configured_name = is_durable_ble_device_name(&preferences.display.ble_name)
-                    .then_some(preferences.display.ble_name.as_str())
-                    .unwrap_or_default();
-                let active = self
-                    .connect_ble(Some(id.to_owned()), configured_name)
-                    .await?;
-                active
+                let configured_name = if is_durable_ble_device_name(&preferences.display.ble_name) {
+                    preferences.display.ble_name.as_str()
+                } else {
+                    ""
+                };
+                self.connect_ble(Some(id.to_owned()), configured_name)
+                    .await?
             }
         };
         let detail = match &active {
@@ -831,9 +833,11 @@ impl DisplayController {
                 self.connect_usb(port).await
             }
             DisplayTransport::Ble => {
-                let saved_name = is_durable_ble_device_name(&preferences.display.ble_name)
-                    .then_some(preferences.display.ble_name.as_str())
-                    .unwrap_or_default();
+                let saved_name = if is_durable_ble_device_name(&preferences.display.ble_name) {
+                    preferences.display.ble_name.as_str()
+                } else {
+                    ""
+                };
                 if selected_ble.is_none() && saved_name.is_empty() {
                     return Err(
                         "No Bluetooth panel has been selected. Scan and choose the panel before connecting."
@@ -854,9 +858,11 @@ impl DisplayController {
                     },
                     None => "no explicitly selected USB device".into(),
                 };
-                let saved_name = is_durable_ble_device_name(&preferences.display.ble_name)
-                    .then_some(preferences.display.ble_name.as_str())
-                    .unwrap_or_default();
+                let saved_name = if is_durable_ble_device_name(&preferences.display.ble_name) {
+                    preferences.display.ble_name.as_str()
+                } else {
+                    ""
+                };
                 if selected_ble.is_none() && saved_name.is_empty() {
                     return Err(format!(
                         "Automatic reconnect is parked until a device is explicitly selected. USB: {usb_attempt}."

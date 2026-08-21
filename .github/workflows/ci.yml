@@ -400,6 +400,9 @@ jobs:
           cache: npm
           cache-dependency-path: apps/console/package-lock.json
 
+      - name: Use the locked npm release
+        run: npm install --global npm@11.18.0
+
       # `npm audit` without an install: the lockfile is the whole input, and
       # installing first would run the very packages being judged. --omit=dev
       # keeps the gate on what actually ships in the app; a advisory in a build
