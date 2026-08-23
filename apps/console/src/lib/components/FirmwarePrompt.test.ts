@@ -47,7 +47,7 @@ function serve(first: FirmwareStatus, afterFlash: FirmwareStatus = first) {
 }
 
 async function flashButton() {
-  return await screen.findByRole('button', { name: /flash|update|repair|install/i });
+  return await screen.findByRole('button', { name: /flash|update|install/i });
 }
 
 describe('FirmwarePrompt', () => {
@@ -169,7 +169,25 @@ describe('FirmwarePrompt', () => {
 
     expect(await screen.findByRole('heading', { name: /update BrickellStatus/i })).toBeInTheDocument();
     expect(screen.getByText(/will not be downgraded/i)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /update firmware|repair firmware/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /update firmware|reflash firmware/i })).toBeNull();
+  });
+
+  it('stays quiet when the current firmware release has a different source build', async () => {
+    serve(
+      status({
+        requirement: {
+          state: 'differentBuild',
+          version: 2,
+          device: 'local-dirty-build',
+          bundled: 'release-build'
+        }
+      })
+    );
+    const { default: FirmwarePrompt } = await import('./FirmwarePrompt.svelte');
+    render(FirmwarePrompt);
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_firmware_status', undefined));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
   });
 
   it('offers nothing on a platform that cannot write firmware', async () => {

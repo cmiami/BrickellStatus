@@ -45,7 +45,7 @@
   });
   let deviceCandidates = $state<DisplayDeviceCandidate[]>([]);
   let firmware = $state<FirmwareStatus | null>(null);
-  let repairingFirmware = $state(false);
+  let reflashingFirmware = $state(false);
 
   const durableBleName = /^BrickellStatus [0-9A-F]{4}$/;
 
@@ -98,11 +98,11 @@
   const detected = $derived(Boolean(deviceStatus.panel));
 
   // E213's two controller images are internal recovery candidates, not two
-  // panel choices. This single repair action starts with the recommended image;
+  // panel choices. This single reflash action starts with the recommended image;
   // the backend requires READY and tries the other E213 controller once when
   // needed, without treating retained pixels as proof that firmware is alive.
-  const repairBuild = $derived(
-    !flashingSupported
+  const reflashBuild = $derived(
+    !flashingSupported || firmware?.requirement.state === 'deviceNewer'
       ? null
       : firmware?.variants.find((variant) => variant.id === firmware?.recommendedVariantId) ??
         firmware?.variants.find((variant) => variant.panel === panel) ??
@@ -237,17 +237,17 @@
     }
   }
 
-  async function repairPanelFirmware() {
-    if (!firmware?.port || !repairBuild) return;
-    repairingFirmware = true;
+  async function reflashPanelFirmware() {
+    if (!firmware?.port || !reflashBuild) return;
+    reflashingFirmware = true;
     try {
-      await invoke('flash_firmware', { variantId: repairBuild.id, port: firmware.port });
+      await invoke('flash_firmware', { variantId: reflashBuild.id, port: firmware.port });
       firmware = await invoke<FirmwareStatus>('get_firmware_status');
       notice.set({ ok: true, message: 'Panel firmware was written and verified. The saved connection now follows this panel.' });
     } catch (error) {
-      notice.set({ ok: false, message: error instanceof Error ? error.message : 'Panel firmware could not be repaired.' });
+      notice.set({ ok: false, message: error instanceof Error ? error.message : 'Panel firmware could not be reflashed.' });
     } finally {
-      repairingFirmware = false;
+      reflashingFirmware = false;
     }
   }
 
@@ -389,14 +389,14 @@
         <small class="field-note">Pick whichever matches the panel in front of you.</small>
       </fieldset>
 
-      {#if repairBuild && firmware?.port}
+      {#if reflashBuild && firmware?.port}
         <div class="panel-rescue">
           <div>
-            <strong>Panel not connecting?</strong>
-            <span>Reinstall and verify its firmware. E213 controller recovery is automatic.</span>
+            <strong>Panel firmware</strong>
+            <span>Reinstall and verify the firmware bundled with this app. E213 controller selection is automatic.</span>
           </div>
-          <button class="secondary-action" onclick={repairPanelFirmware} disabled={repairingFirmware}>
-            {repairingFirmware ? 'Repairing…' : 'Repair panel firmware'}
+          <button class="secondary-action" onclick={reflashPanelFirmware} disabled={reflashingFirmware}>
+            {reflashingFirmware ? 'Reflashing…' : 'Reflash firmware'}
           </button>
         </div>
       {/if}

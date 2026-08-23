@@ -469,9 +469,6 @@ pub enum FlashReason {
     BuildMismatch { device: String, bundled: String },
     /// The bundled firmware has a strictly greater monotonic release number.
     FirmwareOutdated { device: u32, bundled: u32 },
-    /// A supported panel is present, but neither its live banner nor verified
-    /// local history provides an orderable firmware version.
-    VersionUnavailable { bundled: u32 },
     /// The board claimed a current-style identity that cannot be trusted.
     IncompatibleIdentity { device: String, bundled: String },
     /// A saved pre-identity Bluetooth route cannot be safely auto-attached.
@@ -764,15 +761,12 @@ fn versioned_silent_board(
     evidence: RouteEvidence,
 ) -> FlashRequirement {
     match evidence {
+        // ACK proves this is working BrickellStatus firmware, but cannot recover
+        // the one-time boot banner's version. Pending is the same grace period
+        // before the first ACK. Neither is evidence that an update is needed;
+        // only a verified record can make that stronger claim.
         RouteEvidence::Acknowledged | RouteEvidence::Pending => {
-            match from_versioned_record(remembered, bundled_version, bundled_build) {
-                FlashRequirement::UnknownBuild => FlashRequirement::Required {
-                    reason: FlashReason::VersionUnavailable {
-                        bundled: bundled_version,
-                    },
-                },
-                requirement => requirement,
-            }
+            from_versioned_record(remembered, bundled_version, bundled_build)
         }
         RouteEvidence::Failing => FlashRequirement::Required {
             reason: FlashReason::NotResponding,
@@ -1907,19 +1901,19 @@ mod tests {
     }
 
     #[test]
-    fn a_connected_panel_without_a_readable_version_offers_the_latest_firmware() {
+    fn a_connected_panel_without_a_readable_version_does_not_invent_an_update() {
         for evidence in [RouteEvidence::Pending, RouteEvidence::Acknowledged] {
-            assert_eq!(
-                evaluate_versioned_flash_requirement(
-                    &DeviceProbe::Silent,
-                    4,
-                    Some("latest-build"),
-                    None,
-                    evidence,
-                ),
-                FlashRequirement::Required {
-                    reason: FlashReason::VersionUnavailable { bundled: 4 }
-                }
+            let requirement = evaluate_versioned_flash_requirement(
+                &DeviceProbe::Silent,
+                4,
+                Some("latest-build"),
+                None,
+                evidence,
+            );
+            assert_eq!(requirement, FlashRequirement::UnknownBuild);
+            assert!(
+                !requirement.should_prompt(),
+                "a working panel with a missed boot banner must not raise an update"
             );
         }
     }

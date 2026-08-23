@@ -138,7 +138,7 @@ describe('remembered e-paper route', () => {
     }
   );
 
-  it('offers one objective repair action for both internal E213 images', async () => {
+  it('keeps one manual reflash action available when the panel is up to date', async () => {
     const draft = preferencesFixture();
     mocks.getCapabilities.mockResolvedValue({ usbDisplay: true, firmwareFlashing: true });
     mocks.getStatus.mockResolvedValue({
@@ -156,7 +156,7 @@ describe('remembered e-paper route', () => {
         { id: 'vision-master-e213-v11', label: 'Vision Master E213', panel: 'e213', panelRevision: 'v11', totalBytes: 529_104 },
         { id: 'vision-master-e213', label: 'Vision Master E213', panel: 'e213', panelRevision: 'original', totalBytes: 529_104 }
       ],
-      requirement: { state: 'required', reason: { kind: 'notResponding' } }
+      requirement: { state: 'upToDate', build: 'abc1234' }
     };
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === 'get_firmware_status') return firmware;
@@ -166,14 +166,41 @@ describe('remembered e-paper route', () => {
 
     render(EpaperOutputPanel, { draft });
 
-    const repair = await screen.findByRole('button', { name: 'Repair panel firmware' });
+    const reflash = await screen.findByRole('button', { name: 'Reflash firmware' });
     expect(screen.queryByRole('button', { name: /other|original|v1\.1/i })).toBeNull();
-    await fireEvent.click(repair);
+    await fireEvent.click(reflash);
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith('flash_firmware', {
         variantId: 'vision-master-e213-v11',
         port: '/dev/cu.usbmodem14B4201'
       })
     );
+  });
+
+  it('does not offer a reflash that would downgrade newer panel firmware', async () => {
+    const draft = preferencesFixture();
+    mocks.getCapabilities.mockResolvedValue({ usbDisplay: true, firmwareFlashing: true });
+    mocks.getStatus.mockResolvedValue({
+      state: 'connected',
+      transport: 'usb',
+      panel: 'e290',
+      detail: 'Panel connected.'
+    });
+    mocks.invoke.mockResolvedValue({
+      port: '/dev/cu.usbmodem14B4201',
+      bundledBuild: 'abc1234',
+      bundledVersion: 4,
+      board: 'e290',
+      recommendedVariantId: 'vision-master-e290',
+      variants: [
+        { id: 'vision-master-e290', label: 'Vision Master E290', panel: 'e290', totalBytes: 529_104 }
+      ],
+      requirement: { state: 'deviceNewer', device: 5, bundled: 4 }
+    });
+
+    render(EpaperOutputPanel, { draft });
+
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith('get_firmware_status'));
+    expect(screen.queryByRole('button', { name: 'Reflash firmware' })).toBeNull();
   });
 });

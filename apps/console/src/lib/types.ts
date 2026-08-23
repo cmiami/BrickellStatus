@@ -476,7 +476,6 @@ export type FlashRequirement =
         | { kind: 'notResponding' }
         | { kind: 'buildMismatch'; device: string; bundled: string }
         | { kind: 'firmwareOutdated'; device: number; bundled: number }
-        | { kind: 'versionUnavailable'; bundled: number }
         | { kind: 'incompatibleIdentity'; device: string; bundled: string }
         | { kind: 'legacyConnection' }
         | { kind: 'wrongBoard'; board: PanelModel };
