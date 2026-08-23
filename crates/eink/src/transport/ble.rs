@@ -15,7 +15,7 @@ use tracing::warn;
 
 use super::{
     DeviceReply, PacketTransport, RX_UUID, SERVICE_UUID, TX_UUID, TransportError, TransportKind,
-    TransportReceipt, device_reply, validate_for_transport,
+    TransportReceipt, device_reply, safe_device_text, validate_for_transport,
 };
 
 /// Hands btleplug's Android backend the JVM handle it needs before first use.
@@ -270,6 +270,45 @@ impl BleTransport {
         Ok(info)
     }
 
+    /// Reads the READY banner held by an existing GATT connection without
+    /// sending a frame or refreshing the e-paper glass.
+    ///
+    /// Firmware keeps this characteristic current with its latest battery
+    /// measurement, which lets the host check power on an otherwise static
+    /// display. No retained connection is treated as no reading, not as an
+    /// invitation to start a surprise scan.
+    pub async fn read_banner(&self) -> Result<Option<String>, TransportError> {
+        let mut guard = self.connection.lock().await;
+        let Some(connection) = guard.as_mut() else {
+            return Ok(None);
+        };
+        let connected = timeout(
+            BLE_CONNECTION_STATUS_TIMEOUT,
+            connection.peripheral.is_connected(),
+        )
+        .await
+        .map_err(|_| ble_timeout("BLE connection status"))?
+        .map_err(|error| ble_io(error.to_string()))?;
+        if !connected {
+            return Ok(None);
+        }
+        let value = timeout(
+            BLE_BANNER_READ_TIMEOUT,
+            connection.peripheral.read(&connection.tx),
+        )
+        .await
+        .map_err(|_| ble_timeout("BLE READY banner"))?
+        .map_err(|error| ble_io(error.to_string()))?;
+        let banner = match device_reply(&value) {
+            Some(DeviceReply::Ready(line)) => Some(line),
+            _ => None,
+        };
+        if banner.is_some() {
+            connection.info.banner = banner.clone();
+        }
+        Ok(banner)
+    }
+
     /// Disconnects the retained GATT session, if one exists.
     pub async fn disconnect(&self) -> Result<(), TransportError> {
         let mut guard = self.connection.lock().await;
@@ -334,7 +373,13 @@ impl BleTransport {
                 }
                 received.extend_from_slice(&notification.value);
                 match device_reply(&received) {
-                    Some(DeviceReply::Ack) => return Ok(()),
+                    Some(DeviceReply::Ack) => {
+                        let text = String::from_utf8_lossy(&received);
+                        let start = text.find("ACK INK1").expect("reply matched ACK above");
+                        return Ok(safe_device_text(
+                            text[start..].lines().next().unwrap_or("ACK INK1"),
+                        ));
+                    }
                     Some(DeviceReply::Nack(message)) => {
                         return Err(TransportError::Nack(message));
                     }
@@ -350,11 +395,11 @@ impl BleTransport {
         })?;
 
         let _ = connection.peripheral.unsubscribe(&connection.tx).await;
-        result?;
+        let acknowledgement = result?;
         Ok(TransportReceipt {
             transport: TransportKind::Ble,
             ready_observed,
-            acknowledgement: "ACK INK1".into(),
+            acknowledgement,
         })
     }
 }
@@ -502,13 +547,21 @@ async fn start_scans(adapters: &[Adapter]) -> Result<CleanupOnDrop, TransportErr
     let cleanup = CleanupOnDrop::new(move || schedule_scan_stop(cleanup_adapters));
     for adapter in adapters {
         adapter
-            .start_scan(ScanFilter {
-                services: vec![SERVICE_UUID],
-            })
+            // Do not ask the OS to pre-filter by service. Deployed firmware can
+            // put the board-specific name in its scan response while a host's
+            // Bluetooth cache temporarily omits the service list. The filter
+            // below still accepts only the public INK1 service or the exact
+            // saved BrickellStatus board name; scanning broadly merely lets
+            // that existing compatibility path see the advertisement.
+            .start_scan(discovery_scan_filter())
             .await
             .map_err(|error| ble_io(error.to_string()))?;
     }
     Ok(cleanup)
+}
+
+fn discovery_scan_filter() -> ScanFilter {
+    ScanFilter::default()
 }
 
 async fn stop_scans(adapters: &[Adapter]) -> bool {
@@ -662,6 +715,11 @@ mod tests {
             &BleConfig::default(),
             &device("platform-id", "BrickellStatus 26B4")
         ));
+    }
+
+    #[test]
+    fn discovery_does_not_hide_the_exact_name_compatibility_path() {
+        assert!(discovery_scan_filter().services.is_empty());
     }
 
     #[test]

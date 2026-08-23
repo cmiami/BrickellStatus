@@ -12,7 +12,7 @@ use tokio_serial::{
 
 use super::{
     DeviceReply, PacketTransport, TransportError, TransportKind, TransportReceipt, device_reply,
-    validate_for_transport,
+    safe_device_text, validate_for_transport,
 };
 
 /// One Espressif-compatible native USB serial interface discovered on the host.
@@ -176,6 +176,24 @@ impl UsbTransport {
         })
     }
 
+    /// Asks an already-open panel for its current READY banner without drawing
+    /// or refreshing the e-paper glass.
+    ///
+    /// Current firmware uses this lightweight identity query to expose a fresh
+    /// battery reading. A legacy panel that ignores the query returns `None`.
+    pub async fn read_banner(&self) -> Result<Option<String>, TransportError> {
+        let mut state = self.state.lock().await;
+        let Some(stream) = state.stream.as_mut() else {
+            return Ok(None);
+        };
+        let banner = request_identity(stream, self.config.ready_timeout).await?;
+        if let Some(banner) = banner.as_ref() {
+            state.ready_observed = true;
+            state.banner = Some(banner.clone());
+        }
+        Ok(banner)
+    }
+
     /// Closes the retained serial interface without sending data.
     pub async fn disconnect(&self) {
         let mut state = self.state.lock().await;
@@ -188,7 +206,7 @@ impl UsbTransport {
         &self,
         stream: &mut SerialStream,
         packet: &[u8],
-    ) -> Result<(), TransportError> {
+    ) -> Result<String, TransportError> {
         let chunk_size = self.config.chunk_size.max(1);
         for chunk in packet.chunks(chunk_size) {
             stream
@@ -225,10 +243,10 @@ impl PacketTransport for UsbTransport {
             .send_on_stream(state.stream.as_mut().expect("connected above"), packet)
             .await;
         match result {
-            Ok(()) => Ok(TransportReceipt {
+            Ok(acknowledgement) => Ok(TransportReceipt {
                 transport: TransportKind::Usb,
                 ready_observed: state.ready_observed,
-                acknowledgement: "ACK INK1".into(),
+                acknowledgement,
             }),
             Err(error) => {
                 state.stream = None;
@@ -385,7 +403,10 @@ where
     }
 }
 
-async fn wait_for_ack(stream: &mut SerialStream, duration: Duration) -> Result<(), TransportError> {
+async fn wait_for_ack(
+    stream: &mut SerialStream,
+    duration: Duration,
+) -> Result<String, TransportError> {
     let mut received = Vec::new();
     timeout(duration, async {
         let mut chunk = [0_u8; 256];
@@ -400,7 +421,13 @@ async fn wait_for_ack(stream: &mut SerialStream, duration: Duration) -> Result<(
             }
             received.extend_from_slice(&chunk[..count]);
             match device_reply(&received) {
-                Some(DeviceReply::Ack) => return Ok(()),
+                Some(DeviceReply::Ack) => {
+                    let text = String::from_utf8_lossy(&received);
+                    let start = text.find("ACK INK1").expect("reply matched ACK above");
+                    return Ok(safe_device_text(
+                        text[start..].lines().next().unwrap_or("ACK INK1"),
+                    ));
+                }
                 Some(DeviceReply::Nack(message)) => return Err(TransportError::Nack(message)),
                 Some(DeviceReply::Ready(_)) | None => {}
             }

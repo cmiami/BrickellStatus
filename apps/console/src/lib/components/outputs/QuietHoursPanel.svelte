@@ -20,14 +20,14 @@
   <header>
     <div>
       <h2 id="quiet-heading"><MoonStar size={22} strokeWidth={1.5} aria-hidden="true" /> Quiet hours</h2>
-      <p>Suppress ordinary notices during sleep without hiding the live console or stale-source warnings.</p>
+      <p>Pause ordinary alerts on a schedule. Live status and source warnings stay visible.</p>
     </div>
   </header>
   <div class="quiet-grid">
     <SwitchField
       checked={draft.profile.quietHours.enabled}
       label="Quiet hours enabled"
-      description="Holds non-emergency desktop and WhatsApp dispatches."
+      description="Pauses non-emergency desktop and WhatsApp alerts."
       onchange={(enabled) => {
         draft.profile.quietHours.enabled = enabled;
       }}
@@ -51,7 +51,7 @@
     <SwitchField
       checked={draft.profile.quietHours.bypassEmergency}
       label="Critical bypass"
-      description="Extreme official alerts and a bridge confirmed open may still interrupt."
+      description="Extreme official alerts and a bridge confirmed up may still get through."
       onchange={(enabled) => {
         draft.profile.quietHours.bypassEmergency = enabled;
       }}

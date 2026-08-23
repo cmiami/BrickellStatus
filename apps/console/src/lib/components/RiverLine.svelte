@@ -18,6 +18,7 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     type SchematicStation,
     type SchematicVessel
   } from '$lib/riverSchematic';
+  import { currentVesselTracks } from '$lib/river';
   import type {
     BridgeCrossing,
     BridgeStateInterval,
@@ -30,12 +31,14 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     vesselTracks = [],
     intervals = [],
     crossings = [],
+    generatedAt,
     localTimeZone
   }: {
     corridor: RiverCorridor;
     vesselTracks?: VesselTrack[];
     intervals?: BridgeStateInterval[];
     crossings?: BridgeCrossing[];
+    generatedAt?: string;
     localTimeZone?: string;
   } = $props();
 
@@ -59,7 +62,8 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     return states;
   });
 
-  const schematic = $derived(riverSchematic(corridor, vesselTracks, bridgeStates));
+  const liveVesselTracks = $derived(currentVesselTracks(vesselTracks, generatedAt));
+  const schematic = $derived(riverSchematic(corridor, liveVesselTracks, bridgeStates));
   const targetState = $derived(schematic.target?.state ?? 'unknown');
   const visibleStations = $derived(
     schematic.stations.filter(
@@ -151,7 +155,10 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
   }
 
   function routeTitle(route: SchematicRoute): string {
-    return route.role === 'river' ? 'UPRIVER · MIAMI RIVER' : route.label.toUpperCase();
+    // "MIAMI RIVER" is already registered in the lower-left map title. Keep
+    // the tight upstream terminus to one directional word so it cannot run
+    // into the final two bridge labels.
+    return route.role === 'river' ? 'UPRIVER' : route.label.toUpperCase();
   }
 
   function stationNameY(station: SchematicStation): number {
@@ -163,7 +170,19 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
   }
 
   function bridgeOrientation(station: SchematicStation): number {
-    return (station.angleDegrees + 90) % 360;
+    // A crossing has the same axis after a half-turn. Keep that perpendicular
+    // axis in the readable half of the circle so an upriver tangent (usually
+    // 180–225deg) cannot turn the asymmetric bridge artwork upside down.
+    const perpendicular = (((station.angleDegrees + 90) % 180) + 180) % 180;
+    return perpendicular > 90 ? perpendicular - 180 : perpendicular;
+  }
+
+  function vesselProfileFacesLeft(vessel: SchematicVessel): boolean {
+    // VesselGlyph is an upright side profile, not a plan-view hull. The
+    // runway carries the exact route angle; the silhouette only mirrors when
+    // that heading has a leftward screen component.
+    const heading = ((vessel.angleDegrees % 360) + 360) % 360;
+    return heading > 90 && heading < 270;
   }
 
   function calloutX(vessel: SchematicVessel): number {
@@ -359,7 +378,7 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
               <circle class="target-disc" r="188" />
               <path class="target-ticks" d="M-214 0H-182 M214 0H182 M0 -214V-182 M0 214V182" />
 
-              <text class="target-kicker" y="-218">THE ANCHOR · ETA TARGET</text>
+              <text class="target-kicker" y="-252">ETA TARGET</text>
               <text class="target-name" y="-175">BRICKELL</text>
               <text class="target-subname" y="-143">AVENUE BRIDGE</text>
 
@@ -400,10 +419,11 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
                   <line x1="-48" y1="0" x2="53" y2="0" />
                   <path d="M53 0L42 -7V7Z" />
                 </g>
-                <g class="vessel-ship" transform="rotate({vessel.angleDegrees.toFixed(1)})">
+                <g class="vessel-ship">
                   <VesselGlyph
                     kind={vessel.vesselClass}
                     length={Math.max(48, Math.min(68, vessel.hullLength * 2.5))}
+                    flip={vesselProfileFacesLeft(vessel)}
                     opener={vessel.opener}
                   />
                 </g>
@@ -469,11 +489,6 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
             {/each}
           </g>
 
-          <g class="map-edge" aria-hidden="true">
-            <path d="M34 42H72" />
-            <path d="M34 42L45 35V49Z" />
-            <text x="84" y="47">UPRIVER</text>
-          </g>
         </svg>
       {:else}
         <p class="map-unavailable">River corridor unavailable.</p>
@@ -518,7 +533,7 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
                 <VesselGlyph
                   kind={vessel.vesselClass}
                   length={48}
-                  flip={vessel.direction === 'downriver'}
+                  flip={vesselProfileFacesLeft(vessel)}
                   opener={vessel.opener}
                 />
               </svg>
@@ -655,8 +670,7 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
 
   .map-title text,
   .bay-title text,
-  .route-terminals text,
-  .map-edge text {
+  .route-terminals text {
     fill: var(--marine);
     font-family: var(--font-instrument);
     font-weight: 700;
@@ -1023,18 +1037,6 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     font-weight: 700;
     letter-spacing: 0.07em;
     text-anchor: middle;
-  }
-
-  .map-edge path {
-    fill: var(--marine);
-    stroke: var(--marine);
-    stroke-width: 1.4px;
-  }
-
-  .map-edge text {
-    fill: var(--muted);
-    font-size: var(--type-caption);
-    letter-spacing: 0.12em;
   }
 
   .manifest-rail {

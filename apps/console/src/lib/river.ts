@@ -28,6 +28,15 @@ export const OPENER_PROPENSITY_BASIS_POINTS = 6_000;
 export const REACH_UPRIVER_METERS = 3_500;
 export const REACH_SEAWARD_METERS = 2_500;
 
+/**
+ * A hull belongs on the Live schematic only while the collector would still
+ * call its position current. The Map deliberately keeps the full one-hour
+ * discovery trail; this cutoff prevents that archive from masquerading as
+ * present movement on the bridge decision surface.
+ */
+export const LIVE_VESSEL_FRESHNESS_MS = 6 * 60 * 1_000;
+const LIVE_VESSEL_FUTURE_SKEW_MS = 30 * 1_000;
+
 export type TravelDirection = 'upriver' | 'downriver' | 'holding';
 
 export interface ReachVessel {
@@ -61,6 +70,20 @@ export interface ReachVessel {
 function toMilliseconds(value: string): number {
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+export function currentVesselTracks(
+  tracks: VesselTrack[],
+  generatedAt: string | undefined
+): VesselTrack[] {
+  const generatedAtMs = generatedAt ? toMilliseconds(generatedAt) : 0;
+  if (!generatedAtMs) return tracks;
+  const cutoff = generatedAtMs - LIVE_VESSEL_FRESHNESS_MS;
+  const latest = generatedAtMs + LIVE_VESSEL_FUTURE_SKEW_MS;
+  return tracks.filter((track) => {
+    const observedAtMs = toMilliseconds(track.observedAt);
+    return observedAtMs >= cutoff && observedAtMs <= latest;
+  });
 }
 
 /** Great-circle metres; the reach spans a few kilometres, so this is exact enough. */

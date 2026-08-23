@@ -29,6 +29,19 @@ halves. Colour reinforces that reading but never owns it.
   const barrierOffset = $derived(10.5 * unit);
   const barrierLength = $derived(13 * unit);
   const barrierY = $derived(-deck / 2 - 3.2 * unit);
+  const roadLane = $derived(1.45 * unit);
+  const roadFlowEdge = $derived(edge - 7 * unit);
+  const channelLane = $derived(4.4 * unit);
+  const channelTop = $derived(-19 * unit);
+  const channelBottom = $derived(water + foundation * 1.15);
+  const flowArrow = $derived(2.2 * unit);
+  const activeMotion = $derived(
+    !hero || state === 'unknown'
+      ? 'none'
+      : state === 'down'
+        ? 'road-horizontal'
+        : 'channel-vertical'
+  );
 
   const stateTitle = $derived(
     state === 'up'
@@ -56,15 +69,43 @@ halves. Colour reinforces that reading but never owns it.
   class:is-hero={hero}
   data-state={state}
   data-scale={hero ? 'hero' : 'mini'}
+  data-active-motion={activeMotion}
   role="img"
   aria-label={accessibleTitle}
 >
   <title>{accessibleTitle}</title>
 
-  <!-- The tracked route is always present. Only a confirmed open span gives
-       its centre dashes motion, and even then the movement stays quiet. -->
+  <!-- The waterline is structural. When the span is up, two vertical lanes move
+       through the opening in opposite directions; they never imply road travel. -->
   <line class="water-bed" x1={-edge} y1={water} x2={edge} y2={water} />
-  <line class="channel-flow" x1={-edge} y1={water} x2={edge} y2={water} />
+  {#if hero}
+    <g class="motion-field channel-motion" aria-hidden="true">
+      <line
+        class="motion-lane channel-flow channel-flow-up"
+        data-direction="bottom-to-top"
+        x1={-channelLane}
+        y1={channelTop}
+        x2={-channelLane}
+        y2={channelBottom}
+      />
+      <polyline
+        class="motion-arrow channel-arrow"
+        points={`${-channelLane - flowArrow},${channelTop + flowArrow * 1.8} ${-channelLane},${channelTop} ${-channelLane + flowArrow},${channelTop + flowArrow * 1.8}`}
+      />
+      <line
+        class="motion-lane channel-flow channel-flow-down"
+        data-direction="top-to-bottom"
+        x1={channelLane}
+        y1={channelTop}
+        x2={channelLane}
+        y2={channelBottom}
+      />
+      <polyline
+        class="motion-arrow channel-arrow"
+        points={`${channelLane - flowArrow},${channelBottom - flowArrow * 1.8} ${channelLane},${channelBottom} ${channelLane + flowArrow},${channelBottom - flowArrow * 1.8}`}
+      />
+    </g>
+  {/if}
 
   <!-- Concrete piers and wider footings keep the bridge mechanically legible
        when the road leaves are in motion. -->
@@ -171,6 +212,37 @@ halves. Colour reinforces that reading but never owns it.
     </g>
   </g>
 
+  <!-- With both leaves down, the deck carries two opposing road lanes. This
+       layer sits over the roadway and disappears before either leaf can lift. -->
+  {#if hero}
+    <g class="motion-field road-motion" aria-hidden="true">
+      <line
+        class="motion-lane road-flow road-flow-left"
+        data-direction="right-to-left"
+        x1={-roadFlowEdge}
+        y1={-roadLane}
+        x2={roadFlowEdge}
+        y2={-roadLane}
+      />
+      <polyline
+        class="motion-arrow road-arrow"
+        points={`${-roadFlowEdge + flowArrow * 1.8},${-roadLane - flowArrow} ${-roadFlowEdge},${-roadLane} ${-roadFlowEdge + flowArrow * 1.8},${-roadLane + flowArrow}`}
+      />
+      <line
+        class="motion-lane road-flow road-flow-right"
+        data-direction="left-to-right"
+        x1={-roadFlowEdge}
+        y1={roadLane}
+        x2={roadFlowEdge}
+        y2={roadLane}
+      />
+      <polyline
+        class="motion-arrow road-arrow"
+        points={`${roadFlowEdge - flowArrow * 1.8},${roadLane - flowArrow} ${roadFlowEdge},${roadLane} ${roadFlowEdge - flowArrow * 1.8},${roadLane + flowArrow}`}
+      />
+    </g>
+  {/if}
+
   <!-- Pivot rings sit above the moving leaves, so the hinge remains obvious
        at mini scale instead of reading as a decorative rotation. -->
   <g class="pivots" aria-hidden="true">
@@ -245,23 +317,62 @@ halves. Colour reinforces that reading but never owns it.
     opacity: 0;
   }
 
-  .transit-bascule:not(.is-hero) .channel-flow {
+  .motion-field {
     opacity: 0;
-    animation: none;
+    pointer-events: none;
+    transition: opacity 90ms ease-out;
   }
 
-  .channel-flow {
+  .motion-lane,
+  .motion-arrow {
     fill: none;
-    stroke: var(--corridor);
-    stroke-dasharray: 3 6;
     stroke-linecap: square;
-    stroke-width: 1.2px;
-    opacity: 0.38;
+    stroke-linejoin: miter;
   }
 
-  .transit-bascule[data-state='up'] .channel-flow {
-    opacity: 0.86;
-    animation: channel-passage 1.35s linear infinite;
+  .motion-lane {
+    stroke-dasharray: 1.3 4.1;
+    stroke-width: 0.92px;
+  }
+
+  .motion-arrow {
+    stroke-width: 1.15px;
+  }
+
+  .road-flow,
+  .road-arrow {
+    stroke: var(--white);
+  }
+
+  .channel-flow,
+  .channel-arrow {
+    stroke: var(--corridor);
+  }
+
+  .transit-bascule.is-hero[data-state='down'] .road-motion {
+    opacity: 0.94;
+    transition-delay: 1.2s;
+  }
+
+  .transit-bascule.is-hero[data-state='down'] .road-flow-right {
+    animation: flow-forward 920ms linear 1.2s infinite;
+  }
+
+  .transit-bascule.is-hero[data-state='down'] .road-flow-left {
+    animation: flow-reverse 920ms linear 1.2s infinite;
+  }
+
+  .transit-bascule.is-hero[data-state='up'] .channel-motion {
+    opacity: 0.9;
+    transition-delay: 1.26s;
+  }
+
+  .transit-bascule.is-hero[data-state='up'] .channel-flow-up {
+    animation: flow-reverse 1.05s linear 1.26s infinite;
+  }
+
+  .transit-bascule.is-hero[data-state='up'] .channel-flow-down {
+    animation: flow-forward 1.05s linear 1.26s infinite;
   }
 
   .pier,
@@ -491,9 +602,15 @@ halves. Colour reinforces that reading but never owns it.
     transition: none;
   }
 
-  @keyframes channel-passage {
+  @keyframes flow-forward {
     to {
-      stroke-dashoffset: -18;
+      stroke-dashoffset: -10.8;
+    }
+  }
+
+  @keyframes flow-reverse {
+    to {
+      stroke-dashoffset: 10.8;
     }
   }
 
@@ -501,11 +618,13 @@ halves. Colour reinforces that reading but never owns it.
     .leaf,
     .center-lock,
     .barrier-arm,
-    .signal-lamp {
+    .signal-lamp,
+    .motion-field {
       transition: none;
     }
 
-    .transit-bascule[data-state='up'] .channel-flow {
+    .road-flow,
+    .channel-flow {
       animation: none;
     }
   }
@@ -517,8 +636,14 @@ halves. Colour reinforces that reading but never owns it.
     }
 
     .water-bed,
+    .channel-arrow,
     .channel-flow {
       stroke: LinkText;
+    }
+
+    .road-arrow,
+    .road-flow {
+      stroke: CanvasText;
     }
 
     .pier,

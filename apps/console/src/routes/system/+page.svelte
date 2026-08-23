@@ -32,6 +32,13 @@
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
+  const systemStatus = (status: string) => {
+    if (status === 'nominal') return 'Working';
+    if (status === 'degraded') return 'Needs attention';
+    if (status === 'offline') return 'Offline';
+    return status;
+  };
+
   async function refresh() {
     refreshing = true;
     try {
@@ -66,9 +73,9 @@
     );
     try {
       await navigator.clipboard.writeText(diagnostic);
-      notice.set({ ok: true, message: 'Sanitized diagnostics copied. Credentials and message contents were excluded.' });
+      notice.set({ ok: true, message: 'System details copied. Passwords, API keys, and message text were left out.' });
     } catch {
-      notice.set({ ok: false, message: 'Clipboard access was denied. No diagnostic data was copied.' });
+      notice.set({ ok: false, message: 'The app could not use the clipboard. No system details were copied.' });
     } finally {
       copying = false;
     }
@@ -77,27 +84,27 @@
 
 <svelte:head>
   <title>System · BrickellStatus</title>
-  <meta name="description" content="Inspect collector freshness and runtime health." />
+  <meta name="description" content="Check data sources, recent updates, storage, and app health." />
 </svelte:head>
 
 <section class="page-sheet system-page">
   <SystemTabs />
   <header class="page-heading-row">
     <div>
-      <p class="registration-label">Engine room</p>
-      <h1 class="sheet-heading">Trust the state because you can inspect it</h1>
+      <p class="registration-label">System</p>
+      <h1 class="sheet-heading">System health</h1>
       <p class="sheet-intro">
-        Collector health, source age, storage version, and output readiness remain visible. An offline source becomes
-        unknown or stale; it never quietly turns into a reassuring clear state.
+        See which data sources are working, when they last updated, and whether outputs are ready. Missing or outdated
+        data is shown as unknown or stale.
       </p>
     </div>
     <div class="heading-actions">
       <button class="secondary-action" onclick={copyDiagnostics} disabled={!$snapshot || copying}>
-        <Clipboard size={17} aria-hidden="true" /> {copying ? 'Copying' : 'Copy diagnostics'}
+        <Clipboard size={17} aria-hidden="true" /> {copying ? 'Copying' : 'Copy system details'}
       </button>
       <button class="primary-action" onclick={refresh} disabled={refreshing}>
         <RefreshCw size={17} class={refreshing ? 'spinning' : ''} aria-hidden="true" />
-        {refreshing ? 'Polling sources' : 'Poll sources now'}
+        {refreshing ? 'Refreshing' : 'Refresh'}
       </button>
     </div>
   </header>
@@ -114,22 +121,22 @@
             {/if}
           </div>
           <div>
-            <p>Current engine verdict</p>
+            <p>System status</p>
             <h2 id="verdict-heading">
-              {$snapshot.system.status === 'nominal' ? 'Operational' : $snapshot.system.status}
+              {systemStatus($snapshot.system.status)}
             </h2>
           </div>
         </div>
         <div class="verdict-coverage">
-          <strong>{$snapshot.system.collectorsOnline} of {$snapshot.system.collectorsTotal} collectors reporting</strong>
-          <div class="availability-rule" aria-label={`${percentage}% of collectors reporting`}>
+          <strong>{$snapshot.system.collectorsOnline} of {$snapshot.system.collectorsTotal} sources reporting</strong>
+          <div class="availability-rule" aria-label={`${percentage}% of sources reporting`}>
             <span style={`--availability: ${percentage}%`}></span>
           </div>
         </div>
         <dl>
-          <div><dt>Last complete cycle</dt><dd>{new Date($snapshot.system.lastCycleAt).toLocaleString()}</dd></div>
-          <div><dt>Snapshot source</dt><dd>Live runtime</dd></div>
-          <div><dt>Local time zone</dt><dd>{$snapshot.localTimeZone}</dd></div>
+          <div><dt>Last update</dt><dd>{new Date($snapshot.system.lastCycleAt).toLocaleString()}</dd></div>
+          <div><dt>Status source</dt><dd>Live app</dd></div>
+          <div><dt>Time zone</dt><dd>{$snapshot.localTimeZone}</dd></div>
         </dl>
       </section>
 
@@ -137,14 +144,14 @@
         <section id="source-health" class="system-section" aria-labelledby="sources-heading">
           <header>
             <div>
-              <h2 id="sources-heading">Source freshness</h2>
-              <p>Every registered collector is listed with its current reason. Failures stay visible until that source reports successfully again.</p>
+              <h2 id="sources-heading">Data sources</h2>
+              <p>See when each source last worked and why it needs attention. An error stays visible until the source works again.</p>
             </div>
           </header>
 
           <div class="source-ledger">
             <div class="source-head" aria-hidden="true">
-              <span>Channel</span><span>Source</span><span>Last success</span><span>Current reason</span><span>State</span>
+              <span>Channel</span><span>Source</span><span>Last update</span><span>Details</span><span>Status</span>
             </div>
             {#each $snapshot.system.sources as source (source.sourceId)}
               {@const channel = $snapshot.channels.find((item) => item.id === source.channelId)}
@@ -155,7 +162,7 @@
                 </div>
                 <div>
                   <span>{source.sourceId}</span>
-                  <small>{source.failureCount ? `${source.failureCount} consecutive failures` : 'No active failures'}</small>
+                  <small>{source.failureCount ? `${source.failureCount} failed attempts in a row` : 'Working normally'}</small>
                 </div>
                 <div>
                   <span>{since(source.lastSuccessAt)}</span>
@@ -173,8 +180,8 @@
         <section class="system-section" aria-labelledby="runtime-heading">
           <header>
             <div>
-              <h2 id="runtime-heading">Runtime and storage</h2>
-              <p>Live SQLite allocation and runtime versions.</p>
+              <h2 id="runtime-heading">App and storage</h2>
+              <p>Local database size and software versions.</p>
             </div>
           </header>
 
@@ -186,7 +193,7 @@
             </div>
             <div>
               <ShieldCheck size={22} strokeWidth={1.5} aria-hidden="true" />
-              <span><strong>BrickellStatus engine</strong><small>Policy and collector runtime</small></span>
+              <span><strong>BrickellStatus</strong><small>App version</small></span>
               <em>{$snapshot.system.engineVersion}</em>
             </div>
           </div>
@@ -195,7 +202,7 @@
       </div>
     </div>
   {:else}
-    <div class="empty-sheet" aria-busy="true"><h2>Waiting for engine health</h2><p>No complete system snapshot has arrived.</p></div>
+    <div class="empty-sheet" aria-busy="true"><h2>Loading system health</h2><p>Waiting for the first status update.</p></div>
   {/if}
 </section>
 
@@ -229,7 +236,7 @@
 
   .system-verdict {
     display: grid;
-    grid-template-columns: minmax(260px, 0.9fr) minmax(240px, 0.8fr) minmax(440px, 1.6fr);
+    grid-template-columns: minmax(310px, 0.9fr) minmax(240px, 0.8fr) minmax(440px, 1.6fr);
     align-items: center;
     gap: clamp(24px, 3vw, 48px);
     padding: clamp(24px, 2.7vw, 34px);
@@ -278,9 +285,9 @@
   .system-verdict h2 {
     max-width: 100%;
     margin: 0;
-    font-size: clamp(2.2rem, 3.2vw, 3.1rem);
+    font-size: var(--type-status);
     line-height: 0.88;
-    overflow-wrap: anywhere;
+    white-space: nowrap;
     text-transform: uppercase;
   }
 
@@ -502,7 +509,7 @@
     }
   }
 
-  @media (max-width: 1050px) {
+  @media (max-width: 1400px) {
     .system-verdict {
       grid-template-columns: minmax(0, 1fr) minmax(220px, 0.8fr);
     }

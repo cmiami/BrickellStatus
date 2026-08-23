@@ -368,6 +368,19 @@ pub struct VesselTrackPoint {
     pub latitude: f64,
     pub longitude: f64,
     pub observed_at: String,
+    /// Motion and corridor projection at this fix. Older persisted cursors did
+    /// not carry these fields, so history ingestion falls back to the track's
+    /// latest values only when they are absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_knots: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub course_degrees: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s_meters: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_meters: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -465,6 +478,34 @@ pub struct BridgeCrossingDto {
     /// `opened`, `fits_under`, `unknown`, or absent while still unresolved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    /// When the crossing was matched to a bridge state. Absent while pending.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<String>,
+}
+
+/// Durable Brickell impact for one selected vessel.
+///
+/// Live position and AIS identity stay on [`VesselTrackSnapshot`]; this is the
+/// slower learned record loaded only when a map vessel is selected.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VesselDetailDto {
+    pub mmsi: String,
+    pub transits_opened: u64,
+    pub transits_fits_under: u64,
+    pub transits_unknown: u64,
+    pub transits_pending: u64,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_crossing_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_opened_at: Option<String>,
+    /// Beta(1,1)-smoothed likelihood, in basis points. Absent until at least
+    /// one crossing has a bridge-impact outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opening_propensity: Option<u16>,
+    pub recent_crossings: Vec<BridgeCrossingDto>,
 }
 
 /// The AIS corridor as drawable geometry, published so a surface highlights

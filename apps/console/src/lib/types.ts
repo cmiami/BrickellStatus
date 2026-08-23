@@ -227,6 +227,31 @@ export interface BridgeCrossing {
   speedKnots?: number;
   /** `opened`, `fits_under`, `unknown`, or absent while still unresolved. */
   outcome?: 'opened' | 'fits_under' | 'unknown';
+  /** When the crossing was matched to a bridge result. */
+  resolvedAt?: string;
+}
+
+/**
+ * Durable Brickell passage history for one MMSI.
+ *
+ * Current position and broadcast identity stay on `VesselTrack`; this record
+ * answers the separate question of what the app has learned when this hull
+ * reached the bridge. `null` from the command means the hull has not entered
+ * the local ledger yet, not that the request failed.
+ */
+export interface VesselDetail {
+  mmsi: string;
+  transitsOpened: number;
+  transitsFitsUnder: number;
+  transitsUnknown: number;
+  transitsPending: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  lastCrossingAt?: string;
+  lastOpenedAt?: string;
+  /** Learned opening likelihood in basis points, when a resolved passage exists. */
+  openingPropensity?: number;
+  recentCrossings: BridgeCrossing[];
 }
 
 export interface RiverCorridor {
@@ -428,6 +453,7 @@ export type FlashRequirement =
         | { kind: 'notResponding' }
         | { kind: 'buildMismatch'; device: string; bundled: string }
         | { kind: 'firmwareOutdated'; device: number; bundled: number }
+        | { kind: 'versionUnavailable'; bundled: number }
         | { kind: 'incompatibleIdentity'; device: string; bundled: string }
         | { kind: 'legacyConnection' }
         | { kind: 'wrongBoard'; board: PanelModel };

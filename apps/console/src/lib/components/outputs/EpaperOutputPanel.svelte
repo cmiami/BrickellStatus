@@ -41,7 +41,7 @@
   let deviceStatus = $state<DisplayConnectionStatus>({
     state: 'disconnected',
     transport: null,
-    detail: 'Checking the local transport…'
+    detail: 'Checking the panel connection…'
   });
   let deviceCandidates = $state<DisplayDeviceCandidate[]>([]);
   let firmware = $state<FirmwareStatus | null>(null);
@@ -185,7 +185,7 @@
         notice.set({ ok: false, message: 'No panel found. Switch the board on, allow Bluetooth, or plug in the USB cable and look again.' });
       }
     } catch (error) {
-      notice.set({ ok: false, message: error instanceof Error ? error.message : 'Device scan failed.' });
+      notice.set({ ok: false, message: error instanceof Error ? error.message : 'The panel search failed.' });
     } finally {
       deviceBusy = null;
     }
@@ -198,7 +198,7 @@
       state: 'connecting',
       transport: device.transport,
       deviceName: device.name,
-      detail: `Opening ${device.transport === 'ble' ? 'Bluetooth LE' : 'USB'} transport…`
+      detail: `Connecting over ${device.transport === 'ble' ? 'Bluetooth' : 'USB'}…`
     };
     try {
       draft.display.transport = device.transport;
@@ -220,8 +220,8 @@
         ok: deviceStatus.state === 'connected',
         message: deviceStatus.state === 'connected'
           ? remembersBleRoute || device.transport === 'usb'
-            ? `${deviceStatus.detail} This device is now the saved display route.`
-            : `${deviceStatus.detail} Connected for this session; this panel does not advertise a unique name, so it cannot be remembered safely.`
+            ? `${deviceStatus.detail} This is now your saved panel.`
+            : `${deviceStatus.detail} Connected for this session. The panel does not provide a unique name, so the app cannot reconnect to it automatically.`
           : deviceStatus.detail
       });
     } catch (error) {
@@ -316,7 +316,7 @@
                 : deviceStatus.state === 'connecting'
                   ? 'Opening connection'
                   : deviceStatus.state === 'unavailable'
-                    ? 'Transport unavailable'
+                    ? 'Connection unavailable'
                     : deviceStatus.state === 'error'
                       ? "Can't reach the panel"
                       : 'Not connected'}
@@ -417,7 +417,7 @@
           {panel}
         />
       {:else}
-        <div class="empty-sheet" role="status"><h3>No live frame yet</h3><p>Refresh the real sources before rendering a frame.</p></div>
+        <div class="empty-sheet" role="status"><h3>No live frame yet</h3><p>No current data is available for a test frame.</p></div>
       {/if}
     </aside>
   </div>

@@ -367,6 +367,88 @@ fn ledger_propensity_and_sailing_prior_reach_the_ais_observation() {
     );
 }
 
+#[test]
+fn a_known_opener_prearms_only_while_approaching_in_the_corridor() {
+    let mut item = ais_bridge_item();
+    item.attributes
+        .insert("route_intersects".into(), json!(false));
+    item.attributes.insert("posture".into(), json!("underway"));
+    let known = BTreeMap::from([("367719770".to_string(), 7_000_u16)]);
+    let route_intersects = |item: &CollectorItem, propensities: &BTreeMap<String, u16>| {
+        let Some(BridgeObservation::AisTrack {
+            route_intersects, ..
+        }) = bridge_fact(item, propensities)
+        else {
+            panic!("expected an AIS track");
+        };
+        route_intersects
+    };
+
+    assert!(route_intersects(&item, &known));
+    assert!(
+        !route_intersects(
+            &item,
+            &BTreeMap::from([("367719770".to_string(), 6_667_u16)])
+        ),
+        "one Beta-smoothed open crossing may be a hitchhiker and must keep the raw route result"
+    );
+    item.attributes
+        .insert("posture".into(), json!("off_channel"));
+    assert!(
+        !route_intersects(&item, &known),
+        "opening history cannot pull an off-channel hull onto the route"
+    );
+}
+
+#[test]
+fn a_known_opener_prearm_gets_an_eta_only_from_live_corridor_motion() {
+    let mut item = ais_bridge_item();
+    item.attributes
+        .insert("route_intersects".into(), json!(false));
+    item.attributes.insert("posture".into(), json!("underway"));
+    item.attributes
+        .insert("distance_meters".into(), json!(3_200));
+    item.attributes.insert("sog_knots".into(), json!(6.0));
+    item.attributes.remove("eta_min_minutes");
+    item.attributes.remove("eta_max_minutes");
+    let known = BTreeMap::from([("367719770".to_string(), 7_000_u16)]);
+
+    let eta = |item: &CollectorItem, propensities: &BTreeMap<String, u16>| {
+        let Some(BridgeObservation::AisTrack {
+            route_intersects,
+            eta,
+            ..
+        }) = bridge_fact(item, propensities)
+        else {
+            panic!("expected an AIS track");
+        };
+        (route_intersects, eta)
+    };
+
+    assert_eq!(
+        eta(&item, &known),
+        (true, Some(EtaRangeMinutes::new(12, 24)))
+    );
+    assert_eq!(
+        eta(
+            &item,
+            &BTreeMap::from([("367719770".to_string(), 6_667_u16)])
+        ),
+        (false, None)
+    );
+
+    item.attributes
+        .insert("posture".into(), json!("off_channel"));
+    assert_eq!(eta(&item, &known), (false, None));
+
+    item.attributes.insert("posture".into(), json!("moored"));
+    assert_eq!(eta(&item, &known), (false, None));
+
+    item.attributes.insert("posture".into(), json!("underway"));
+    item.attributes.insert("movement".into(), json!("unknown"));
+    assert_eq!(eta(&item, &known), (false, None));
+}
+
 fn transition(
     bridge_key: &str,
     relation: &str,
@@ -1408,6 +1490,226 @@ async fn collector_minimum_interval_limits_background_polling_but_not_manual_ref
 
     assert_eq!(engine.refresh_all().await.unwrap().attempted, 1);
     assert_eq!(collector.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn forecast_history_keeps_one_latest_material_sample_per_minute() {
+    let now_ms = "2026-08-14T19:10:00Z"
+        .parse::<Timestamp>()
+        .unwrap()
+        .as_millisecond();
+    let clock = Arc::new(FixedClock(AtomicI64::new(now_ms)));
+    let engine = engine_with(Arc::new(DownFl511Collector), clock).await;
+    let mut state = PersistedRuntimeState::default();
+    let clear = engine
+        .predictor
+        .evaluate(TimestampMillis(now_ms), &[], None)
+        .unwrap();
+    engine
+        .record_forecast_sample(&clear, &mut state)
+        .await
+        .unwrap();
+
+    let observed_at = TimestampMillis(now_ms + 15_000);
+    let ais = BridgeEvidence {
+        observation_id: ObservationId::from("ais-strong"),
+        source_id: SourceId::from("aisstream.bridge.brickell"),
+        observed_at,
+        expires_at: None,
+        availability: AvailabilityStatus::Live,
+        reliability: Confidence::CERTAIN,
+        fact: BridgeObservation::AisTrack {
+            mmsi: Some("367000001".into()),
+            vessel_name: Some("Test Vessel".into()),
+            movement: VesselMovement::Approaching,
+            route_intersects: true,
+            eta: Some(EtaRangeMinutes::new(8, 12)),
+            opening_propensity: Some(Confidence::CERTAIN),
+        },
+    };
+    let likely = engine
+        .predictor
+        .evaluate(observed_at, std::slice::from_ref(&ais), Some(&clear))
+        .unwrap();
+    engine
+        .record_forecast_sample(&likely, &mut state)
+        .await
+        .unwrap();
+    let next_minute = engine
+        .predictor
+        .evaluate(TimestampMillis(now_ms + 60_000), &[ais], Some(&likely))
+        .unwrap();
+    engine
+        .record_forecast_sample(&next_minute, &mut state)
+        .await
+        .unwrap();
+
+    let samples = engine
+        .store
+        .forecast_samples_since(FORECAST_TARGET_KEY, now_ms, 10)
+        .await
+        .unwrap();
+    assert_eq!(samples.len(), 2);
+    assert_eq!(samples[0].evaluated_at_ms, now_ms + 15_000);
+    assert_eq!(samples[0].state, "likely");
+    assert!(samples[0].predictive_score_bps < 10_000);
+    assert!(!samples[0].contribution_bps_json.contains("controller"));
+    assert_eq!(samples[1].minute_bucket_ms, now_ms + 60_000);
+}
+
+#[tokio::test]
+async fn cached_bridge_items_do_not_advance_confirmation_time() {
+    let now_ms = 1_786_741_200_000;
+    let clock = Arc::new(FixedClock(AtomicI64::new(now_ms)));
+    let engine = engine_with(Arc::new(DownFl511Collector), clock).await;
+    let source_id = "fl511.bridge.brickell";
+    let mut source = healthy_source_state(
+        "bridge.brickell",
+        bridge_item("253", "Brickell Avenue Bridge", "target", "up"),
+        now_ms - 60_000,
+    );
+    let mut state = PersistedRuntimeState {
+        active_sources: BTreeMap::from([(source_id.into(), "bridge.brickell".into())]),
+        ..PersistedRuntimeState::default()
+    };
+    state.sources.insert(source_id.into(), source.clone());
+
+    engine.persist_refresh(&state, now_ms).await.unwrap();
+    assert!(
+        engine
+            .store
+            .list_bridge_state_intervals(source_id, "brickell")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    source.last_success_ms = Some(now_ms);
+    state.sources.insert(source_id.into(), source);
+    engine.persist_refresh(&state, now_ms).await.unwrap();
+    let intervals = engine
+        .store
+        .list_bridge_state_intervals(source_id, "brickell")
+        .await
+        .unwrap();
+    assert_eq!(intervals.len(), 1);
+    assert_eq!(intervals[0].last_confirmed_at_ms, now_ms);
+}
+
+#[tokio::test]
+async fn every_live_track_refreshes_the_full_vessel_catalog() {
+    let now_ms = 1_786_741_200_000;
+    let clock = Arc::new(FixedClock(AtomicI64::new(now_ms)));
+    let engine = engine_with(Arc::new(DownFl511Collector), clock).await;
+    let source_id = "aisstream.bridge.brickell";
+    let mut source = SourceState::empty("bridge.brickell");
+    source.cursor.metadata.insert(
+        AIS_VESSEL_CATALOG_CURSOR_KEY.into(),
+        json!([{
+            "mmsi": "367000001",
+            "observedAt": "2026-08-14T21:00:00Z",
+            "positionObservedAt": "2026-08-14T21:00:00Z",
+            "vesselName": "MIAMI STAR",
+            "vesselClass": "yacht",
+            "callSign": "WDF1234",
+            "imoNumber": 9876543,
+            "destination": "MIAMI RIVER",
+            "lengthMeters": 31.4,
+            "beamMeters": 7.1,
+            "draughtMeters": 2.4,
+            "latitude": 25.7698,
+            "longitude": -80.1902,
+            "speedKnots": 7.2,
+            "courseDegrees": 265.0,
+            "posture": "underway",
+            "branch": "river",
+            "sMeters": 51.0,
+            "offsetMeters": -2.0
+        }, {
+            "mmsi": "368000002",
+            "observedAt": "2026-08-14T21:00:00Z",
+            "positionObservedAt": "2026-08-14T21:00:00Z",
+            "vesselName": "BAY RUNNER",
+            "vesselClass": "passenger",
+            "latitude": 25.7702,
+            "longitude": -80.1801,
+            "speedKnots": 9.1,
+            "courseDegrees": 270.0,
+            "posture": "underway",
+            "branch": "north_approach",
+            "sMeters": -820.0,
+            "offsetMeters": 8.0
+        }])
+        .to_string(),
+    );
+    source.cursor.metadata.insert(
+        AIS_VESSEL_TRACKS_CURSOR_KEY.into(),
+        json!([{
+            "mmsi": "367000001",
+            "vesselName": "MIAMI STAR",
+            "movement": "approaching",
+            "routeIntersects": true,
+            "speedKnots": 7.2,
+            "courseDegrees": 265.0,
+            "observedAt": "2026-08-14T21:00:00Z",
+            "vesselClass": "yacht",
+            "callSign": "WDF1234",
+            "imoNumber": 9876543,
+            "destination": "MIAMI RIVER",
+            "lengthMeters": 31.4,
+            "beamMeters": 7.1,
+            "draughtMeters": 2.4,
+            "points": [{
+                "latitude": 25.7698,
+                "longitude": -80.1902,
+                "observedAt": "2026-08-14T20:59:30Z",
+                "speedKnots": 3.8,
+                "courseDegrees": 271.0,
+                "branch": "river",
+                "sMeters": 42.0,
+                "offsetMeters": -3.0
+            }]
+        }])
+        .to_string(),
+    );
+    let state = PersistedRuntimeState {
+        sources: BTreeMap::from([(source_id.into(), source)]),
+        active_sources: BTreeMap::from([(source_id.into(), "bridge.brickell".into())]),
+        ..PersistedRuntimeState::default()
+    };
+
+    engine.record_ais_track_fixes(&state).await.unwrap();
+    let vessels = engine.store.list_ais_ledger(10).await.unwrap();
+    let vessel = vessels
+        .iter()
+        .find(|vessel| vessel.mmsi == "367000001")
+        .expect("live hull entered catalog");
+    assert_eq!(vessel.name.as_deref(), Some("MIAMI STAR"));
+    assert_eq!(vessel.call_sign.as_deref(), Some("WDF1234"));
+    assert_eq!(vessel.imo_number, Some(9_876_543));
+    assert_eq!(vessel.destination.as_deref(), Some("MIAMI RIVER"));
+    assert_eq!(vessel.beam_meters, Some(7.1));
+    assert!(
+        vessels.iter().any(|vessel| vessel.mmsi == "368000002"),
+        "the compact catalog must retain hulls outside the rich-history cap"
+    );
+    let fixes = engine.store.track_fixes_since(0).await.unwrap();
+    let fix = fixes
+        .iter()
+        .find(|fix| fix.mmsi == "367000001")
+        .expect("point entered track history");
+    assert_eq!(fix.speed_knots, Some(3.8));
+    assert_eq!(fix.course_degrees, Some(271.0));
+    assert_eq!(fix.branch.as_deref(), Some("river"));
+    assert_eq!(fix.s_meters, Some(42.0));
+    assert_eq!(fix.offset_meters, Some(-3.0));
+    let breadth_fix = fixes
+        .iter()
+        .find(|fix| fix.mmsi == "368000002")
+        .expect("catalog latest fix entered broad movement history");
+    assert_eq!(breadth_fix.speed_knots, Some(9.1));
+    assert_eq!(breadth_fix.branch.as_deref(), Some("north_approach"));
+    assert_eq!(breadth_fix.s_meters, Some(-820.0));
 }
 
 struct PanicCollector;

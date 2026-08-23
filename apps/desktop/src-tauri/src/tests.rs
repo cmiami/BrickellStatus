@@ -104,6 +104,36 @@ fn aisstream_status_contract_matches_frontend_without_secret_material() {
 }
 
 #[test]
+fn vessel_detail_contract_and_mmsi_boundary_match_the_map() {
+    for valid in ["367705810", "000000000"] {
+        assert_eq!(validated_mmsi_argument(valid).unwrap(), valid);
+    }
+    for invalid in ["", "36770581", "3677058100", "367 705810", "36770581A"] {
+        assert!(validated_mmsi_argument(invalid).is_err(), "{invalid:?}");
+    }
+
+    let detail = VesselDetailDto {
+        mmsi: "367705810".into(),
+        transits_opened: 3,
+        transits_fits_under: 1,
+        transits_unknown: 2,
+        transits_pending: 0,
+        first_seen_at: "2026-08-14T15:04:05Z".into(),
+        last_seen_at: "2026-08-23T16:02:04Z".into(),
+        last_crossing_at: Some("2026-08-18T21:23:21Z".into()),
+        last_opened_at: Some("2026-08-18T21:23:21Z".into()),
+        opening_propensity: Some(6_667),
+        recent_crossings: Vec::new(),
+    };
+    let value = serde_json::to_value(detail).unwrap();
+    assert_eq!(value["mmsi"], "367705810");
+    assert_eq!(value["transitsFitsUnder"], 1);
+    assert_eq!(value["transitsUnknown"], 2);
+    assert_eq!(value["openingPropensity"], 6_667);
+    assert_eq!(value["recentCrossings"], serde_json::json!([]));
+}
+
+#[test]
 fn fresh_display_controller_never_auto_connects_to_an_espressif_candidate() {
     let display = DisplayController::new(&AppPreferences::default());
     assert!(!display.automatic_reconnect_enabled());

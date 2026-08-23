@@ -43,6 +43,7 @@ FORM: Distilled from the Live Time Rail composition — channel roster, signal b
       vesselTracks={$snapshot.vesselTracks}
       intervals={$snapshot.bridgeIntervals}
       crossings={$snapshot.bridgeCrossings}
+      generatedAt={$snapshot.generatedAt}
       localTimeZone={$snapshot.localTimeZone}
     />
     <footer class="live-footer">
@@ -63,6 +64,20 @@ FORM: Distilled from the Live Time Rail composition — channel roster, signal b
   .live-console {
     min-height: calc(100vh - 72px);
     background: var(--paper);
+  }
+
+  /* At the desktop composition, the deck and its footer share the remaining
+     window instead of each claiming space after the other. The manifest keeps
+     its own scroll container inside the first row. */
+  @media (min-width: 1181px) {
+    .live-console {
+      display: grid;
+      height: calc(100vh - 72px);
+      height: calc(100dvh - 72px);
+      min-height: 0;
+      grid-template-rows: minmax(0, 1fr) auto;
+      overflow: hidden;
+    }
   }
 
   .live-footer {

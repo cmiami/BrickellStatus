@@ -115,11 +115,11 @@
   <ChannelTabs />
   <header class="page-heading-row">
     <div>
-      <p class="registration-label">Signal roster</p>
-      <h1 class="sheet-heading">Choose what earns space</h1>
+      <p class="registration-label">Channels</p>
+      <h1 class="sheet-heading">Choose what to track</h1>
       <p class="sheet-intro">
-        Appearance, interruption, and delivery are separate decisions. Disabling a screen does not silently
-        disable a safety dependency, and enabling a feed does not grant it permission to message you.
+        Turn data sources on or off, choose what appears on the e-paper display, and decide which changes can send
+        an alert.
       </p>
     </div>
     <div class="heading-actions">
@@ -131,9 +131,9 @@
 
   {#if draft && selected}
     <div class="channel-workbench">
-      <aside class="channel-index" aria-label="Channel roster">
+      <aside class="channel-index" aria-label="Channels">
         <div class="index-heading">
-          <span>Channel</span><span>Collection</span>
+          <span>Channel</span><span>Status</span>
         </div>
         {#each draft.profile.channels as channel (channel.id)}
           <button
@@ -169,26 +169,26 @@
 
         <section class="editor-section">
           <div class="section-copy">
-            <p class="registration-label">Collection</p>
-            <h3>What runs</h3>
-            <p>Collection stays explicit. A disabled channel may still expose an offline reason; it never carries a stale value forward as current.</p>
+            <p class="registration-label">Updates</p>
+            <h3>Data collection</h3>
+            <p>Turn this channel on to fetch new data. Turning it off keeps its settings but stops updates and alerts.</p>
           </div>
           <div class:enabled={selected.enabled} class="collection-gate">
             <div class="gate-state">
-              <span>Collector circuit</span>
-              <strong>{selected.enabled ? 'Running' : 'Parked'}</strong>
+              <span>Channel status</span>
+              <strong>{selected.enabled ? 'On' : 'Off'}</strong>
               <small>
                 {selected.enabled
-                  ? 'Fresh data may enter policy evaluation.'
-                  : 'No polling, evaluation, rotation, or dispatch for this channel.'}
+                  ? 'The app checks this source for new information.'
+                  : 'The app does not check, display, or send alerts for this channel.'}
               </small>
             </div>
             <SwitchField
               checked={selected.enabled}
-              label={selected.enabled ? 'Channel enabled' : 'Channel disabled'}
+              label={selected.enabled ? 'Channel on' : 'Channel off'}
               description={selected.enabled
-                ? 'Its configured collectors are allowed to run.'
-                : 'Settings remain editable without starting the source.'}
+                ? 'New data can update this channel.'
+                : 'You can still change its settings.'}
               onchange={(enabled) => {
                 selected.enabled = enabled;
                 draft!.profile.preset = 'custom';
@@ -198,21 +198,21 @@
           </div>
           <div class="two-fields">
             <label class="field">
-              <span>Maximum accepted age</span>
+              <span>Mark data stale after</span>
               <input type="number" min="1" max="1440" bind:value={selected.maxAgeMinutes} />
-              <small class="field-note">Minutes before the channel becomes stale.</small>
+              <small class="field-note">Minutes without a new update.</small>
             </label>
             <label class="field">
-              <span>Maximum rotation items</span>
+              <span>Items in rotation</span>
               <input type="number" min="1" max="10" bind:value={selected.maxItems} />
-              <small class="field-note">A cap prevents news or markets from flooding the display.</small>
+              <small class="field-note">Limits how many items from this channel appear on the display.</small>
             </label>
           </div>
         </section>
 
         <section class="editor-section">
           <div class="section-copy">
-            <p class="registration-label">Content scope</p>
+            <p class="registration-label">Settings</p>
             <h3>What it watches</h3>
             <p>Locations, source URLs, and thresholds are saved with this channel.</p>
           </div>
@@ -241,8 +241,8 @@
           <div class="section-copy">
             <h3>Where it appears</h3>
             <p>
-              This decides what the e-paper panel shows and when. It is separate from whether the
-              channel may interrupt you — that is set below.
+              Choose whether this channel appears on the e-paper panel and how long it stays on screen. Alert settings
+              are separate below.
             </p>
           </div>
           <div class="choice-register" role="radiogroup" aria-label="Display presence">
@@ -262,20 +262,20 @@
             {/each}
           </div>
           <label class="field compact-field">
-            <span>Normal dwell</span>
+            <span>Time on screen</span>
             <input type="number" min="10" max="120" bind:value={selected.rotationSeconds} />
-            <small class="field-note">Seconds. Interrupt holds are controlled by event policy.</small>
+            <small class="field-note">Seconds before the display rotates to the next item.</small>
           </label>
         </section>
 
         <section class="editor-section">
           <div class="section-copy">
             <p class="registration-label">Interrupts</p>
-            <h3>What may take over</h3>
-            <p>Built-in presets map to explicit event rules. Custom rules stay parked until a detailed matrix is configured.</p>
+            <h3>When it can alert you</h3>
+            <p>Choose which changes can send a notification or take over the e-paper home screen.</p>
           </div>
           <label class="field compact-field">
-            <span>Interrupt policy</span>
+            <span>Alert setting</span>
             <select bind:value={selected.interruptPreset}>
               <option value="recommended">Recommended</option>
               <option value="confirmed_only">Confirmed only</option>
@@ -289,8 +289,8 @@
         <section class="editor-section">
           <div class="section-copy">
             <p class="registration-label">Delivery</p>
-            <h3>Where notices go</h3>
-            <p>Destinations receive only events allowed by this channel’s policy and the destination’s quiet hours.</p>
+            <h3>Where alerts go</h3>
+            <p>Alerts follow this channel’s setting and each destination’s quiet hours.</p>
           </div>
           <div class="destination-register">
             {#each destinations as destination}
@@ -311,7 +311,7 @@
 
       {#if $snapshot}
         <aside class="live-preview">
-          <p class="registration-label">Selected channel frame</p>
+          <p class="registration-label">Panel preview</p>
           <EpaperPreview
             decision={$snapshot.decision}
             channel={liveSelected}
@@ -321,18 +321,18 @@
             <RadioTower size={19} aria-hidden="true" />
             <p>
               <strong>{selected.title}</strong> —
-              {presenceOptions.find((option) => option.id === selected!.presence)?.label.toLowerCase() ?? selected.presence}. It
-              {selected.interruptPreset === 'off' ? ' never interrupts' : ` uses ${selected.interruptPreset.replace('_', ' ')} interrupts`}.
+              {presenceOptions.find((option) => option.id === selected!.presence)?.label.toLowerCase() ?? selected.presence}.
+              {selected.interruptPreset === 'off' ? ' Alerts are off.' : ` Alert setting: ${selected.interruptPreset.replace('_', ' ')}.`}
               {selected.destinations.length
-                ? ` Notices may route to ${selected.destinations.join(', ')}.`
-                : ' No outbound notices are permitted.'}
+                ? ` Alerts can go to ${selected.destinations.join(', ')}.`
+                : ' No alert destinations are selected.'}
             </p>
           </div>
         </aside>
       {/if}
     </div>
   {:else}
-    <div class="empty-sheet"><h2>Loading channel policy</h2><p>The saved configuration has not arrived yet.</p></div>
+    <div class="empty-sheet"><h2>Loading channels</h2><p>Waiting for saved settings.</p></div>
   {/if}
 </section>
 

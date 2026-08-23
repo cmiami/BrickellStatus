@@ -6,7 +6,7 @@
   // heading rather than each claiming a seat in the rail.
   const tabs = [
     { href: '/channels', label: 'Channels' },
-    { href: '/channels/policy', label: 'Policy' }
+    { href: '/channels/policy', label: 'Alerts' }
   ];
 
   const current = $derived($page.url.pathname.replace(/\/$/, '') || '/channels');

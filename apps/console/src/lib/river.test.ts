@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   OPENER_PROPENSITY_BASIS_POINTS,
   corridorRing,
+  currentVesselTracks,
   isOpener,
   isUnderway,
   makeChannelProjector,
@@ -169,6 +170,21 @@ describe('travel direction', () => {
   it('claims no heading for a vessel on station', () => {
     expect(travelDirection(track({ movement: 'stationary' }))).toBe('holding');
     expect(travelDirection(track({ sMeters: undefined }))).toBe('holding');
+  });
+});
+
+describe('live vessel freshness', () => {
+  it('keeps the one-hour archive intact while selecting only current tracks for Live', () => {
+    const generatedAt = '2026-08-23T16:10:00Z';
+    const fresh = track({ mmsi: '111111111', observedAt: '2026-08-23T16:04:00Z' });
+    const stale = track({ mmsi: '222222222', observedAt: '2026-08-23T16:03:59Z' });
+    const future = track({ mmsi: '333333333', observedAt: '2026-08-23T16:10:31Z' });
+    const archive = [fresh, stale, future];
+
+    expect(currentVesselTracks(archive, generatedAt).map((item) => item.mmsi)).toEqual([
+      '111111111'
+    ]);
+    expect(archive).toHaveLength(3);
   });
 });
 

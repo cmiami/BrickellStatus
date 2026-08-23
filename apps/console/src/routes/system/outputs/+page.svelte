@@ -70,7 +70,7 @@
     <div>
       <p class="registration-label">Connections and delivery</p>
       <h1 class="sheet-heading">Outputs</h1>
-      <p class="sheet-intro">Connect the physical display and choose which real external services are allowed to run.</p>
+      <p class="sheet-intro">Connect the e-paper display and choose which notifications are enabled.</p>
     </div>
     <!-- Says what is true right now, and asks for nothing. It is a status
          line, not a banner: nothing to dismiss and nothing to press. -->

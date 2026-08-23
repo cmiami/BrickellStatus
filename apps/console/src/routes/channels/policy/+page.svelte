@@ -89,36 +89,36 @@
 </script>
 
 <svelte:head>
-  <title>Policy · BrickellStatus</title>
-  <meta name="description" content="Configure interruption thresholds, quiet hours, and policy presets." />
+  <title>Alerts · BrickellStatus</title>
+  <meta name="description" content="Choose which channels can alert you and set quiet hours." />
 </svelte:head>
 
 <section class="page-sheet policy-page">
   <ChannelTabs />
   <header class="page-heading-row">
     <div>
-      <p class="registration-label">Attention policy</p>
-      <h1 class="sheet-heading">Policy</h1>
+      <p class="registration-label">Alerts</p>
+      <h1 class="sheet-heading">Alert settings</h1>
       <p class="sheet-intro">
-        A channel can be collected, shown, and delivered without earning takeover rights. This page controls the
-        scarce permission to interrupt; channel content and destinations stay independently configurable.
+        Choose which channels can notify you. Data collection, display rotation, and alert destinations are set on
+        each channel.
       </p>
     </div>
   </header>
 
   {#if draft}
     <div class="policy-register">
-      <aside class="policy-summary" aria-label="Current policy consequence">
+      <aside class="policy-summary" aria-label="Current alert settings">
         <div class="summary-mark" aria-hidden="true"><ShieldCheck size={30} strokeWidth={1.45} /></div>
-        <p>Current instruction</p>
+        <p>Current settings</p>
         <h2>{draft.profile.name}</h2>
-        <strong>{activeInterruptCount} enabled channels may interrupt.</strong>
+        <strong>{activeInterruptCount} enabled channels can send alerts.</strong>
         <span>
           Quiet hours {draft.profile.quietHours.enabled
             ? `run ${draft.profile.quietHours.start}–${draft.profile.quietHours.end}`
             : 'are disabled'}.
         </span>
-        <a href="/channels">Edit collection and destinations →</a>
+        <a href="/channels">Edit channels and destinations →</a>
       </aside>
 
       <div class="policy-work">
@@ -127,22 +127,22 @@
         <section class="policy-section" aria-labelledby="interrupt-heading">
           <header>
             <div>
-              <h2 id="interrupt-heading"><BellRing size={22} strokeWidth={1.5} aria-hidden="true" /> What may interrupt you</h2>
-              <p>Each row says whether that channel can seize the e-paper home frame or create outbound notices.</p>
+              <h2 id="interrupt-heading"><BellRing size={22} strokeWidth={1.5} aria-hidden="true" /> Channel alerts</h2>
+              <p>Choose when each channel can notify you or take over the e-paper home screen.</p>
             </div>
           </header>
 
           <div class="interrupt-ledger">
             <div class="ledger-head" aria-hidden="true">
-              <span>Enabled channel</span><span>Permission</span><span>Plain-language effect</span>
+              <span>Channel</span><span>Alert setting</span><span>What happens</span>
             </div>
             {#each draft.profile.channels as channel (channel.id)}
               <div class:disabled={!channel.enabled} class="interrupt-row">
                 <div>
                   <strong>{channel.title}</strong>
-                  <small>{channel.enabled ? channel.presence.replace('_', ' ') : 'collector disabled'}</small>
+                  <small>{channel.enabled ? channel.presence.replace('_', ' ') : 'channel off'}</small>
                 </div>
-                <label class="visually-hidden" for={`interrupt-${channel.id}`}>Interrupt policy for {channel.title}</label>
+                <label class="visually-hidden" for={`interrupt-${channel.id}`}>Alert setting for {channel.title}</label>
                 <select
                   id={`interrupt-${channel.id}`}
                   value={channel.interruptPreset}
@@ -162,8 +162,8 @@
     </div>
   {:else}
     <div class="empty-sheet" aria-busy="true">
-      <h2>Loading attention policy</h2>
-      <p>The saved profile has not arrived yet. No policy is being inferred from defaults.</p>
+      <h2>Loading alert settings</h2>
+      <p>Waiting for saved settings.</p>
     </div>
   {/if}
 </section>

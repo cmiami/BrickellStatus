@@ -27,6 +27,7 @@ staging and the approved map/ETA/mechanism comp combination; seed 55e9df82.
     vesselTracks = [],
     intervals = [],
     crossings = [],
+    generatedAt,
     localTimeZone
   }: {
     decision: DecisionSnapshot;
@@ -34,13 +35,14 @@ staging and the approved map/ETA/mechanism comp combination; seed 55e9df82.
     vesselTracks?: VesselTrack[];
     intervals?: BridgeStateInterval[];
     crossings?: BridgeCrossing[];
+    generatedAt?: string;
     localTimeZone?: string;
   } = $props();
 </script>
 
 <section class="live-deck" data-state={decision.state}>
   <StatusDecision {decision} band />
-  <RiverLine {corridor} {vesselTracks} {intervals} {crossings} {localTimeZone} />
+  <RiverLine {corridor} {vesselTracks} {intervals} {crossings} {generatedAt} {localTimeZone} />
 </section>
 
 <style>
@@ -57,8 +59,8 @@ staging and the approved map/ETA/mechanism comp combination; seed 55e9df82.
   .live-deck {
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);
-    height: calc(100vh - 72px);
-    min-height: 560px;
+    height: 100%;
+    min-height: 0;
     overflow: hidden;
     background: var(--paper);
     border-bottom: 1px solid var(--rule-strong);

@@ -49,6 +49,20 @@ const MAX_REPORT_FUTURE_SKEW_SECONDS: i64 = 30;
 const MIN_API_KEY_CHARS: usize = 8;
 const MAX_API_KEY_CHARS: usize = 512;
 const MAX_PENDING_CROSSINGS: usize = 32;
+/// A sparse Class B stream can legitimately go several minutes between fixes.
+/// Keep the last position long enough to join a report on the other side of
+/// the span without keeping that stale vessel on the live surface.
+const CROSSING_BASELINE_RETENTION_SECONDS: u64 = 15 * 60;
+const MAX_CROSSING_GAP_SECONDS: f64 = 12.0 * 60.0;
+/// Do not arm either side of the bridge line until the vessel is clear of
+/// ordinary GPS/projection jitter. A fix inside this band leaves the previous
+/// clear-side baseline intact, so +5/-5 m oscillation cannot become a string
+/// of crossings. The two observed sparse transits begin 291 m and 534 m from
+/// the line, respectively.
+const CROSSING_SIDE_CLEARANCE_METERS: f64 = 50.0;
+/// The bridge and lower river are constrained water. This is deliberately a
+/// generous rejection ceiling, not an assumed operating speed.
+const MAX_PLAUSIBLE_CROSSING_SPEED_KNOTS: f64 = 25.0;
 /// The Miami River is maintained to roughly 4.6 m; a hull drawing this much
 /// water cannot enter it, whatever its course claims.
 const RIVER_MAX_DRAUGHT_METERS: f64 = 4.5;
@@ -59,6 +73,10 @@ const MOORED_WINDOW_SECONDS: i64 = 10 * 60;
 
 /// Cursor metadata containing bounded, non-secret vessel courses for the map.
 pub const AIS_VESSEL_TRACKS_CURSOR_KEY: &str = "vessel_tracks";
+/// Compact latest-known identity and movement for every MMSI still in the
+/// collector catalog. Unlike full point histories, this can cover the whole
+/// bounded fleet without multiplying cursor size by track depth.
+pub const AIS_VESSEL_CATALOG_CURSOR_KEY: &str = "vessel_catalog";
 /// Cursor metadata carrying bridge-line crossings observed since the previous
 /// collect, for durable transit/ledger recording by the runtime.
 pub const AIS_CROSSINGS_CURSOR_KEY: &str = "ais_crossings";
@@ -84,6 +102,55 @@ pub struct AisCrossing {
     pub direction: String,
     pub crossed_at: DateTime<Utc>,
     pub speed_knots: f64,
+}
+
+/// One compact catalog row for a vessel heard in the subscription area.
+///
+/// Static-only hulls have identity but no position fields. Active hulls carry
+/// one latest fix here; their deeper trajectory remains in `vessel_tracks`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AisVesselCatalogEntry {
+    pub mmsi: String,
+    pub observed_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_observed_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vessel_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vessel_class: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_sign: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imo_number: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub length_meters: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub beam_meters: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draught_meters: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latitude: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub longitude: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed_knots: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub course_degrees: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub movement: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_intersects: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub posture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub s_meters: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset_meters: Option<f64>,
 }
 
 struct SecretInner(String);
@@ -252,6 +319,7 @@ pub struct AisStreamConfig {
     /// interval discards it every time.
     max_report_age: Duration,
     track_retention: Duration,
+    crossing_baseline_retention: Duration,
     history_retention: Duration,
     idle_timeout: Duration,
     reconnect_initial: Duration,
@@ -267,6 +335,7 @@ impl AisStreamConfig {
             // survives a missed report rather than vanishing between them.
             max_report_age: Duration::from_secs(6 * 60),
             track_retention: Duration::from_secs(6 * 60),
+            crossing_baseline_retention: Duration::from_secs(CROSSING_BASELINE_RETENTION_SECONDS),
             history_retention: Duration::from_secs(60 * 60),
             idle_timeout: Duration::from_secs(90),
             reconnect_initial: Duration::from_secs(1),
@@ -287,6 +356,10 @@ impl fmt::Debug for AisStreamConfig {
             .field("subscription", &self.subscription)
             .field("max_report_age", &self.max_report_age)
             .field("track_retention", &self.track_retention)
+            .field(
+                "crossing_baseline_retention",
+                &self.crossing_baseline_retention,
+            )
             .field("history_retention", &self.history_retention)
             .field("idle_timeout", &self.idle_timeout)
             .field("reconnect_initial", &self.reconnect_initial)
@@ -333,8 +406,25 @@ impl AisStreamCollector {
             && let Ok(histories) = serde_json::from_str::<Vec<VesselHistory>>(encoded)
         {
             let mut state = self.state.write().await;
-            state.histories =
-                validated_histories(histories, Utc::now(), self.config.history_retention);
+            let now = Utc::now();
+            state.histories = validated_histories(histories, now, self.config.history_retention);
+            let baseline_cutoff = now
+                - TimeDelta::from_std(self.config.crossing_baseline_retention)
+                    .unwrap_or_else(|_| TimeDelta::minutes(15));
+            state.crossing_baselines = state
+                .histories
+                .iter()
+                .filter_map(|(mmsi, history)| {
+                    history
+                        .points
+                        .iter()
+                        .rev()
+                        .take_while(|point| point.observed_at >= baseline_cutoff)
+                        .filter_map(track_point_from_history)
+                        .find(|point| crossing_side(*point).is_some())
+                        .map(|point| (*mmsi, point))
+                })
+                .collect();
         }
         let config = self.config.clone();
         let state = Arc::clone(&self.state);
@@ -446,6 +536,11 @@ impl Collector for AisStreamCollector {
                 .metadata
                 .insert(AIS_VESSEL_TRACKS_CURSOR_KEY.into(), encoded);
         }
+        if let Ok(encoded) = serde_json::to_string(&vessel_catalog(&state)) {
+            cursor
+                .metadata
+                .insert(AIS_VESSEL_CATALOG_CURSOR_KEY.into(), encoded);
+        }
 
         Ok(CollectorBatch {
             source: "AISStream".into(),
@@ -465,6 +560,9 @@ struct StreamState {
     health: HealthState,
     failure: Option<StreamFailure>,
     tracks: BTreeMap<u32, VesselTrack>,
+    /// Latest lean fix per MMSI, retained independently of live-map freshness
+    /// so a seven-minute reporting gap can still become a bridge crossing.
+    crossing_baselines: BTreeMap<u32, TrackPoint>,
     histories: BTreeMap<u32, VesselHistory>,
     statics: BTreeMap<u32, VesselStatic>,
     crossings: VecDeque<AisCrossing>,
@@ -476,6 +574,7 @@ impl Default for StreamState {
             health: HealthState::Unknown,
             failure: Some(StreamFailure::Starting),
             tracks: BTreeMap::new(),
+            crossing_baselines: BTreeMap::new(),
             histories: BTreeMap::new(),
             statics: BTreeMap::new(),
             crossings: VecDeque::new(),
@@ -540,7 +639,7 @@ struct VesselTrack {
     point: TrackPoint,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct TrackPoint {
     observed_at: DateTime<Utc>,
     /// Channel distance to the bridge in corridor mode, straight-line
@@ -548,6 +647,11 @@ struct TrackPoint {
     distance_meters: f64,
     /// Signed channel coordinate, corridor mode only.
     s_meters: Option<f64>,
+    latitude: f64,
+    longitude: f64,
+    speed_knots: f64,
+    branch: Option<RiverBranch>,
+    offset_meters: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -603,12 +707,25 @@ struct VesselHistory {
     points: VecDeque<VesselHistoryPoint>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct VesselHistoryPoint {
     latitude: f64,
     longitude: f64,
     observed_at: DateTime<Utc>,
+    /// Movement values belong to the fix, not to the latest report for the
+    /// vessel. Keeping them here lets the durable archive reconstruct actual
+    /// turns and speed changes instead of stamping one value across an hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    speed_knots: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    course_degrees: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    s_meters: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    offset_meters: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -659,6 +776,108 @@ fn track_priority(track: &VesselTrack) -> (u8, u16) {
         .and_then(|value| u16::try_from(value).ok())
         .unwrap_or(u16::MAX);
     (rank, eta)
+}
+
+fn vessel_catalog(state: &StreamState) -> Vec<AisVesselCatalogEntry> {
+    let mut entries = BTreeMap::<u32, AisVesselCatalogEntry>::new();
+    for (mmsi, vessel_static) in &state.statics {
+        let Some(observed_at) = vessel_static.updated_at else {
+            continue;
+        };
+        entries.insert(
+            *mmsi,
+            AisVesselCatalogEntry {
+                mmsi: mmsi.to_string(),
+                observed_at,
+                position_observed_at: None,
+                vessel_name: vessel_static.name.clone(),
+                vessel_class: vessel_static.class_word().map(ToOwned::to_owned),
+                call_sign: vessel_static.call_sign.clone(),
+                imo_number: vessel_static.imo_number,
+                destination: vessel_static.destination.clone(),
+                length_meters: vessel_static.length_meters,
+                beam_meters: vessel_static.beam_meters,
+                draught_meters: vessel_static.draught_meters,
+                latitude: None,
+                longitude: None,
+                speed_knots: None,
+                course_degrees: None,
+                movement: None,
+                route_intersects: None,
+                posture: None,
+                branch: None,
+                s_meters: None,
+                offset_meters: None,
+            },
+        );
+    }
+
+    for (mmsi, track) in &state.tracks {
+        let text = |key: &str| {
+            track
+                .item
+                .attributes
+                .get(key)
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        };
+        let number = |key: &str| track.item.attributes.get(key).and_then(Value::as_f64);
+        let entry = entries
+            .entry(*mmsi)
+            .or_insert_with(|| AisVesselCatalogEntry {
+                mmsi: mmsi.to_string(),
+                observed_at: track.observed_at,
+                position_observed_at: None,
+                vessel_name: text("vessel_name"),
+                vessel_class: text("vessel_class"),
+                call_sign: text("call_sign"),
+                imo_number: track
+                    .item
+                    .attributes
+                    .get("imo_number")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok()),
+                destination: text("destination"),
+                length_meters: number("length_meters"),
+                beam_meters: number("beam_meters"),
+                draught_meters: number("draught_meters"),
+                latitude: None,
+                longitude: None,
+                speed_knots: None,
+                course_degrees: None,
+                movement: None,
+                route_intersects: None,
+                posture: None,
+                branch: None,
+                s_meters: None,
+                offset_meters: None,
+            });
+        entry.observed_at = entry.observed_at.max(track.observed_at);
+        entry.position_observed_at = Some(track.observed_at);
+        entry.vessel_name = entry.vessel_name.clone().or_else(|| text("vessel_name"));
+        entry.vessel_class = entry.vessel_class.clone().or_else(|| text("vessel_class"));
+        if let Some(location) = &track.item.location {
+            entry.latitude = location.latitude;
+            entry.longitude = location.longitude;
+        }
+        entry.speed_knots = number("sog_knots");
+        entry.course_degrees = number("cog_degrees");
+        entry.movement = text("movement");
+        entry.route_intersects = track
+            .item
+            .attributes
+            .get("route_intersects")
+            .and_then(Value::as_bool);
+        entry.posture = text("posture");
+        entry.branch = track.point.branch.map(|branch| branch.as_str().to_owned());
+        entry.s_meters = track.point.s_meters;
+        entry.offset_meters = track.point.offset_meters;
+    }
+
+    let mut entries = entries.into_values().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.observed_at));
+    entries.truncate(MAX_TRACKED_VESSELS);
+    entries
 }
 
 async fn run_stream(
@@ -849,13 +1068,19 @@ async fn handle_payload(
     ) {
         record_crossing(
             &mut state.crossings,
-            state.tracks.get(&track.mmsi),
+            state.crossing_baselines.get(&track.mmsi).copied(),
             &track,
             state.statics.get(&track.mmsi),
         );
         update_history(&mut state.histories, &track, now, config.history_retention);
+        remember_crossing_baseline(&mut state.crossing_baselines, track.mmsi, track.point);
         state.tracks.insert(track.mmsi, track);
         prune_tracks(&mut state.tracks, now, config.track_retention);
+        prune_crossing_baselines(
+            &mut state.crossing_baselines,
+            now,
+            config.crossing_baseline_retention,
+        );
         prune_histories(&mut state.histories, now, config.history_retention);
     }
     Ok(())
@@ -1012,25 +1237,19 @@ fn apply_static(
 /// Detects the previous→current fix straddling the bridge line.
 fn record_crossing(
     crossings: &mut VecDeque<AisCrossing>,
-    previous: Option<&VesselTrack>,
+    previous: Option<TrackPoint>,
     current: &VesselTrack,
     vessel_static: Option<&VesselStatic>,
 ) {
     let Some(previous) = previous else { return };
-    let (Some(before), Some(after)) = (previous.point.s_meters, current.point.s_meters) else {
+    let (Some(before), Some(after)) = (previous.s_meters, current.point.s_meters) else {
         return;
     };
-    // Both fixes must sit near the span; a sign flip across a long gap is a
-    // teleporting receiver, not a passage.
-    if before.signum() == after.signum()
-        || before.abs() > 600.0
-        || after.abs() > 600.0
-        || current
-            .point
-            .observed_at
-            .signed_duration_since(previous.point.observed_at)
-            > TimeDelta::minutes(12)
-    {
+    let crossed_line = matches!(
+        (crossing_side(previous), crossing_side(current.point)),
+        (Some(-1), Some(1)) | (Some(1), Some(-1))
+    );
+    if !crossed_line || !plausible_corridor_crossing(previous, current.point) {
         return;
     }
     let span = (after - before).abs();
@@ -1038,15 +1257,12 @@ fn record_crossing(
     let elapsed = current
         .point
         .observed_at
-        .signed_duration_since(previous.point.observed_at);
-    let crossed_at = previous.point.observed_at
+        .signed_duration_since(previous.observed_at);
+    let crossed_at = previous.observed_at
         + TimeDelta::milliseconds((elapsed.num_milliseconds() as f64 * fraction) as i64);
-    let speed_knots = current
-        .item
-        .attributes
-        .get("sog_knots")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
+    // A midpoint speed is less noisy than assigning the whole sparse segment
+    // to whichever report happened to arrive after the bridge.
+    let speed_knots = (previous.speed_knots + current.point.speed_knots) / 2.0;
     crossings.push_back(AisCrossing {
         mmsi: current.mmsi.to_string(),
         vessel_name: vessel_static
@@ -1076,6 +1292,99 @@ fn record_crossing(
     while crossings.len() > MAX_PENDING_CROSSINGS {
         let _ = crossings.pop_front();
     }
+}
+
+/// The baseline is the last fix conclusively on either side, not simply the
+/// last fix received. Keeping it through the dead band is the hysteresis that
+/// lets a real transit complete while ignoring sign noise at the line.
+fn remember_crossing_baseline(
+    baselines: &mut BTreeMap<u32, TrackPoint>,
+    mmsi: u32,
+    point: TrackPoint,
+) {
+    if crossing_side(point).is_some() {
+        baselines.insert(mmsi, point);
+    }
+}
+
+fn crossing_side(point: TrackPoint) -> Option<i8> {
+    let s_meters = point.s_meters?;
+    if s_meters >= CROSSING_SIDE_CLEARANCE_METERS {
+        Some(1)
+    } else if s_meters <= -CROSSING_SIDE_CLEARANCE_METERS {
+        Some(-1)
+    } else {
+        None
+    }
+}
+
+/// A sign flip is only a crossing when both fixes describe the same plausible
+/// transit. The old ±600 m endpoint gate threw away two real seven-minute
+/// passages; interpolation can span that gap safely once corridor membership,
+/// branch continuity, elapsed time, and observed speed all agree.
+fn plausible_corridor_crossing(previous: TrackPoint, current: TrackPoint) -> bool {
+    let (Some(before), Some(after), Some(before_branch), Some(after_branch)) = (
+        previous.s_meters,
+        current.s_meters,
+        previous.branch,
+        current.branch,
+    ) else {
+        return false;
+    };
+    let (Some(before_offset), Some(after_offset)) = (previous.offset_meters, current.offset_meters)
+    else {
+        return false;
+    };
+    if before_offset > before_branch.corridor_offset_meters()
+        || after_offset > after_branch.corridor_offset_meters()
+    {
+        return false;
+    }
+
+    // Positive channel coordinates exist only upriver of Brickell. Require
+    // that side of the interpolation to project onto the river trunk; the
+    // seaward fix may legitimately have reached an entrance branch after a
+    // sparse report interval.
+    if (before > 0.0 && before_branch != RiverBranch::River)
+        || (after > 0.0 && after_branch != RiverBranch::River)
+    {
+        return false;
+    }
+
+    let elapsed_seconds = current
+        .observed_at
+        .signed_duration_since(previous.observed_at)
+        .num_milliseconds() as f64
+        / 1_000.0;
+    if !(2.0..=MAX_CROSSING_GAP_SECONDS).contains(&elapsed_seconds) {
+        return false;
+    }
+
+    let direct_meters = haversine_meters(
+        previous.latitude,
+        previous.longitude,
+        current.latitude,
+        current.longitude,
+    );
+    let channel_meters = (after - before).abs();
+    if !direct_meters.is_finite() || !channel_meters.is_finite() || direct_meters < 1.0 {
+        return false;
+    }
+
+    // Allow turns through the mouth and normal SOG jitter, while tying the
+    // accepted distance to what either endpoint actually reported. The hard
+    // ceiling rejects a high-speed GPS jump as well as a low-speed teleport.
+    let reported_peak = previous.speed_knots.max(current.speed_knots);
+    let allowed_knots = (reported_peak * 1.75 + 2.0).clamp(6.0, MAX_PLAUSIBLE_CROSSING_SPEED_KNOTS);
+    let direct_knots = direct_meters / elapsed_seconds / 0.514_444;
+    let channel_knots = channel_meters / elapsed_seconds / 0.514_444;
+    if direct_knots > allowed_knots || channel_knots > allowed_knots {
+        return false;
+    }
+
+    // Nearest-branch projection can jump at a channel fork. A real transit's
+    // charted path may exceed its chord, but not by several kilometres.
+    channel_meters <= direct_meters * 1.8 + 250.0
 }
 
 #[derive(Serialize)]
@@ -1113,7 +1422,7 @@ struct FixClassification {
     posture: Option<&'static str>,
     route_intersects: bool,
     eta: Option<(u16, u16)>,
-    branch: Option<&'static str>,
+    branch: Option<RiverBranch>,
     offset_meters: Option<f64>,
 }
 
@@ -1271,7 +1580,7 @@ fn normalize_value(
         attributes.insert("posture".into(), json!(posture));
     }
     if let Some(branch) = branch {
-        attributes.insert("branch".into(), json!(branch));
+        attributes.insert("branch".into(), json!(branch.as_str()));
     }
     if let Some(s_signed) = s_signed {
         attributes.insert("s_meters".into(), json!(s_signed.round()));
@@ -1293,6 +1602,11 @@ fn normalize_value(
             observed_at: source_time,
             distance_meters,
             s_meters: s_signed,
+            latitude,
+            longitude,
+            speed_knots: sog_knots,
+            branch,
+            offset_meters,
         },
         item: CollectorItem {
             id: format!("aisstream:{mmsi}"),
@@ -1467,7 +1781,7 @@ fn classify_corridor_fix(
         posture,
         route_intersects,
         eta,
-        branch: Some(fix.branch.as_str()),
+        branch: Some(fix.branch),
         offset_meters: Some(fix.offset_meters),
     }
 }
@@ -1574,6 +1888,52 @@ fn prune_tracks(tracks: &mut BTreeMap<u32, VesselTrack>, now: DateTime<Utc>, ret
     }
 }
 
+fn prune_crossing_baselines(
+    baselines: &mut BTreeMap<u32, TrackPoint>,
+    now: DateTime<Utc>,
+    retention: Duration,
+) {
+    let cutoff = now - TimeDelta::from_std(retention).unwrap_or_else(|_| TimeDelta::minutes(15));
+    baselines.retain(|_, point| point.observed_at >= cutoff);
+    while baselines.len() > MAX_TRACKED_VESSELS {
+        let Some(oldest) = baselines
+            .iter()
+            .min_by_key(|(_, point)| point.observed_at)
+            .map(|(mmsi, _)| *mmsi)
+        else {
+            break;
+        };
+        baselines.remove(&oldest);
+    }
+}
+
+fn track_point_from_history(point: &VesselHistoryPoint) -> Option<TrackPoint> {
+    let s_meters = point.s_meters.filter(|value| value.is_finite())?;
+    let offset_meters = point
+        .offset_meters
+        .filter(|value| value.is_finite() && *value >= 0.0)?;
+    let speed_knots = point
+        .speed_knots
+        .filter(|value| (0.0..102.3).contains(value))?;
+    let branch = match point.branch.as_deref()? {
+        "river" => RiverBranch::River,
+        "north_approach" => RiverBranch::NorthApproach,
+        "government_cut" => RiverBranch::GovernmentCut,
+        "south_approach" => RiverBranch::SouthApproach,
+        _ => return None,
+    };
+    Some(TrackPoint {
+        observed_at: point.observed_at,
+        distance_meters: s_meters.abs(),
+        s_meters: Some(s_meters),
+        latitude: point.latitude,
+        longitude: point.longitude,
+        speed_knots,
+        branch: Some(branch),
+        offset_meters: Some(offset_meters),
+    })
+}
+
 fn update_history(
     histories: &mut BTreeMap<u32, VesselHistory>,
     track: &VesselTrack,
@@ -1672,6 +2032,11 @@ fn update_history(
         latitude,
         longitude,
         observed_at: track.observed_at,
+        speed_knots: Some(speed_knots),
+        course_degrees: Some(course_degrees),
+        branch: track.point.branch.map(|branch| branch.as_str().to_owned()),
+        s_meters: track.point.s_meters,
+        offset_meters: track.point.offset_meters,
     };
     let history = histories
         .entry(track.mmsi)
@@ -1914,6 +2279,32 @@ mod tests {
             .into_bytes()
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn position_track(
+        mmsi: u32,
+        source_time: &str,
+        received_at: &str,
+        latitude: f64,
+        longitude: f64,
+        speed_knots: f64,
+        course_degrees: f64,
+    ) -> VesselTrack {
+        let body = include_str!("../fixtures/aisstream-position-report.json")
+            .replace("367719770", &mmsi.to_string())
+            .replace("2026-08-14T16:20:00Z", source_time)
+            .replace("25.7762", &latitude.to_string())
+            .replace("-80.2040", &longitude.to_string())
+            .replace("5.4", &speed_knots.to_string())
+            .replace("129.0", &course_degrees.to_string());
+        normalize_message(
+            body.as_bytes(),
+            received_at.parse().expect("received time"),
+            &config(),
+            &BTreeMap::new(),
+        )
+        .expect("valid corridor track")
+    }
+
     #[test]
     fn secret_debug_is_redacted_and_subscription_is_bounded() {
         let key = AisStreamApiKey::new("do-not-print-this-key").expect("valid key");
@@ -1977,7 +2368,7 @@ mod tests {
     fn bridge_line_crossing_is_detected_and_queued() {
         let received = RECEIVED.parse::<DateTime<Utc>>().expect("fixture time");
         // Just upriver of the span, heading down.
-        let before_body = String::from_utf8(fixture("2026-08-14T16:19:00Z"))
+        let before_body = String::from_utf8(fixture("2026-08-14T16:18:00Z"))
             .expect("utf8")
             .replace("-80.2040", "-80.1925")
             .replace("25.7762", "25.76944");
@@ -1994,7 +2385,7 @@ mod tests {
             before.point.s_meters
         );
 
-        // One minute later, between the span and the mouth.
+        // Two minutes later, between the span and the mouth.
         let after_body = String::from_utf8(fixture("2026-08-14T16:20:00Z"))
             .expect("utf8")
             .replace("-80.2040", "-80.1878")
@@ -2005,12 +2396,202 @@ mod tests {
         assert!(after.point.s_meters.is_some_and(|s| s < 0.0));
 
         let mut crossings = VecDeque::new();
-        record_crossing(&mut crossings, Some(&before), &after, None);
+        record_crossing(&mut crossings, Some(before.point), &after, None);
         let crossing = crossings.pop_front().expect("crossing recorded");
         assert_eq!(crossing.direction, "downriver");
         assert_eq!(crossing.mmsi, "367719770");
         assert!(crossing.crossed_at >= before.point.observed_at);
         assert!(crossing.crossed_at <= after.point.observed_at);
+        assert!(crossings.is_empty());
+    }
+
+    #[test]
+    fn seven_minute_river_to_cut_gap_records_the_observed_crossing() {
+        // Live DB case 367581520: the endpoint after Brickell is already well
+        // into the bay, so the former ±600 m gate discarded a normal 6 kn run.
+        let before = position_track(
+            367_581_520,
+            "2026-08-23T12:23:13.610Z",
+            "2026-08-23T12:23:14.000Z",
+            25.769_941_666_666_7,
+            -80.193_025,
+            6.5,
+            64.0,
+        );
+        let after = position_track(
+            367_581_520,
+            "2026-08-23T12:30:14.621Z",
+            "2026-08-23T12:30:15.000Z",
+            25.772_751_666_666_7,
+            -80.179_83,
+            6.6,
+            101.0,
+        );
+        assert!(before.point.s_meters.is_some_and(|s| s > 250.0));
+        assert!(after.point.s_meters.is_some_and(|s| s < -1_500.0));
+
+        let mut live_tracks = BTreeMap::from([(before.mmsi, before.clone())]);
+        prune_tracks(
+            &mut live_tracks,
+            after.observed_at,
+            config().track_retention,
+        );
+        assert!(live_tracks.is_empty(), "stale boat leaves the live surface");
+        let mut baselines = BTreeMap::from([(before.mmsi, before.point)]);
+        prune_crossing_baselines(
+            &mut baselines,
+            after.observed_at,
+            config().crossing_baseline_retention,
+        );
+
+        let mut crossings = VecDeque::new();
+        record_crossing(
+            &mut crossings,
+            baselines.get(&before.mmsi).copied(),
+            &after,
+            None,
+        );
+        let crossing = crossings.pop_front().expect("sparse crossing");
+        assert_eq!(crossing.mmsi, "367581520");
+        assert_eq!(crossing.direction, "downriver");
+        assert!((crossing.speed_knots - 6.55).abs() < 0.01);
+        assert!(crossing.crossed_at > before.observed_at);
+        assert!(crossing.crossed_at < after.observed_at);
+    }
+
+    #[test]
+    fn seven_minute_lower_river_gap_interpolates_a_second_observed_crossing() {
+        // Live DB case 368275060: +534 m to -837 m in 7.6 minutes. Both the
+        // straight-line and channel-implied speeds agree with its 5 kn SOG.
+        let before = position_track(
+            368_275_060,
+            "2026-08-23T12:24:44.661Z",
+            "2026-08-23T12:24:45.000Z",
+            25.768_93,
+            -80.195_278_333_333_3,
+            5.8,
+            78.1,
+        );
+        let after = position_track(
+            368_275_060,
+            "2026-08-23T12:32:18.060Z",
+            "2026-08-23T12:32:19.000Z",
+            25.773_665,
+            -80.184_063_333_333_3,
+            4.8,
+            7.4,
+        );
+        assert!(before.point.s_meters.is_some_and(|s| s > 500.0));
+        assert!(after.point.s_meters.is_some_and(|s| s < -800.0));
+
+        let mut crossings = VecDeque::new();
+        record_crossing(&mut crossings, Some(before.point), &after, None);
+        let crossing = crossings.pop_front().expect("sparse crossing");
+        assert_eq!(crossing.mmsi, "368275060");
+        assert_eq!(crossing.direction, "downriver");
+        assert!(crossing.crossed_at > before.observed_at);
+        assert!(crossing.crossed_at < after.observed_at);
+    }
+
+    #[test]
+    fn near_line_jitter_neither_queues_nor_rearms_a_crossing() {
+        let before = position_track(
+            367_581_520,
+            "2026-08-23T12:23:13.610Z",
+            "2026-08-23T12:23:14.000Z",
+            25.769_941_666_666_7,
+            -80.193_025,
+            6.5,
+            64.0,
+        );
+        let after = position_track(
+            367_581_520,
+            "2026-08-23T12:30:14.621Z",
+            "2026-08-23T12:30:15.000Z",
+            25.772_751_666_666_7,
+            -80.179_83,
+            6.6,
+            101.0,
+        );
+        let mut baselines = BTreeMap::new();
+        remember_crossing_baseline(&mut baselines, before.mmsi, before.point);
+        let original_baseline = baselines[&before.mmsi];
+        let mut crossings = VecDeque::new();
+
+        // Repeated sign changes inside the 50 m dead band are ordinary
+        // position/projection noise. They must not replace the last clear-side
+        // fix or queue a downriver/upriver pair.
+        for (index, s_meters) in [-8.0, 6.0, -4.0, 9.0].into_iter().enumerate() {
+            let mut jitter = after.clone();
+            jitter.point.s_meters = Some(s_meters);
+            jitter.point.observed_at =
+                before.point.observed_at + TimeDelta::seconds(30 + index as i64 * 10);
+            record_crossing(
+                &mut crossings,
+                baselines.get(&before.mmsi).copied(),
+                &jitter,
+                None,
+            );
+            remember_crossing_baseline(&mut baselines, jitter.mmsi, jitter.point);
+        }
+        assert!(crossings.is_empty());
+        assert_eq!(
+            baselines[&before.mmsi].observed_at,
+            original_baseline.observed_at
+        );
+
+        // Once the vessel is conclusively clear on the opposite side, the
+        // original sparse passage is recorded exactly once and becomes the
+        // new baseline.
+        record_crossing(
+            &mut crossings,
+            baselines.get(&before.mmsi).copied(),
+            &after,
+            None,
+        );
+        remember_crossing_baseline(&mut baselines, after.mmsi, after.point);
+        assert_eq!(crossings.len(), 1);
+        assert!(
+            baselines[&after.mmsi]
+                .s_meters
+                .is_some_and(|s| s < -1_500.0)
+        );
+    }
+
+    #[test]
+    fn crossing_interpolation_rejects_teleports_and_wrong_positive_branch() {
+        let before = position_track(
+            367_581_520,
+            "2026-08-23T12:23:13.610Z",
+            "2026-08-23T12:23:14.000Z",
+            25.769_941_666_666_7,
+            -80.193_025,
+            6.5,
+            64.0,
+        );
+        let mut after = position_track(
+            367_581_520,
+            "2026-08-23T12:30:14.621Z",
+            "2026-08-23T12:30:15.000Z",
+            25.772_751_666_666_7,
+            -80.179_83,
+            6.6,
+            101.0,
+        );
+
+        // The same displacement in thirty seconds contradicts both reported
+        // SOGs and must not teach the opening ledger.
+        after.point.observed_at = before.point.observed_at + TimeDelta::seconds(30);
+        let mut crossings = VecDeque::new();
+        record_crossing(&mut crossings, Some(before.point), &after, None);
+        assert!(crossings.is_empty());
+
+        // A positive s projected onto an approach is a nearest-branch jump,
+        // not a valid upriver endpoint.
+        after.point.observed_at = "2026-08-23T12:30:14.621Z".parse().expect("fixture time");
+        let mut wrong_branch = before.point;
+        wrong_branch.branch = Some(RiverBranch::GovernmentCut);
+        record_crossing(&mut crossings, Some(wrong_branch), &after, None);
         assert!(crossings.is_empty());
     }
 
@@ -2024,6 +2605,11 @@ mod tests {
             latitude: 25.7762,
             longitude: -80.2040,
             observed_at: source_time - TimeDelta::minutes(minutes_ago),
+            speed_knots: Some(0.0),
+            course_degrees: Some(129.0),
+            branch: Some("river".into()),
+            s_meters: Some(1_800.0),
+            offset_meters: Some(0.0),
         };
         let history = |minutes: &[i64]| VesselHistory {
             mmsi: "367719770".into(),
@@ -2268,6 +2854,12 @@ mod tests {
             history.points.back().unwrap().observed_at,
             third.observed_at
         );
+        let latest_point = history.points.back().expect("latest point");
+        assert_eq!(latest_point.speed_knots, Some(5.4));
+        assert_eq!(latest_point.course_degrees, Some(129.0));
+        assert_eq!(latest_point.branch.as_deref(), Some("river"));
+        assert!(latest_point.s_meters.is_some());
+        assert!(latest_point.offset_meters.is_some());
 
         let encoded = serde_json::to_string(&histories.into_values().collect::<Vec<_>>())
             .expect("history cursor JSON");
@@ -2313,6 +2905,15 @@ mod tests {
             batch.cursor.metadata["last_position_at_ms"],
             received.timestamp_millis().to_string()
         );
+        let catalog = serde_json::from_str::<Vec<AisVesselCatalogEntry>>(
+            &batch.cursor.metadata[AIS_VESSEL_CATALOG_CURSOR_KEY],
+        )
+        .expect("compact vessel catalog");
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].mmsi, "367719770");
+        assert_eq!(catalog[0].position_observed_at, Some(received));
+        assert_eq!(catalog[0].branch.as_deref(), Some("river"));
+        assert!(catalog[0].latitude.is_some());
 
         collector.state.write().await.health = HealthState::Degraded;
         assert!(collector.collect(&CollectContext::default()).await.is_err());

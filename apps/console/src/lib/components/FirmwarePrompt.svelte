@@ -50,6 +50,8 @@
     switch (requirement.reason.kind) {
       case 'firmwareOutdated':
         return 'Panel firmware update required';
+      case 'versionUnavailable':
+        return 'Install current panel firmware';
       case 'legacyConnection':
         return 'Panel setup needs attention';
       case 'wrongBoard':
@@ -77,6 +79,8 @@
         return requirement.reason.device === 1
           ? `This panel runs legacy firmware. Version ${requirement.reason.bundled} is required for reliable identity and reconnect.`
           : `This panel runs firmware version ${requirement.reason.device}. Version ${requirement.reason.bundled} bundled with this app is newer and must be installed.`;
+      case 'versionUnavailable':
+        return `The panel is connected, but its firmware version could not be read. Install version ${requirement.reason.bundled}, the current firmware bundled with this app.`;
       case 'incompatibleIdentity':
         return 'The panel returned an incompatible firmware identity. Reinstall the firmware bundled with this app.';
       case 'legacyConnection':
@@ -92,6 +96,8 @@
     switch (requirement.reason.kind) {
       case 'firmwareOutdated':
         return 'Update firmware';
+      case 'versionUnavailable':
+        return 'Install latest firmware';
       case 'wrongBoard':
         return 'Install correct firmware';
       default:

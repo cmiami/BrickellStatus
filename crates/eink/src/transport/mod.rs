@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{ProtocolError, RefreshMode, encode_packet, validate_packet};
+use crate::{
+    ProtocolError, RefreshMode, banner::parse_battery_telemetry, encode_packet, validate_packet,
+};
 
 pub use auto::{AutoTransport, TransportPreference};
 #[cfg(all(feature = "ble", target_os = "android"))]
@@ -53,6 +55,24 @@ pub struct TransportReceipt {
     pub ready_observed: bool,
     /// Exact non-secret acknowledgement text.
     pub acknowledgement: String,
+}
+
+impl TransportReceipt {
+    /// Battery voltage reported with this acknowledgement, in millivolts.
+    ///
+    /// Older firmware and invalid readings return `None`; absence is never
+    /// interpreted as an empty battery.
+    pub fn battery_millivolts(&self) -> Option<u16> {
+        parse_battery_telemetry(&self.acknowledgement).0
+    }
+
+    /// Firmware's low-voltage state for this acknowledgement.
+    ///
+    /// `None` means the firmware did not provide valid battery telemetry,
+    /// while `Some(false)` means it provided a valid voltage without a low marker.
+    pub fn low_battery(&self) -> Option<bool> {
+        parse_battery_telemetry(&self.acknowledgement).1
+    }
 }
 
 /// USB/BLE transmission failure with enough detail for fallback and diagnosis.
@@ -225,5 +245,24 @@ mod tests {
 
         assert_eq!(error.to_string(), "the saved Bluetooth panel was not found");
         assert!(!error.to_string().contains("Legacy E213"));
+    }
+
+    #[test]
+    fn receipt_battery_state_is_optional_and_voltage_backed() {
+        let measured = TransportReceipt {
+            transport: TransportKind::Usb,
+            ready_observed: true,
+            acknowledgement: "ACK INK1 BAT3388 LOW".into(),
+        };
+        assert_eq!(measured.acknowledgement.len(), 20);
+        assert_eq!(measured.battery_millivolts(), Some(3388));
+        assert_eq!(measured.low_battery(), Some(true));
+
+        let legacy = TransportReceipt {
+            acknowledgement: "ACK INK1".into(),
+            ..measured
+        };
+        assert_eq!(legacy.battery_millivolts(), None);
+        assert_eq!(legacy.low_battery(), None);
     }
 }

@@ -160,6 +160,12 @@ function transformScale(node: Element): number {
   return Number(match![1]);
 }
 
+function glyphScaleX(node: Element): number {
+  const match = /scale\((-?[\d.]+)\s+(-?[\d.]+)\)/.exec(node.getAttribute('transform') ?? '');
+  expect(match).toBeTruthy();
+  return Number(match![1]);
+}
+
 function expectOctolinear(path: Element): void {
   const points = Array.from(
     (path.getAttribute('d') ?? '').matchAll(/[ML](-?[\d.]+)\s+(-?[\d.]+)/g),
@@ -216,18 +222,38 @@ describe('RiverLine', () => {
     render(RiverLine, { corridor: CORRIDOR, vesselTracks: [], intervals: [] });
     const target = document.querySelector('.target-station');
     const hero = target?.querySelector('.hero-bascule');
-    const mini = document.querySelector(".stations .station[data-kind='bridge'] > g");
+    const minis = Array.from(document.querySelectorAll('.stations .mini-bascule'));
+    const mini = minis[0];
 
     expect(target).toHaveAttribute('transform', 'translate(690 320)');
+    expect(compactText(target?.querySelector('.target-kicker') ?? null)).toBe('ETA TARGET');
+    expect(Number(target?.querySelector('.target-kicker')?.getAttribute('y'))).toBeLessThanOrEqual(
+      -240
+    );
+    expect(compactText(document.querySelector('.route-terminals text'))).toBe('UPRIVER');
+    expect(document.querySelector('.map-edge')).toBeNull();
     expect(target?.querySelector('.transit-bascule')).toHaveAttribute('data-scale', 'hero');
     expect(mini?.querySelector('.transit-bascule')).toHaveAttribute('data-scale', 'mini');
     expect(hero).toBeTruthy();
     expect(mini).toBeTruthy();
     expect(transformScale(hero!)).toBeGreaterThan(transformScale(mini!) * 2);
 
-    const routeAngle = Number(mini?.getAttribute('data-route-angle'));
-    const bridgeAngle = Number(mini?.getAttribute('data-bridge-angle'));
-    expect((bridgeAngle - routeAngle + 360) % 360).toBe(90);
+    expect(minis).toHaveLength(3);
+    for (const bridge of minis) {
+      const routeAngle = Number(bridge.getAttribute('data-route-angle'));
+      const bridgeAngle = Number(bridge.getAttribute('data-bridge-angle'));
+      expect(((bridgeAngle - routeAngle) % 180 + 180) % 180).toBeCloseTo(90);
+      expect(bridgeAngle).toBeGreaterThanOrEqual(-90);
+      expect(bridgeAngle).toBeLessThanOrEqual(90);
+
+      // The mechanical mark rotates with the crossing; its readable name and
+      // state remain sibling text in the sheet's upright coordinate system.
+      const station = bridge.parentElement!;
+      expect(station.querySelector('.mini-bascule .station-label')).toBeNull();
+      expect(station.querySelector('.mini-bascule .station-state')).toBeNull();
+      expect(station.querySelector('.station-label')).not.toHaveAttribute('transform');
+      expect(station.querySelector('.station-state')).not.toHaveAttribute('transform');
+    }
   });
 
   it('joins each bridge to its live state and writes the road consequence', () => {
@@ -268,8 +294,8 @@ describe('RiverLine', () => {
 
     expect(Number.isFinite(point.x)).toBe(true);
     expect(Number.isFinite(point.y)).toBe(true);
-    expect(ship?.getAttribute('transform')).toMatch(/^rotate\(-?[\d.]+\)$/);
-    expect(ship?.getAttribute('transform')).not.toContain('NaN');
+    expect(ship).not.toHaveAttribute('transform');
+    expect(glyphScaleX(ship!.querySelector('.vessel-glyph')!)).toBeGreaterThan(0);
     expect(ship?.querySelector('.vessel-glyph')).toHaveAttribute('data-family', 'tug');
     expect(compactText(callout?.querySelector('.vessel-tag') ?? null)).toBe('SARA');
     expect(compactText(callout?.querySelector('.vessel-type') ?? null)).toBe('Tug');
@@ -294,6 +320,45 @@ describe('RiverLine', () => {
     const copy = compactText(document.body);
     expect(copy).not.toMatch(/AIS type|Type not broadcast/i);
     expect(document.querySelector('.type-key')).toBeNull();
+  });
+
+  it('keeps side-profile boats upright and mirrors them along every schematic route', () => {
+    const branches = [
+      { id: 'river', sMeters: 1_200 },
+      { id: 'north_approach', sMeters: -1_500 },
+      { id: 'government_cut', sMeters: -2_300 },
+      { id: 'south_approach', sMeters: -1_200 }
+    ] as const;
+    const tracks = branches.flatMap(({ id, sMeters }, index) => [
+      vessel({
+        mmsi: `upriver-${index}`,
+        branch: id,
+        sMeters,
+        movement: id === 'river' ? 'diverging' : 'approaching'
+      }),
+      vessel({
+        mmsi: `downriver-${index}`,
+        branch: id,
+        sMeters,
+        movement: id === 'river' ? 'approaching' : 'diverging'
+      })
+    ]);
+
+    render(RiverLine, { corridor: CORRIDOR, vesselTracks: tracks, intervals: INTERVALS });
+
+    for (let index = 0; index < branches.length; index += 1) {
+      for (const direction of ['upriver', 'downriver'] as const) {
+        const mark = document.querySelector(`.vessel[data-mmsi='${direction}-${index}']`)!;
+        const ship = mark.querySelector('.vessel-ship')!;
+        const runway = mark.querySelector('.heading-runway')!;
+        const glyph = ship.querySelector('.vessel-glyph')!;
+
+        expect(ship).not.toHaveAttribute('transform');
+        expect(runway.getAttribute('transform')).toMatch(/^rotate\(-?[\d.]+\)$/);
+        expect(runway.getAttribute('transform')).not.toContain('NaN');
+        expect(glyphScaleX(glyph) < 0).toBe(direction === 'upriver');
+      }
+    }
   });
 
   it('uses a solid yacht silhouette and the neutral label Vessel for an unknown type', () => {

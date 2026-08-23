@@ -15,15 +15,16 @@
   import LocationMap from '$lib/components/LocationMap.svelte';
   import PinModal from '$lib/components/PinModal.svelte';
   import SwitchField from '$lib/components/SwitchField.svelte';
-  import { getDeviceLocation, getRadarLayer, searchLocations } from '$lib/api';
+  import VesselDetailPanel from '$lib/components/VesselDetailPanel.svelte';
+  import { getDeviceLocation, getRadarLayer, getVesselDetail, searchLocations } from '$lib/api';
   import { notice, persistPreferences, preferences, saving, snapshot } from '$lib/state';
-  import { formatSpeedKnots } from '$lib/units';
   import type {
     AlertArea,
     AppPreferences,
     LocationMapPoint,
     LocationSearchResult,
     RadarLayer,
+    VesselDetail,
     VesselTrack
   } from '$lib/types';
 
@@ -34,6 +35,10 @@
   let candidateEditingId = $state<string | null>(null);
   let selectedAreaId = $state<string | null>(null);
   let selectedVesselId = $state<string | null>(null);
+  let vesselDetail = $state<VesselDetail | null>(null);
+  let vesselDetailLoading = $state(false);
+  let vesselDetailError = $state<string | null>(null);
+  let vesselSelectionReturnFocus: HTMLElement | null = null;
   let radar = $state<RadarLayer | null>(null);
   let pinSaving = $state(false);
   let pinError = $state<string | null>(null);
@@ -88,6 +93,11 @@
     };
   });
   const vesselTracks = $derived<VesselTrack[]>($snapshot?.vesselTracks ?? []);
+  const selectedVessel = $derived(
+    selectedVesselId?.startsWith('vessel.')
+      ? vesselTracks.find((track) => `vessel.${track.mmsi}` === selectedVesselId) ?? null
+      : null
+  );
   const corridor = $derived($snapshot?.riverCorridor ?? null);
   const mapPoints = $derived<LocationMapPoint[]>([
     ...(draft?.areas.map((area) => ({
@@ -108,7 +118,7 @@
         label: track.vesselName ?? `Vessel ${track.mmsi}`,
         latitude: latest.latitude,
         longitude: latest.longitude,
-        detail: `${track.movement} · ${formatSpeedKnots(track.speedKnots, draft?.unitSystem ?? 'imperial')} · ${track.points.length} course points`,
+        detail: `${track.movement} · ${track.speedKnots.toFixed(1)} kn · ${track.points.length} course points`,
         kind: 'vessel' as const,
         enabled: true,
         courseDegrees: track.courseDegrees
@@ -175,9 +185,11 @@
     candidate = resultToArea(result, source);
     candidateEditingId = null;
     selectedAreaId = null;
+    selectedVesselId = null;
   }
 
   function stagePinnedLocation(latitude: number, longitude: number) {
+    selectedVesselId = null;
     if (candidate) {
       candidate.latitude = Number(latitude.toFixed(5));
       candidate.longitude = Number(longitude.toFixed(5));
@@ -202,7 +214,66 @@
     candidate = { ...$state.snapshot(area), id: `candidate.${area.id}` };
     candidateEditingId = area.id;
     selectedAreaId = null;
+    selectedVesselId = null;
   }
+
+  function selectVessel(mmsi: string) {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && !active.closest('.vessel-detail-slot')) {
+      vesselSelectionReturnFocus = active;
+    }
+    selectedVesselId = `vessel.${mmsi}`;
+    selectedAreaId = null;
+    candidate = null;
+    candidateEditingId = null;
+  }
+
+  function closeVesselDetails() {
+    selectedVesselId = null;
+    const returnFocus = vesselSelectionReturnFocus;
+    vesselSelectionReturnFocus = null;
+    queueMicrotask(() => {
+      if (returnFocus?.isConnected) returnFocus.focus();
+    });
+  }
+
+  let vesselDetailRequest = 0;
+  let requestedVesselMmsi = '';
+
+  async function loadSelectedVesselDetail(mmsi: string) {
+    const request = ++vesselDetailRequest;
+    vesselDetail = null;
+    vesselDetailError = null;
+    vesselDetailLoading = true;
+    try {
+      const next = await getVesselDetail(mmsi);
+      if (request === vesselDetailRequest) vesselDetail = next;
+    } catch {
+      if (request === vesselDetailRequest) {
+        vesselDetailError = 'Brickell passage history is unavailable.';
+      }
+    } finally {
+      if (request === vesselDetailRequest) vesselDetailLoading = false;
+    }
+  }
+
+  $effect(() => {
+    const mmsi = selectedVessel?.mmsi;
+    if (!mmsi) {
+      requestedVesselMmsi = '';
+      vesselDetailRequest += 1;
+      vesselDetail = null;
+      vesselDetailError = null;
+      vesselDetailLoading = false;
+      return;
+    }
+    // The live snapshot refreshes every cycle. A new `VesselTrack` object for
+    // the same selected hull should update its current reading without making
+    // the slower passage-history section flash back to Loading every time.
+    if (mmsi === requestedVesselMmsi) return;
+    requestedVesselMmsi = mmsi;
+    void loadSelectedVesselDetail(mmsi);
+  });
 
   function discardCandidate() {
     candidate = null;
@@ -289,7 +360,7 @@
     }
     if (selectedAreaId === area.id) selectedAreaId = draft.areas[0]?.id ?? null;
     draft.profile.preset = 'custom';
-    notice.set({ ok: true, message: `${area.label} removed from the draft. Save to apply; reload to undo.` });
+    notice.set({ ok: true, message: `${area.label} removed. Changes save automatically.` });
   }
 
   async function save() {
@@ -334,15 +405,15 @@
 
 <svelte:head>
   <title>Map · BrickellStatus</title>
-  <meta name="description" content="Inspect saved coverage, the bridge target, and live AIS vessel courses on one map." />
+  <meta name="description" content="See saved places, Brickell Avenue Bridge, and recent vessel positions on one map." />
 </svelte:head>
 
 <section class="page-sheet map-page">
   <header class="page-heading-row">
     <div>
       <a class="back-link" href="/channels"><ArrowLeft size={16} aria-hidden="true" /> Back to channels</a>
-      <h1 class="sheet-heading">Place what you watch</h1>
-      <p class="sheet-intro">Saved coverage, the Brickell target, and the last hour of vessel courses.</p>
+      <h1 class="sheet-heading">Map</h1>
+      <p class="sheet-intro">Saved places, Brickell Avenue Bridge, and vessel positions from the last hour.</p>
     </div>
     <!-- Says what is true right now, and asks for nothing. It is a status
          line, not a banner: nothing to dismiss and nothing to press. -->
@@ -373,8 +444,7 @@
         onselect={(point) => {
           if (point.id === candidate?.id) return;
           if (point.kind === 'vessel') {
-            selectedVesselId = point.id;
-            selectedAreaId = null;
+            selectVessel(point.id.slice('vessel.'.length));
           } else {
             selectedAreaId = point.id;
             selectedVesselId = null;
@@ -384,13 +454,27 @@
         }}
         onpick={stagePinnedLocation}
       />
+
+      {#if selectedVessel}
+        <div class="vessel-detail-slot">
+          <VesselDetailPanel
+            track={selectedVessel}
+            detail={vesselDetail}
+            loading={vesselDetailLoading}
+            error={vesselDetailError}
+            localTimeZone={$snapshot?.localTimeZone}
+            onclose={closeVesselDetails}
+            onretry={() => void loadSelectedVesselDetail(selectedVessel.mmsi)}
+          />
+        </div>
+      {/if}
     </div>
 
     <section class="ais-map-register" aria-labelledby="ais-map-heading">
       <header>
         <div>
-          <p class="registration-label">AISStream course history</p>
-          <h2 id="ais-map-heading">Vessels received in the last hour</h2>
+          <p class="registration-label">Vessel history</p>
+          <h2 id="ais-map-heading">Vessels seen in the last hour</h2>
         </div>
         <strong>{vesselTracks.length.toString().padStart(2, '0')}</strong>
       </header>
@@ -398,12 +482,11 @@
         <div class="vessel-ledger">
           {#each vesselTracks as track (track.mmsi)}
             <button class:selected={selectedVesselId === `vessel.${track.mmsi}`} onclick={() => {
-              selectedVesselId = `vessel.${track.mmsi}`;
-              selectedAreaId = null;
+              selectVessel(track.mmsi);
             }}>
               <span><strong>{track.vesselName ?? `Vessel ${track.mmsi}`}</strong><small>MMSI {track.mmsi}</small></span>
-              <span><strong>{track.movement}</strong><small>{track.routeIntersects ? 'Course intersects bridge approach' : 'No bridge-course intersection'}</small></span>
-              <span><strong>{formatSpeedKnots(track.speedKnots, draft.unitSystem)}</strong><small>{track.courseDegrees.toFixed(0)}° course · {track.points.length} points</small></span>
+              <span><strong>{track.movement}</strong><small>{track.routeIntersects ? 'Path crosses the Brickell approach' : 'Path does not cross the Brickell approach'}</small></span>
+              <span><strong>{track.speedKnots.toFixed(1)} kn</strong><small>{track.courseDegrees.toFixed(0)}° course · {track.points.length} points</small></span>
               <time datetime={track.observedAt}>{new Date(track.observedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
             </button>
           {/each}
@@ -419,12 +502,12 @@
     <section class="area-roster" aria-labelledby="roster-heading">
       <header class="roster-heading">
         <div>
-          <h2 id="roster-heading">Places you watch</h2>
-          <span>Click anywhere on the map to add one. Each place decides what gets collected for it.</span>
+          <h2 id="roster-heading">Saved places</h2>
+          <span>Click the map to add a place and choose which updates it receives.</span>
         </div>
         <button class="location-action" onclick={useDeviceLocation} disabled={locating}>
           <LocateFixed size={18} strokeWidth={1.5} aria-hidden="true" />
-          {locating ? 'Asking this computer' : 'Use where I am'}
+          {locating ? 'Getting location' : 'Use my location'}
         </button>
       </header>
 
@@ -486,7 +569,7 @@
                   </div>
                 </details>
                 <div class="row-actions">
-                  <button onclick={() => editOnMap(area)}><Move size={16} aria-hidden="true" /> Tune pin</button>
+                  <button onclick={() => editOnMap(area)}><Move size={16} aria-hidden="true" /> Move pin</button>
                   <button class="remove-action" onclick={() => removeArea(area)}><Trash2 size={16} aria-hidden="true" /> Remove</button>
                 </div>
               </footer>
@@ -496,8 +579,8 @@
       {:else}
         <div class="empty-roster">
           <MapPinned size={30} strokeWidth={1.35} aria-hidden="true" />
-          <h3>The atlas is clean</h3>
-          <p>Search, locate once, or click the map. Weather and point alerts remain explicitly unconfigured until an area is saved.</p>
+          <h3>No saved places</h3>
+          <p>Search for a place, use your current location, or click the map to add one.</p>
         </div>
       {/if}
     </section>
@@ -529,7 +612,9 @@
 
   .map-page .page-heading-row {
     margin-bottom: 18px;
-  }  .back-link {
+  }
+
+  .back-link {
     gap: 6px;
     margin-bottom: 18px;
     color: var(--channel);
@@ -545,12 +630,25 @@
     color: var(--graphite);
     text-decoration: underline;
     text-underline-offset: 4px;
-  }  .map-workbench {
+  }
+
+  .map-workbench {
+    position: relative;
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
     border-block: 1px solid var(--marine);
-  }  .location-action {
+  }
+
+  .vessel-detail-slot {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    z-index: 12;
+    width: min(470px, calc(100% - 32px));
+  }
+
+  .location-action {
     display: grid;
     width: 100%;
     grid-template-columns: auto 1fr;
@@ -562,7 +660,9 @@
     padding: 14px 4px;
     text-align: left;
     cursor: pointer;
-  }  .area-roster {
+  }
+
+  .area-roster {
     margin-top: clamp(28px, 3vw, 46px);
     border-top: 1px solid var(--rule-strong);
   }
@@ -840,6 +940,17 @@
   }
 
   @media (max-width: 680px) {
+    .vessel-detail-slot {
+      position: static;
+      width: auto;
+      margin: 12px 0 0;
+    }
+
+    .vessel-detail-slot :global(.vessel-detail) {
+      max-height: none;
+      box-shadow: none;
+    }
+
     .area-switches,
     .advanced-grid {
       grid-template-columns: 1fr;

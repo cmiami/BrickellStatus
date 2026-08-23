@@ -3,7 +3,7 @@
 //! The firmware speaks one line on the wire:
 //!
 //! ```text
-//! READY INK1 296x128 4736 9f3c2ab E290 26B4 FW2
+//! READY INK1 296x128 4736 9f3c2ab E290 26B4 FW4 BAT4012
 //! ```
 //!
 //! Geometry, payload size, exact source build, board identity, and an orderable
@@ -60,6 +60,14 @@ pub struct DeviceBanner {
     /// rather than a disagreement: the board is still usable, it just cannot be
     /// told apart from another one of the same model.
     pub board_id: Option<String>,
+    /// Measured battery voltage in millivolts, when current firmware reported
+    /// a plausible reading. No token, a malformed token, or an out-of-range
+    /// reading is unknown rather than zero.
+    pub battery_millivolts: Option<u16>,
+    /// Firmware's hysteretic low-voltage state. Present only alongside a valid
+    /// battery voltage, so legacy firmware and invalid measurements remain
+    /// unknown rather than silently becoming "battery okay."
+    pub low_battery: Option<bool>,
 }
 
 /// What the firmware stamps into its banner when it cannot name its own source
@@ -74,9 +82,10 @@ impl DeviceBanner {
             return Self::default();
         }
         let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-        // `READY INK1 <w>x<h> <payload> <build> <board> <id> FW<n> [MISMATCH]`. What the
-        // firmware can draw is read from the geometry rather than from the
-        // name, because the geometry is what every frame must match.
+        // `READY INK1 <w>x<h> <payload> <build> <board> <id> FW<n>
+        // [MISMATCH] [BAT<mV> [LOWBAT]]`. What the firmware can draw is read
+        // from the geometry rather than from the name, because the geometry is
+        // what every frame must match.
         let panel = tokens.get(2).and_then(|token| parse_dimensions(token));
         let build = tokens
             .get(4)
@@ -112,6 +121,7 @@ impl DeviceBanner {
             .and_then(|value| value.parse::<u32>().ok())
             .filter(|version| *version > 0);
         let version_malformed = version_token.is_some() && firmware_version.is_none();
+        let (battery_millivolts, low_battery) = parse_battery_telemetry(trimmed);
         Self {
             saw_ready: true,
             panel,
@@ -121,8 +131,36 @@ impl DeviceBanner {
             firmware_version,
             version_malformed,
             board_id,
+            battery_millivolts,
+            low_battery,
         }
     }
+}
+
+/// Battery tokens shared by READY banners and ACK receipts.
+///
+/// The range rejects the phantom low divider reading produced when no battery
+/// is attached, along with corrupt values. `LOWBAT` (READY) or `LOW` (compact
+/// ACK) without a valid voltage is not actionable and therefore remains
+/// unknown.
+pub(crate) fn parse_battery_telemetry(line: &str) -> (Option<u16>, Option<bool>) {
+    let tokens = line.split_whitespace().collect::<Vec<_>>();
+    let battery_millivolts = tokens
+        .iter()
+        .find(|token| {
+            token
+                .get(..3)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("BAT"))
+        })
+        .and_then(|token| token.get(3..))
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|millivolts| (2500..=5000).contains(millivolts));
+    let low_battery = battery_millivolts.map(|_| {
+        tokens
+            .iter()
+            .any(|token| token.eq_ignore_ascii_case("LOWBAT") || token.eq_ignore_ascii_case("LOW"))
+    });
+    (battery_millivolts, low_battery)
 }
 
 /// Stable suffix printed by current firmware: exactly two MAC octets.
@@ -155,11 +193,31 @@ mod tests {
     /// which is the whole of what the app needs to put that right.
     #[test]
     fn a_banner_names_the_individual_board() {
-        let banner = DeviceBanner::parse("READY INK1 296x128 4736 9f3c2ab E290 26B4 FW2");
+        let banner =
+            DeviceBanner::parse("READY INK1 296x128 4736 9f3c2ab E290 26B4 FW3 BAT3375 LOWBAT");
         assert_eq!(banner.board_id.as_deref(), Some("26B4"));
-        assert_eq!(banner.firmware_version, Some(2));
+        assert_eq!(banner.firmware_version, Some(3));
         assert!(!banner.version_malformed);
         assert!(!banner.mismatch);
+        assert_eq!(banner.battery_millivolts, Some(3375));
+        assert_eq!(banner.low_battery, Some(true));
+    }
+
+    #[test]
+    fn missing_or_invalid_battery_data_stays_unknown() {
+        let legacy = DeviceBanner::parse("READY INK1 250x122 3904 abc1234 E213 26B4 FW2");
+        assert_eq!(legacy.battery_millivolts, None);
+        assert_eq!(legacy.low_battery, None);
+
+        for line in [
+            "READY INK1 250x122 3904 abc1234 E213 26B4 FW3 BATnone LOWBAT",
+            "READY INK1 250x122 3904 abc1234 E213 26B4 FW3 BAT2204 LOWBAT",
+            "READY INK1 250x122 3904 abc1234 E213 26B4 FW3 LOWBAT",
+        ] {
+            let banner = DeviceBanner::parse(line);
+            assert_eq!(banner.battery_millivolts, None, "accepted {line:?}");
+            assert_eq!(banner.low_battery, None, "accepted {line:?}");
+        }
     }
 
     #[test]

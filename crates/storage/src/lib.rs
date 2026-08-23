@@ -18,6 +18,22 @@ use uuid::Uuid;
 const MINIMUM_SQLITE: (u64, u64, u64) = (3, 51, 3);
 const SCHEMA_SQL: &str = include_str!("../schema.sql");
 
+/// A successful FL511 reading more than two minutes after the previous one is
+/// a new observation run, not proof that the old state held through the gap.
+pub const BRIDGE_CONTINUITY_MAX_GAP_MS: i64 = 2 * 60 * 1_000;
+
+/// Raw fixes are durable at most once per hull per half-minute.
+pub const AIS_TRACK_FIX_MIN_SPACING_MS: i64 = 30 * 1_000;
+
+/// Default raw AIS history horizon. The caller still supplies an explicit
+/// cutoff to pruning, so installations can retain more or less, but a full
+/// year gives corridor calibration seasonal depth instead of a one-week
+/// glimpse. Fixes for a hull proven to open the bridge are never pruned.
+pub const DEFAULT_AIS_TRACK_RETENTION_MS: i64 = 365 * 24 * 60 * 60 * 1_000;
+
+/// Default horizon for minute-level forecast evaluation samples.
+pub const DEFAULT_FORECAST_RETENTION_MS: i64 = 2 * 365 * 24 * 60 * 60 * 1_000;
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("database error: {0}")]
@@ -113,6 +129,12 @@ pub struct BridgeStateInterval {
     pub state: String,
     pub started_at_ms: i64,
     pub ended_at_ms: Option<i64>,
+    /// Last successful source reading that explicitly confirmed `state`.
+    pub last_confirmed_at_ms: i64,
+    /// `state_change`, `session_start`, `continuity_gap`, or the initial/legacy
+    /// equivalent. Training can distinguish observation boundaries from real
+    /// bridge movement.
+    pub start_reason: String,
     /// Engine run that recorded the interval; NULL on rows written before
     /// sessions were tracked.
     pub session_id: Option<String>,
@@ -207,6 +229,22 @@ pub struct AisTrackFix<'a> {
     pub session_id: &'a str,
 }
 
+/// Static AIS identity observed for any hull in range, whether or not it has
+/// crossed Brickell yet.
+#[derive(Clone, Copy, Debug)]
+pub struct AisVesselObservation<'a> {
+    pub mmsi: &'a str,
+    pub name: Option<&'a str>,
+    pub vessel_class: Option<&'a str>,
+    pub call_sign: Option<&'a str>,
+    pub imo_number: Option<u32>,
+    pub destination: Option<&'a str>,
+    pub length_meters: Option<f64>,
+    pub beam_meters: Option<f64>,
+    pub draught_meters: Option<f64>,
+    pub observed_at_ms: i64,
+}
+
 /// One observed AIS bridge-line crossing, ready to become ledger history.
 #[derive(Clone, Copy, Debug)]
 pub struct AisCrossingObservation<'a> {
@@ -236,6 +274,7 @@ pub struct AisCrossingRecord {
     pub crossed_at_ms: i64,
     pub speed_knots: Option<f64>,
     pub outcome: Option<String>,
+    pub resolved_at_ms: Option<i64>,
 }
 
 /// A vessel's learned opening record.
@@ -244,8 +283,123 @@ pub struct AisLedgerEntry {
     pub mmsi: String,
     pub name: Option<String>,
     pub vessel_class: Option<String>,
+    pub call_sign: Option<String>,
+    pub imo_number: Option<i64>,
+    pub destination: Option<String>,
+    pub length_meters: Option<f64>,
+    pub beam_meters: Option<f64>,
+    pub draught_meters: Option<f64>,
     pub transits_opened: i64,
     pub transits_fits_under: i64,
+    pub transits_unknown: i64,
+    pub transits_pending: i64,
+    pub first_seen_ms: i64,
+    pub last_seen_ms: i64,
+    pub last_crossing_at_ms: Option<i64>,
+    pub last_opened_at_ms: Option<i64>,
+}
+
+/// One vessel's durable Brickell record, including its newest crossings.
+#[derive(Clone, Debug)]
+pub struct AisVesselHistory {
+    pub ledger: AisLedgerEntry,
+    pub recent_crossings: Vec<AisCrossingRecord>,
+}
+
+/// One versioned forecast evaluation retained for later accuracy analysis.
+#[derive(Clone, Copy, Debug)]
+pub struct ForecastSample<'a> {
+    pub target_key: &'a str,
+    pub evaluated_at_ms: i64,
+    pub model_version: &'a str,
+    pub state: &'a str,
+    pub predictive_score_bps: i64,
+    pub confidence_bps: i64,
+    pub eta_min_minutes: Option<i64>,
+    pub eta_max_minutes: Option<i64>,
+    pub schedule_mode: &'a str,
+    /// Compact JSON object mapping evidence labels to applied basis points.
+    pub contribution_bps_json: &'a str,
+    /// Compact JSON object carrying source age/availability at evaluation.
+    pub source_freshness_json: &'a str,
+    pub session_id: &'a str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, sqlx::FromRow)]
+pub struct ForecastSampleRecord {
+    pub target_key: String,
+    pub evaluated_at_ms: i64,
+    pub minute_bucket_ms: i64,
+    pub model_version: String,
+    pub state: String,
+    pub predictive_score_bps: i64,
+    pub confidence_bps: i64,
+    pub eta_min_minutes: Option<i64>,
+    pub eta_max_minutes: Option<i64>,
+    pub schedule_mode: String,
+    pub contribution_bps_json: String,
+    pub source_freshness_json: String,
+    pub session_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LegacyLearningImportReport {
+    pub vessels_added: u64,
+    pub transits_added: u64,
+    pub track_fixes_added: u64,
+    pub river_transits_added: u64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct LegacyVesselRow {
+    mmsi: String,
+    name: Option<String>,
+    vessel_class: Option<String>,
+    length_meters: Option<f64>,
+    draught_meters: Option<f64>,
+    first_seen_ms: i64,
+    last_seen_ms: i64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct LegacyTransitRow {
+    mmsi: String,
+    crossed_at_ms: i64,
+    direction: String,
+    speed_knots: Option<f64>,
+    outcome: Option<String>,
+    resolved_at_ms: Option<i64>,
+    session_id: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct LegacyTrackFixRow {
+    mmsi: String,
+    observed_at_ms: i64,
+    latitude: f64,
+    longitude: f64,
+    speed_knots: Option<f64>,
+    course_degrees: Option<f64>,
+    branch: Option<String>,
+    s_meters: Option<f64>,
+    offset_meters: Option<f64>,
+    posture: Option<String>,
+    session_id: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct LegacyRiverTransitRow {
+    source_id: String,
+    movement_key: String,
+    vessel: String,
+    action: String,
+    river_direction: Option<String>,
+    scheduled_at_ms: i64,
+    estimated_bridge_at_ms: Option<i64>,
+    estimated_offset_minutes: Option<i64>,
+    first_seen_at_ms: i64,
+    last_seen_at_ms: i64,
+    session_id: Option<String>,
 }
 
 impl StoreTransaction<'_> {
@@ -340,7 +494,13 @@ impl StoreTransaction<'_> {
                 course_degrees, branch, s_meters, offset_meters, posture,
                 session_id
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+            WHERE NOT EXISTS (
+                SELECT 1 FROM ais_track_fixes existing
+                WHERE existing.mmsi = ?1
+                  AND existing.observed_at_ms > ?2 - ?12
+                  AND existing.observed_at_ms < ?2 + ?12
+            )
             "#,
         )
         .bind(mmsi)
@@ -354,6 +514,65 @@ impl StoreTransaction<'_> {
         .bind(offset_meters)
         .bind(posture)
         .bind(session_id)
+        .bind(AIS_TRACK_FIX_MIN_SPACING_MS)
+        .execute(&mut *self.inner)
+        .await?;
+        Ok(())
+    }
+
+    /// Adds or refreshes one hull in the durable AIS catalog.
+    ///
+    /// Position reports usually arrive before static identity reports. A bare
+    /// update therefore never blanks a field learned earlier; a later static
+    /// packet fills it in, while destination follows the latest non-empty
+    /// broadcast because it describes the current voyage.
+    pub async fn record_ais_vessel_observation(
+        &mut self,
+        observation: AisVesselObservation<'_>,
+    ) -> Result<(), StorageError> {
+        let AisVesselObservation {
+            mmsi,
+            name,
+            vessel_class,
+            call_sign,
+            imo_number,
+            destination,
+            length_meters,
+            beam_meters,
+            draught_meters,
+            observed_at_ms,
+        } = observation;
+        sqlx::query(
+            r#"
+            INSERT INTO ais_vessel_ledger(
+                mmsi, name, vessel_class, call_sign, imo_number, destination,
+                length_meters, beam_meters, draught_meters,
+                first_seen_ms, last_seen_ms
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+            ON CONFLICT(mmsi) DO UPDATE SET
+                name = COALESCE(excluded.name, name),
+                vessel_class = COALESCE(excluded.vessel_class, vessel_class),
+                call_sign = COALESCE(excluded.call_sign, call_sign),
+                imo_number = COALESCE(excluded.imo_number, imo_number),
+                destination = COALESCE(excluded.destination, destination),
+                length_meters = COALESCE(excluded.length_meters, length_meters),
+                beam_meters = COALESCE(excluded.beam_meters, beam_meters),
+                draught_meters = COALESCE(excluded.draught_meters, draught_meters),
+                first_seen_ms = MIN(first_seen_ms, excluded.first_seen_ms),
+                last_seen_ms = MAX(last_seen_ms, excluded.last_seen_ms)
+            "#,
+        )
+        .bind(mmsi)
+        .bind(name)
+        .bind(vessel_class)
+        .bind(call_sign)
+        .bind(imo_number.map(i64::from))
+        .bind(destination)
+        .bind(length_meters)
+        .bind(beam_meters)
+        .bind(draught_meters)
+        .bind(observed_at_ms)
         .execute(&mut *self.inner)
         .await?;
         Ok(())
@@ -390,6 +609,7 @@ impl StoreTransaction<'_> {
                 vessel_class = COALESCE(excluded.vessel_class, vessel_class),
                 length_meters = COALESCE(excluded.length_meters, length_meters),
                 draught_meters = COALESCE(excluded.draught_meters, draught_meters),
+                first_seen_ms = MIN(first_seen_ms, excluded.first_seen_ms),
                 last_seen_ms = MAX(last_seen_ms, excluded.last_seen_ms)
             "#,
         )
@@ -419,7 +639,9 @@ impl StoreTransaction<'_> {
         Ok(())
     }
 
-    /// Extends the current interval or starts a new one when FL511 changes.
+    /// Extends a continuously confirmed interval, or starts a new one when
+    /// FL511 changes, the engine session changes, or observations resume after
+    /// a gap. The latter two boundaries are intentionally not smoothed over.
     pub async fn record_bridge_state(
         &mut self,
         observation: BridgeObservation<'_>,
@@ -436,7 +658,8 @@ impl StoreTransaction<'_> {
         let current = sqlx::query_as::<_, BridgeStateInterval>(
             r#"
             SELECT source_id, bridge_key, bridge_name, relation, state,
-                   started_at_ms, ended_at_ms, session_id
+                   started_at_ms, ended_at_ms, last_confirmed_at_ms,
+                   start_reason, session_id
             FROM bridge_state_intervals
             WHERE source_id = ?1 AND bridge_key = ?2 AND ended_at_ms IS NULL
             "#,
@@ -446,15 +669,55 @@ impl StoreTransaction<'_> {
         .fetch_optional(&mut *self.inner)
         .await?;
 
-        if current.as_ref().is_some_and(|interval| {
+        let same_identity_and_state = current.as_ref().is_some_and(|interval| {
             interval.state == state
                 && interval.bridge_name == bridge_name
                 && interval.relation == relation
-        }) {
+        });
+        let same_session = current
+            .as_ref()
+            .and_then(|interval| interval.session_id.as_deref())
+            == Some(session_id);
+        let within_continuity = current.as_ref().is_some_and(|interval| {
+            observed_at_ms >= interval.last_confirmed_at_ms
+                && observed_at_ms - interval.last_confirmed_at_ms <= BRIDGE_CONTINUITY_MAX_GAP_MS
+        });
+
+        if same_identity_and_state && same_session && within_continuity {
+            sqlx::query(
+                r#"
+                UPDATE bridge_state_intervals
+                SET last_confirmed_at_ms = MAX(last_confirmed_at_ms, ?3)
+                WHERE source_id = ?1 AND bridge_key = ?2 AND ended_at_ms IS NULL
+                "#,
+            )
+            .bind(source_id)
+            .bind(bridge_key)
+            .bind(observed_at_ms)
+            .execute(&mut *self.inner)
+            .await?;
             return Ok(());
         }
 
-        if current.is_some() {
+        let start_reason = match current.as_ref() {
+            None => "initial_observation",
+            Some(interval) if interval.session_id.as_deref() != Some(session_id) => "session_start",
+            Some(interval)
+                if observed_at_ms < interval.last_confirmed_at_ms
+                    || observed_at_ms - interval.last_confirmed_at_ms
+                        > BRIDGE_CONTINUITY_MAX_GAP_MS =>
+            {
+                "continuity_gap"
+            }
+            Some(_) => "state_change",
+        };
+
+        if let Some(interval) = current.as_ref() {
+            let ended_at_ms = if matches!(start_reason, "session_start" | "continuity_gap") {
+                interval.last_confirmed_at_ms
+            } else {
+                observed_at_ms
+            };
             sqlx::query(
                 r#"
                 UPDATE bridge_state_intervals
@@ -464,7 +727,7 @@ impl StoreTransaction<'_> {
             )
             .bind(source_id)
             .bind(bridge_key)
-            .bind(observed_at_ms)
+            .bind(ended_at_ms)
             .execute(&mut *self.inner)
             .await?;
         }
@@ -473,8 +736,8 @@ impl StoreTransaction<'_> {
             r#"
             INSERT INTO bridge_state_intervals(
                 source_id, bridge_key, bridge_name, relation, state, started_at_ms,
-                session_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                last_confirmed_at_ms, start_reason, session_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8)
             "#,
         )
         .bind(source_id)
@@ -483,6 +746,7 @@ impl StoreTransaction<'_> {
         .bind(relation)
         .bind(state)
         .bind(observed_at_ms)
+        .bind(start_reason)
         .bind(session_id)
         .execute(&mut *self.inner)
         .await?;
@@ -589,27 +853,537 @@ impl Store {
 
     async fn create_schema(&self) -> Result<(), StorageError> {
         sqlx::raw_sql(SCHEMA_SQL).execute(&self.pool).await?;
-        self.ensure_bridge_session_column().await?;
+        self.ensure_bridge_learning_columns().await?;
+        self.ensure_vessel_catalog_columns().await?;
+        self.ensure_forecast_minute_key().await?;
+        self.backfill_vessel_catalog_from_tracks().await?;
         Ok(())
     }
 
-    /// Adds `session_id` to a database created before the column existed.
+    /// Adds bridge observation-continuity fields to databases created by an
+    /// earlier release.
     ///
     /// `schema.sql` is applied with CREATE TABLE IF NOT EXISTS, so an existing
     /// table is left untouched by it and needs the column added explicitly.
     /// SQLite has no ADD COLUMN IF NOT EXISTS, hence the pragma check.
-    async fn ensure_bridge_session_column(&self) -> Result<(), StorageError> {
-        let present: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM pragma_table_info('bridge_state_intervals') WHERE name = 'session_id'",
-        )
-        .fetch_optional(&self.pool)
-        .await?;
-        if present.is_none() {
+    async fn ensure_bridge_learning_columns(&self) -> Result<(), StorageError> {
+        if !self
+            .table_has_column("bridge_state_intervals", "session_id")
+            .await?
+        {
             sqlx::query("ALTER TABLE bridge_state_intervals ADD COLUMN session_id TEXT")
                 .execute(&self.pool)
                 .await?;
         }
+        if !self
+            .table_has_column("bridge_state_intervals", "last_confirmed_at_ms")
+            .await?
+        {
+            // Zero is a crash-safe intermediate default. The unconditional
+            // backfill below immediately replaces it, and also repairs a
+            // migration interrupted between these two statements.
+            sqlx::query(
+                "ALTER TABLE bridge_state_intervals ADD COLUMN last_confirmed_at_ms INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+        sqlx::query(
+            r#"
+            UPDATE bridge_state_intervals
+            SET last_confirmed_at_ms = started_at_ms
+            WHERE last_confirmed_at_ms < started_at_ms
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        if !self
+            .table_has_column("bridge_state_intervals", "start_reason")
+            .await?
+        {
+            // Historical rows contain no durable last-success timestamp, so
+            // they are marked legacy and excluded from new coverage-based
+            // outcome resolution rather than assigned invented continuity.
+            sqlx::query(
+                "ALTER TABLE bridge_state_intervals ADD COLUMN start_reason TEXT NOT NULL DEFAULT 'legacy'",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
         Ok(())
+    }
+
+    /// Extends the durable hull catalog without rebuilding or discarding the
+    /// opening history already accumulated in an older database.
+    async fn ensure_vessel_catalog_columns(&self) -> Result<(), StorageError> {
+        for (name, statement) in [
+            (
+                "call_sign",
+                "ALTER TABLE ais_vessel_ledger ADD COLUMN call_sign TEXT",
+            ),
+            (
+                "imo_number",
+                "ALTER TABLE ais_vessel_ledger ADD COLUMN imo_number INTEGER",
+            ),
+            (
+                "destination",
+                "ALTER TABLE ais_vessel_ledger ADD COLUMN destination TEXT",
+            ),
+            (
+                "beam_meters",
+                "ALTER TABLE ais_vessel_ledger ADD COLUMN beam_meters REAL",
+            ),
+        ] {
+            if !self.table_has_column("ais_vessel_ledger", name).await? {
+                sqlx::query(statement).execute(&self.pool).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Early development builds keyed samples by exact evaluation time. Fold
+    /// any same-minute rows down to the latest write before enforcing the
+    /// shipped one-row-per-target-minute contract.
+    async fn ensure_forecast_minute_key(&self) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            DELETE FROM bridge_forecast_samples
+            WHERE rowid NOT IN (
+                SELECT MAX(rowid)
+                FROM bridge_forecast_samples
+                GROUP BY target_key, minute_bucket_ms
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            CREATE UNIQUE INDEX IF NOT EXISTS bridge_forecast_samples_minute
+            ON bridge_forecast_samples(target_key, minute_bucket_ms)
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Older builds retained raw fixes without cataloging hulls until they
+    /// crossed Brickell. Promote every MMSI already present in that history so
+    /// the richer catalog begins with the data the app has, not only vessels
+    /// that happen to be online after upgrade.
+    async fn backfill_vessel_catalog_from_tracks(&self) -> Result<(), StorageError> {
+        const MIGRATION_KEY: &str = "storage.ais_catalog_track_backfill.v1";
+        let complete =
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM settings WHERE key = ?1)")
+                .bind(MIGRATION_KEY)
+                .fetch_one(&self.pool)
+                .await?;
+        if complete {
+            return Ok(());
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            INSERT INTO ais_vessel_ledger(mmsi, first_seen_ms, last_seen_ms)
+            SELECT mmsi, MIN(observed_at_ms), MAX(observed_at_ms)
+            FROM ais_track_fixes
+            GROUP BY mmsi
+            ON CONFLICT(mmsi) DO UPDATE SET
+                first_seen_ms = MIN(first_seen_ms, excluded.first_seen_ms),
+                last_seen_ms = MAX(last_seen_ms, excluded.last_seen_ms)
+            "#,
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO settings(key, value_json, updated_at)
+            VALUES (?1, 'true', 'schema-migration')
+            "#,
+        )
+        .bind(MIGRATION_KEY)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn table_has_column(&self, table: &str, column: &str) -> Result<bool, StorageError> {
+        let columns = sqlx::query("SELECT name FROM pragma_table_info(?1)")
+            .bind(table)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(columns
+            .iter()
+            .any(|row| row.get::<String, _>("name") == column))
+    }
+
+    async fn database_has_table(pool: &SqlitePool, table: &str) -> Result<bool, StorageError> {
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        )
+        .bind(table)
+        .fetch_one(pool)
+        .await?)
+    }
+
+    /// Calculates the standard one-year AIS fix cutoff while leaving callers
+    /// free to supply a different retention policy to [`Store::prune_history`].
+    pub fn default_ais_track_cutoff_ms(now_ms: i64) -> i64 {
+        now_ms.saturating_sub(DEFAULT_AIS_TRACK_RETENTION_MS)
+    }
+
+    /// Calculates the standard two-year forecast-sample cutoff.
+    pub fn default_forecast_cutoff_ms(now_ms: i64) -> i64 {
+        now_ms.saturating_sub(DEFAULT_FORECAST_RETENTION_MS)
+    }
+
+    /// Merges the learning tables from the app's pre-rename database.
+    ///
+    /// The source is opened read-only and bridge intervals are deliberately
+    /// not copied: the old rows lack confirmation timestamps and cannot prove
+    /// continuous FL511 coverage. Catalog identity, crossing outcomes, raw AIS
+    /// fixes and booked movements are useful independent observations and are
+    /// merged idempotently. Ledger totals are then recomputed from the merged
+    /// crossing rows, avoiding double-counting schema seed vessels.
+    pub async fn import_legacy_learning(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<LegacyLearningImportReport, StorageError> {
+        let path = path.as_ref();
+        if !path.is_file() {
+            return Ok(LegacyLearningImportReport::default());
+        }
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .read_only(true)
+            .foreign_keys(false)
+            .busy_timeout(Duration::from_secs(5));
+        let legacy = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?;
+
+        let vessels = if Self::database_has_table(&legacy, "ais_vessel_ledger").await? {
+            sqlx::query_as::<_, LegacyVesselRow>(
+                r#"
+                SELECT mmsi, name, vessel_class, length_meters, draught_meters,
+                       first_seen_ms, last_seen_ms
+                FROM ais_vessel_ledger
+                "#,
+            )
+            .fetch_all(&legacy)
+            .await?
+        } else {
+            Vec::new()
+        };
+        let transits = if Self::database_has_table(&legacy, "ais_transits").await? {
+            sqlx::query_as::<_, LegacyTransitRow>(
+                r#"
+                SELECT mmsi, crossed_at_ms, direction, speed_knots, outcome,
+                       resolved_at_ms, session_id
+                FROM ais_transits
+                "#,
+            )
+            .fetch_all(&legacy)
+            .await?
+        } else {
+            Vec::new()
+        };
+        let track_fixes = if Self::database_has_table(&legacy, "ais_track_fixes").await? {
+            sqlx::query_as::<_, LegacyTrackFixRow>(
+                r#"
+                SELECT mmsi, observed_at_ms, latitude, longitude, speed_knots,
+                       course_degrees, branch, s_meters, offset_meters, posture,
+                       session_id
+                FROM ais_track_fixes
+                "#,
+            )
+            .fetch_all(&legacy)
+            .await?
+        } else {
+            Vec::new()
+        };
+        let river_transits = if Self::database_has_table(&legacy, "river_transits").await? {
+            sqlx::query_as::<_, LegacyRiverTransitRow>(
+                r#"
+                SELECT source_id, movement_key, vessel, action, river_direction,
+                       scheduled_at_ms, estimated_bridge_at_ms,
+                       estimated_offset_minutes, first_seen_at_ms,
+                       last_seen_at_ms, session_id
+                FROM river_transits
+                "#,
+            )
+            .fetch_all(&legacy)
+            .await?
+        } else {
+            Vec::new()
+        };
+        legacy.close().await;
+
+        let mut report = LegacyLearningImportReport::default();
+        let mut transaction = self.pool.begin().await?;
+        for vessel in vessels {
+            report.vessels_added = report.vessels_added.saturating_add(
+                sqlx::query(
+                    r#"
+                    INSERT OR IGNORE INTO ais_vessel_ledger(
+                        mmsi, name, vessel_class, length_meters, draught_meters,
+                        first_seen_ms, last_seen_ms
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    "#,
+                )
+                .bind(&vessel.mmsi)
+                .bind(&vessel.name)
+                .bind(&vessel.vessel_class)
+                .bind(vessel.length_meters)
+                .bind(vessel.draught_meters)
+                .bind(vessel.first_seen_ms)
+                .bind(vessel.last_seen_ms)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+            );
+            sqlx::query(
+                r#"
+                UPDATE ais_vessel_ledger
+                SET name = COALESCE(name, ?2),
+                    vessel_class = COALESCE(vessel_class, ?3),
+                    length_meters = COALESCE(length_meters, ?4),
+                    draught_meters = COALESCE(draught_meters, ?5),
+                    first_seen_ms = MIN(first_seen_ms, ?6),
+                    last_seen_ms = MAX(last_seen_ms, ?7)
+                WHERE mmsi = ?1
+                "#,
+            )
+            .bind(&vessel.mmsi)
+            .bind(&vessel.name)
+            .bind(&vessel.vessel_class)
+            .bind(vessel.length_meters)
+            .bind(vessel.draught_meters)
+            .bind(vessel.first_seen_ms)
+            .bind(vessel.last_seen_ms)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        for transit in transits {
+            // A crossing can exist in a very old database without a catalog
+            // row. Retain it under its stable MMSI rather than dropping it.
+            report.vessels_added = report.vessels_added.saturating_add(
+                sqlx::query(
+                    r#"
+                    INSERT OR IGNORE INTO ais_vessel_ledger(
+                        mmsi, first_seen_ms, last_seen_ms
+                    ) VALUES (?1, ?2, ?2)
+                    "#,
+                )
+                .bind(&transit.mmsi)
+                .bind(transit.crossed_at_ms)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+            );
+            report.transits_added = report.transits_added.saturating_add(
+                sqlx::query(
+                    r#"
+                    INSERT OR IGNORE INTO ais_transits(
+                        mmsi, crossed_at_ms, direction, speed_knots, outcome,
+                        resolved_at_ms, session_id
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    "#,
+                )
+                .bind(&transit.mmsi)
+                .bind(transit.crossed_at_ms)
+                .bind(&transit.direction)
+                .bind(transit.speed_knots)
+                .bind(&transit.outcome)
+                .bind(transit.resolved_at_ms)
+                .bind(&transit.session_id)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+            );
+            sqlx::query(
+                r#"
+                UPDATE ais_transits
+                SET speed_knots = COALESCE(speed_knots, ?3),
+                    outcome = CASE
+                        WHEN outcome IS NULL OR outcome = 'unknown'
+                        THEN COALESCE(?4, outcome)
+                        ELSE outcome
+                    END,
+                    resolved_at_ms = COALESCE(resolved_at_ms, ?5),
+                    session_id = COALESCE(session_id, ?6)
+                WHERE mmsi = ?1 AND crossed_at_ms = ?2
+                "#,
+            )
+            .bind(&transit.mmsi)
+            .bind(transit.crossed_at_ms)
+            .bind(transit.speed_knots)
+            .bind(&transit.outcome)
+            .bind(transit.resolved_at_ms)
+            .bind(&transit.session_id)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                r#"
+                UPDATE ais_vessel_ledger
+                SET first_seen_ms = MIN(first_seen_ms, ?2),
+                    last_seen_ms = MAX(last_seen_ms, ?2)
+                WHERE mmsi = ?1
+                "#,
+            )
+            .bind(&transit.mmsi)
+            .bind(transit.crossed_at_ms)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        for fix in track_fixes {
+            report.vessels_added = report.vessels_added.saturating_add(
+                sqlx::query(
+                    r#"
+                    INSERT OR IGNORE INTO ais_vessel_ledger(
+                        mmsi, first_seen_ms, last_seen_ms
+                    ) VALUES (?1, ?2, ?2)
+                    "#,
+                )
+                .bind(&fix.mmsi)
+                .bind(fix.observed_at_ms)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+            );
+            sqlx::query(
+                r#"
+                UPDATE ais_vessel_ledger
+                SET first_seen_ms = MIN(first_seen_ms, ?2),
+                    last_seen_ms = MAX(last_seen_ms, ?2)
+                WHERE mmsi = ?1
+                "#,
+            )
+            .bind(&fix.mmsi)
+            .bind(fix.observed_at_ms)
+            .execute(&mut *transaction)
+            .await?;
+            report.track_fixes_added = report.track_fixes_added.saturating_add(
+                sqlx::query(
+                    r#"
+                    INSERT OR IGNORE INTO ais_track_fixes(
+                        mmsi, observed_at_ms, latitude, longitude, speed_knots,
+                        course_degrees, branch, s_meters, offset_meters, posture,
+                        session_id
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                    "#,
+                )
+                .bind(&fix.mmsi)
+                .bind(fix.observed_at_ms)
+                .bind(fix.latitude)
+                .bind(fix.longitude)
+                .bind(fix.speed_knots)
+                .bind(fix.course_degrees)
+                .bind(&fix.branch)
+                .bind(fix.s_meters)
+                .bind(fix.offset_meters)
+                .bind(&fix.posture)
+                .bind(&fix.session_id)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+            );
+        }
+
+        for movement in river_transits {
+            report.river_transits_added = report.river_transits_added.saturating_add(
+                sqlx::query(
+                    r#"
+                    INSERT OR IGNORE INTO river_transits(
+                        source_id, movement_key, vessel, action, river_direction,
+                        scheduled_at_ms, estimated_bridge_at_ms,
+                        estimated_offset_minutes, first_seen_at_ms,
+                        last_seen_at_ms, session_id
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                    "#,
+                )
+                .bind(&movement.source_id)
+                .bind(&movement.movement_key)
+                .bind(&movement.vessel)
+                .bind(&movement.action)
+                .bind(&movement.river_direction)
+                .bind(movement.scheduled_at_ms)
+                .bind(movement.estimated_bridge_at_ms)
+                .bind(movement.estimated_offset_minutes)
+                .bind(movement.first_seen_at_ms)
+                .bind(movement.last_seen_at_ms)
+                .bind(&movement.session_id)
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected(),
+            );
+            sqlx::query(
+                r#"
+                UPDATE river_transits
+                SET vessel = CASE WHEN ?10 >= last_seen_at_ms THEN ?3 ELSE vessel END,
+                    action = CASE WHEN ?10 >= last_seen_at_ms THEN ?4 ELSE action END,
+                    river_direction = CASE
+                        WHEN ?10 >= last_seen_at_ms THEN COALESCE(?5, river_direction)
+                        ELSE river_direction
+                    END,
+                    scheduled_at_ms = CASE
+                        WHEN ?10 >= last_seen_at_ms THEN ?6 ELSE scheduled_at_ms
+                    END,
+                    estimated_bridge_at_ms = CASE
+                        WHEN ?10 >= last_seen_at_ms
+                        THEN COALESCE(?7, estimated_bridge_at_ms)
+                        ELSE estimated_bridge_at_ms
+                    END,
+                    estimated_offset_minutes = CASE
+                        WHEN ?10 >= last_seen_at_ms
+                        THEN COALESCE(?8, estimated_offset_minutes)
+                        ELSE estimated_offset_minutes
+                    END,
+                    first_seen_at_ms = MIN(first_seen_at_ms, ?9),
+                    last_seen_at_ms = MAX(last_seen_at_ms, ?10),
+                    session_id = COALESCE(session_id, ?11)
+                WHERE source_id = ?1 AND movement_key = ?2
+                "#,
+            )
+            .bind(&movement.source_id)
+            .bind(&movement.movement_key)
+            .bind(&movement.vessel)
+            .bind(&movement.action)
+            .bind(&movement.river_direction)
+            .bind(movement.scheduled_at_ms)
+            .bind(movement.estimated_bridge_at_ms)
+            .bind(movement.estimated_offset_minutes)
+            .bind(movement.first_seen_at_ms)
+            .bind(movement.last_seen_at_ms)
+            .bind(&movement.session_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE ais_vessel_ledger
+            SET transits_opened = (
+                    SELECT COUNT(*) FROM ais_transits transit
+                    WHERE transit.mmsi = ais_vessel_ledger.mmsi
+                      AND transit.outcome = 'opened'
+                ),
+                transits_fits_under = (
+                    SELECT COUNT(*) FROM ais_transits transit
+                    WHERE transit.mmsi = ais_vessel_ledger.mmsi
+                      AND transit.outcome = 'fits_under'
+                )
+            "#,
+        )
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(report)
     }
 
     pub async fn set_json<T: Serialize>(
@@ -645,7 +1419,8 @@ impl Store {
         Ok(sqlx::query_as::<_, BridgeStateInterval>(
             r#"
             SELECT source_id, bridge_key, bridge_name, relation, state,
-                   started_at_ms, ended_at_ms, session_id
+                   started_at_ms, ended_at_ms, last_confirmed_at_ms,
+                   start_reason, session_id
             FROM bridge_state_intervals
             WHERE source_id = ?1 AND bridge_key = ?2
             ORDER BY started_at_ms
@@ -666,7 +1441,8 @@ impl Store {
         Ok(sqlx::query_as::<_, BridgeStateInterval>(
             r#"
             SELECT source_id, bridge_key, bridge_name, relation, state,
-                   started_at_ms, ended_at_ms, session_id
+                   started_at_ms, ended_at_ms, last_confirmed_at_ms,
+                   start_reason, session_id
             FROM bridge_state_intervals
             ORDER BY started_at_ms DESC
             LIMIT ?1
@@ -680,14 +1456,20 @@ impl Store {
     /// Judges pending bridge-line crossings against the recorded target
     /// intervals and folds settled outcomes into the vessel ledger.
     ///
-    /// A crossing inside a recorded `up` interval means the span was raised
-    /// for (or around) the passage; a crossing with the span verifiably down
-    /// for a minute before through two minutes after is a fits-under. A
-    /// crossing that still matches neither after 45 minutes falls into an
-    /// FL511 gap and is closed as `unknown`, which never trains the ledger.
+    /// An `up` interval must have begun no more than fifteen minutes before the
+    /// crossing and be explicitly confirmed through thirty seconds after it.
+    /// That conservative lead window prevents a long-running unrelated opening
+    /// from teaching the catalog that every later hull required the bridge. A
+    /// `down` interval must be confirmed from a minute before through two
+    /// minutes after. An open-ended row is never extended to `now` by
+    /// assumption. A crossing that still matches neither after 45 minutes falls
+    /// into an FL511 gap and is closed as `unknown`, which never trains the
+    /// ledger.
     pub async fn resolve_ais_transits(&self, now_ms: i64) -> Result<u64, StorageError> {
         const SETTLE_MS: i64 = 3 * 60 * 1_000;
         const GIVE_UP_MS: i64 = 45 * 60 * 1_000;
+        const OPEN_CONFIRM_AFTER_MS: i64 = 30 * 1_000;
+        const OPEN_MAX_LEAD_MS: i64 = 15 * 60 * 1_000;
         let mut transaction = self.pool.begin().await?;
         let mut resolved = 0_u64;
 
@@ -699,14 +1481,21 @@ impl Store {
               AND EXISTS (
                 SELECT 1 FROM bridge_state_intervals b
                 WHERE b.relation = 'target' AND b.state = 'up'
+                  AND b.session_id IS NOT NULL
+                  AND b.start_reason != 'legacy'
                   AND b.started_at_ms <= ais_transits.crossed_at_ms
-                  AND COALESCE(b.ended_at_ms, ?2) >= ais_transits.crossed_at_ms
+                  AND b.started_at_ms >= ais_transits.crossed_at_ms - ?4
+                  AND b.last_confirmed_at_ms >= ais_transits.crossed_at_ms + ?3
+                  AND (b.ended_at_ms IS NULL
+                       OR b.ended_at_ms >= ais_transits.crossed_at_ms + ?3)
               )
             RETURNING mmsi
             "#,
         )
         .bind(SETTLE_MS)
         .bind(now_ms)
+        .bind(OPEN_CONFIRM_AFTER_MS)
+        .bind(OPEN_MAX_LEAD_MS)
         .fetch_all(&mut *transaction)
         .await?;
         for (mmsi,) in opened {
@@ -727,8 +1516,12 @@ impl Store {
               AND EXISTS (
                 SELECT 1 FROM bridge_state_intervals b
                 WHERE b.relation = 'target' AND b.state = 'down'
+                  AND b.session_id IS NOT NULL
+                  AND b.start_reason != 'legacy'
                   AND b.started_at_ms <= ais_transits.crossed_at_ms - 60000
-                  AND COALESCE(b.ended_at_ms, ?2) >= ais_transits.crossed_at_ms + 120000
+                  AND b.last_confirmed_at_ms >= ais_transits.crossed_at_ms + 120000
+                  AND (b.ended_at_ms IS NULL
+                       OR b.ended_at_ms >= ais_transits.crossed_at_ms + 120000)
               )
             RETURNING mmsi
             "#,
@@ -761,19 +1554,130 @@ impl Store {
         Ok(resolved)
     }
 
-    /// The learned per-vessel opening record, most recently seen first.
+    /// The durable vessel catalog. Hulls with a learned crossing outcome come
+    /// first so a bounded predictor read cannot evict known openers behind a
+    /// busy day of newly seen bay traffic; each group is most-recent first.
     pub async fn list_ais_ledger(&self, limit: u32) -> Result<Vec<AisLedgerEntry>, StorageError> {
         Ok(sqlx::query_as::<_, AisLedgerEntry>(
             r#"
-            SELECT mmsi, name, vessel_class, transits_opened, transits_fits_under
-            FROM ais_vessel_ledger
-            ORDER BY last_seen_ms DESC
+            SELECT
+                l.mmsi,
+                l.name,
+                l.vessel_class,
+                l.call_sign,
+                l.imo_number,
+                l.destination,
+                l.length_meters,
+                l.beam_meters,
+                l.draught_meters,
+                l.transits_opened,
+                l.transits_fits_under,
+                COALESCE(t.transits_unknown, 0) AS transits_unknown,
+                COALESCE(t.transits_pending, 0) AS transits_pending,
+                l.first_seen_ms,
+                l.last_seen_ms,
+                t.last_crossing_at_ms,
+                t.last_opened_at_ms
+            FROM ais_vessel_ledger l
+            LEFT JOIN (
+                SELECT
+                    mmsi,
+                    SUM(CASE WHEN outcome = 'unknown' THEN 1 ELSE 0 END) AS transits_unknown,
+                    SUM(CASE WHEN outcome IS NULL THEN 1 ELSE 0 END) AS transits_pending,
+                    MAX(crossed_at_ms) AS last_crossing_at_ms,
+                    MAX(CASE WHEN outcome = 'opened' THEN crossed_at_ms END) AS last_opened_at_ms
+                FROM ais_transits
+                GROUP BY mmsi
+            ) t ON t.mmsi = l.mmsi
+            ORDER BY (l.transits_opened + l.transits_fits_under > 0) DESC,
+                     l.last_seen_ms DESC
             LIMIT ?1
             "#,
         )
         .bind(i64::from(limit.clamp(1, 2_000)))
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    /// One hull's durable identity and Brickell crossing history.
+    ///
+    /// This is deliberately separate from the broad one-hour map snapshot:
+    /// selecting a vessel reads the already-recorded ledger and does not alter
+    /// AIS collection, retention, or which live tracks are published.
+    pub async fn get_ais_vessel_history(
+        &self,
+        mmsi: &str,
+        recent_limit: u32,
+    ) -> Result<Option<AisVesselHistory>, StorageError> {
+        let ledger = sqlx::query_as::<_, AisLedgerEntry>(
+            r#"
+            SELECT
+                l.mmsi,
+                l.name,
+                l.vessel_class,
+                l.call_sign,
+                l.imo_number,
+                l.destination,
+                l.length_meters,
+                l.beam_meters,
+                l.draught_meters,
+                l.transits_opened,
+                l.transits_fits_under,
+                COALESCE(t.transits_unknown, 0) AS transits_unknown,
+                COALESCE(t.transits_pending, 0) AS transits_pending,
+                l.first_seen_ms,
+                l.last_seen_ms,
+                t.last_crossing_at_ms,
+                t.last_opened_at_ms
+            FROM ais_vessel_ledger l
+            LEFT JOIN (
+                SELECT
+                    mmsi,
+                    SUM(CASE WHEN outcome = 'unknown' THEN 1 ELSE 0 END) AS transits_unknown,
+                    SUM(CASE WHEN outcome IS NULL THEN 1 ELSE 0 END) AS transits_pending,
+                    MAX(crossed_at_ms) AS last_crossing_at_ms,
+                    MAX(CASE WHEN outcome = 'opened' THEN crossed_at_ms END) AS last_opened_at_ms
+                FROM ais_transits
+                WHERE mmsi = ?1
+                GROUP BY mmsi
+            ) t ON t.mmsi = l.mmsi
+            WHERE l.mmsi = ?1
+            "#,
+        )
+        .bind(mmsi)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(ledger) = ledger else {
+            return Ok(None);
+        };
+
+        let recent_crossings = sqlx::query_as::<_, AisCrossingRecord>(
+            r#"
+            SELECT
+                t.mmsi          AS mmsi,
+                l.name          AS name,
+                l.vessel_class  AS vessel_class,
+                t.direction     AS direction,
+                t.crossed_at_ms AS crossed_at_ms,
+                t.speed_knots   AS speed_knots,
+                t.outcome       AS outcome,
+                t.resolved_at_ms AS resolved_at_ms
+            FROM ais_transits t
+            LEFT JOIN ais_vessel_ledger l ON l.mmsi = t.mmsi
+            WHERE t.mmsi = ?1
+            ORDER BY t.crossed_at_ms DESC
+            LIMIT ?2
+            "#,
+        )
+        .bind(mmsi)
+        .bind(i64::from(recent_limit.clamp(1, 100)))
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(Some(AisVesselHistory {
+            ledger,
+            recent_crossings,
+        }))
     }
 
     /// Recent bridge-line crossings, newest first, with vessel identity.
@@ -794,7 +1698,8 @@ impl Store {
                 t.direction     AS direction,
                 t.crossed_at_ms AS crossed_at_ms,
                 t.speed_knots   AS speed_knots,
-                t.outcome       AS outcome
+                t.outcome       AS outcome,
+                t.resolved_at_ms AS resolved_at_ms
             FROM ais_transits t
             LEFT JOIN ais_vessel_ledger l ON l.mmsi = t.mmsi
             ORDER BY t.crossed_at_ms DESC
@@ -804,6 +1709,109 @@ impl Store {
         .bind(i64::from(limit.clamp(1, 500)))
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    /// Persists one compact, versioned forecast evaluation.
+    ///
+    /// Repeating the exact evaluation instant is idempotent. The runtime owns
+    /// the cadence (normally one periodic sample per minute plus a material
+    /// state change), while the stored minute bucket makes later grouping
+    /// cheap and unambiguous.
+    pub async fn record_forecast_sample(
+        &self,
+        sample: ForecastSample<'_>,
+    ) -> Result<(), StorageError> {
+        let ForecastSample {
+            target_key,
+            evaluated_at_ms,
+            model_version,
+            state,
+            predictive_score_bps,
+            confidence_bps,
+            eta_min_minutes,
+            eta_max_minutes,
+            schedule_mode,
+            contribution_bps_json,
+            source_freshness_json,
+            session_id,
+        } = sample;
+        let minute_bucket_ms = evaluated_at_ms - evaluated_at_ms.rem_euclid(60_000);
+        sqlx::query(
+            r#"
+            INSERT INTO bridge_forecast_samples(
+                target_key, evaluated_at_ms, minute_bucket_ms, model_version,
+                state, predictive_score_bps, confidence_bps, eta_min_minutes,
+                eta_max_minutes, schedule_mode, contribution_bps_json,
+                source_freshness_json, session_id
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ON CONFLICT(target_key, minute_bucket_ms) DO UPDATE SET
+                evaluated_at_ms = excluded.evaluated_at_ms,
+                model_version = excluded.model_version,
+                state = excluded.state,
+                predictive_score_bps = excluded.predictive_score_bps,
+                confidence_bps = excluded.confidence_bps,
+                eta_min_minutes = excluded.eta_min_minutes,
+                eta_max_minutes = excluded.eta_max_minutes,
+                schedule_mode = excluded.schedule_mode,
+                contribution_bps_json = excluded.contribution_bps_json,
+                source_freshness_json = excluded.source_freshness_json,
+                session_id = excluded.session_id
+            "#,
+        )
+        .bind(target_key)
+        .bind(evaluated_at_ms)
+        .bind(minute_bucket_ms)
+        .bind(model_version)
+        .bind(state)
+        .bind(predictive_score_bps)
+        .bind(confidence_bps)
+        .bind(eta_min_minutes)
+        .bind(eta_max_minutes)
+        .bind(schedule_mode)
+        .bind(contribution_bps_json)
+        .bind(source_freshness_json)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Forecast evaluations since a cutoff, oldest first, for calibration.
+    pub async fn forecast_samples_since(
+        &self,
+        target_key: &str,
+        since_ms: i64,
+        limit: u32,
+    ) -> Result<Vec<ForecastSampleRecord>, StorageError> {
+        Ok(sqlx::query_as::<_, ForecastSampleRecord>(
+            r#"
+            SELECT target_key, evaluated_at_ms, minute_bucket_ms, model_version,
+                   state, predictive_score_bps, confidence_bps,
+                   eta_min_minutes, eta_max_minutes, schedule_mode,
+                   contribution_bps_json, source_freshness_json, session_id
+            FROM bridge_forecast_samples
+            WHERE target_key = ?1 AND evaluated_at_ms >= ?2
+            ORDER BY evaluated_at_ms
+            LIMIT ?3
+            "#,
+        )
+        .bind(target_key)
+        .bind(since_ms)
+        .bind(i64::from(limit.clamp(1, 100_000)))
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Bounds forecast history independently from delivery and raw AIS data.
+    pub async fn prune_forecast_samples(&self, before_ms: i64) -> Result<u64, StorageError> {
+        Ok(
+            sqlx::query("DELETE FROM bridge_forecast_samples WHERE evaluated_at_ms < ?1")
+                .bind(before_ms)
+                .execute(&self.pool)
+                .await?
+                .rows_affected(),
+        )
     }
 
     /// Persists an incident and its immutable material revision atomically.
@@ -1301,11 +2309,21 @@ impl Store {
         .execute(&mut *transaction)
         .await?
         .rows_affected();
-        let track_fixes = sqlx::query("DELETE FROM ais_track_fixes WHERE observed_at_ms < ?1")
-            .bind(track_cutoff_ms)
-            .execute(&mut *transaction)
-            .await?
-            .rows_affected();
+        let track_fixes = sqlx::query(
+            r#"
+            DELETE FROM ais_track_fixes
+            WHERE observed_at_ms < ?1
+              AND NOT EXISTS (
+                    SELECT 1 FROM ais_vessel_ledger vessel
+                    WHERE vessel.mmsi = ais_track_fixes.mmsi
+                      AND vessel.transits_opened > 0
+                  )
+            "#,
+        )
+        .bind(track_cutoff_ms)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
         transaction.commit().await?;
         Ok(PruneReport {
             scrubbed_destinations,
@@ -1523,12 +2541,15 @@ mod tests {
         let store = Store::in_memory().await.unwrap();
         let base = 1_800_000_000_000_i64;
 
-        // The target span: down, then a ten-minute opening, then down again.
+        // The target span: confirmed down, confirmed up, then down again.
         let mut transaction = store.begin_transaction().await.unwrap();
         for (state, at) in [
             ("down", base),
-            ("up", base + 600_000),
-            ("down", base + 1_200_000),
+            ("down", base + 120_000),
+            ("down", base + 180_000),
+            ("up", base + 240_000),
+            ("up", base + 300_000),
+            ("down", base + 360_000),
         ] {
             transaction
                 .record_bridge_state(BridgeObservation {
@@ -1547,9 +2568,9 @@ mod tests {
         // interval, one too fresh to settle, and one from before the record
         // began — a genuine gap.
         for (mmsi, crossed_at) in [
-            ("111000111", base + 900_000),
-            ("222000222", base + 240_000),
-            ("333000333", base + 1_500_000),
+            ("111000111", base + 270_000),
+            ("222000222", base + 60_000),
+            ("333000333", base + 420_000),
             ("444000444", base - 300_000),
         ] {
             transaction
@@ -1570,8 +2591,9 @@ mod tests {
         transaction.commit().await.unwrap();
 
         // Resolve shortly after the second crossing settles; the third is too
-        // recent and the still-open final down interval covers the second.
-        let resolved = store.resolve_ais_transits(base + 1_320_000).await.unwrap();
+        // recent. Only explicit confirmations, never the open-ended row by
+        // itself, establish coverage around the first two.
+        let resolved = store.resolve_ais_transits(base + 540_000).await.unwrap();
         assert_eq!(resolved, 2);
         let ledger = store.list_ais_ledger(100).await.unwrap();
         let entry = |mmsi: &str| {
@@ -1591,11 +2613,27 @@ mod tests {
         assert_eq!(entry("367705810").transits_opened, 1);
         assert_eq!(entry("338215012").transits_fits_under, 1);
 
-        // Far later: the fresh crossing settles as fits-under (the final down
-        // interval is still live around it), while the pre-record crossing
-        // matches no interval and closes as unknown, training nothing.
+        // Confirm the final down state through two minutes after the fresh
+        // crossing. It may then settle later from that recorded coverage; the
+        // pre-record crossing still matches no interval and trains nothing.
+        let mut confirmation = store.begin_transaction().await.unwrap();
+        for at in [base + 480_000, base + 540_000] {
+            confirmation
+                .record_bridge_state(BridgeObservation {
+                    source_id: "fl511.bridge",
+                    bridge_key: "brickell",
+                    bridge_name: "Brickell Avenue Bridge",
+                    relation: "target",
+                    state: "down",
+                    observed_at_ms: at,
+                    session_id: "test",
+                })
+                .await
+                .unwrap();
+        }
+        confirmation.commit().await.unwrap();
         store
-            .resolve_ais_transits(base + 1_500_000 + 46 * 60_000)
+            .resolve_ais_transits(base + 420_000 + 46 * 60_000)
             .await
             .unwrap();
         let ledger = store.list_ais_ledger(100).await.unwrap();
@@ -1611,6 +2649,59 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(unresolved.0, 0);
+    }
+
+    #[tokio::test]
+    async fn long_running_up_interval_does_not_claim_an_unrelated_crossing() {
+        let store = Store::in_memory().await.unwrap();
+        let base = 1_800_100_000_000_i64;
+        let crossing_at = base + 20 * 60_000;
+        let mut transaction = store.begin_transaction().await.unwrap();
+
+        for minute in (0..=20).step_by(2).chain(std::iter::once(21)) {
+            transaction
+                .record_bridge_state(BridgeObservation {
+                    source_id: "fl511.bridge",
+                    bridge_key: "brickell",
+                    bridge_name: "Brickell Avenue Bridge",
+                    relation: "target",
+                    state: "up",
+                    observed_at_ms: base + minute * 60_000,
+                    session_id: "test",
+                })
+                .await
+                .unwrap();
+        }
+        transaction
+            .record_ais_crossing(AisCrossingObservation {
+                mmsi: "555000555",
+                vessel_name: Some("LATE ARRIVAL"),
+                vessel_class: Some("pleasure"),
+                length_meters: Some(18.0),
+                draught_meters: None,
+                direction: "downriver",
+                crossed_at_ms: crossing_at,
+                speed_knots: 5.0,
+                session_id: "test",
+            })
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        assert_eq!(
+            store
+                .resolve_ais_transits(crossing_at + 3 * 60_000)
+                .await
+                .unwrap(),
+            0
+        );
+        let ledger = store.list_ais_ledger(100).await.unwrap();
+        let vessel = ledger
+            .iter()
+            .find(|entry| entry.mmsi == "555000555")
+            .unwrap();
+        assert_eq!(vessel.transits_opened, 0);
+        assert_eq!(vessel.transits_pending, 1);
     }
 
     #[tokio::test]
@@ -1641,6 +2732,339 @@ mod tests {
                 .unwrap(),
             Some(json!({"name": "Bridge First"}))
         );
+    }
+
+    #[tokio::test]
+    async fn old_bridge_rows_migrate_without_inventing_confirmation_coverage() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("old.sqlite");
+        let old = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            r#"
+            CREATE TABLE bridge_state_intervals (
+                source_id TEXT NOT NULL,
+                bridge_key TEXT NOT NULL,
+                bridge_name TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                state TEXT NOT NULL,
+                started_at_ms INTEGER NOT NULL,
+                ended_at_ms INTEGER,
+                session_id TEXT,
+                PRIMARY KEY (source_id, bridge_key, started_at_ms)
+            );
+            INSERT INTO bridge_state_intervals VALUES (
+                'fl511.bridge', 'brickell', 'Brickell Avenue Bridge',
+                'target', 'up', 1000, NULL, 'old-run'
+            );
+            "#,
+        )
+        .execute(&old)
+        .await
+        .unwrap();
+        old.close().await;
+
+        let store = Store::open(&path).await.unwrap();
+        let migrated = store
+            .list_bridge_state_intervals("fl511.bridge", "brickell")
+            .await
+            .unwrap();
+        assert_eq!(migrated[0].last_confirmed_at_ms, 1_000);
+        assert_eq!(migrated[0].start_reason, "legacy");
+
+        let mut transaction = store.begin_transaction().await.unwrap();
+        transaction
+            .record_bridge_state(BridgeObservation {
+                source_id: "fl511.bridge",
+                bridge_key: "brickell",
+                bridge_name: "Brickell Avenue Bridge",
+                relation: "target",
+                state: "up",
+                observed_at_ms: 2_000,
+                session_id: "new-run",
+            })
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let intervals = store
+            .list_bridge_state_intervals("fl511.bridge", "brickell")
+            .await
+            .unwrap();
+        assert_eq!(intervals[0].ended_at_ms, Some(1_000));
+        assert_eq!(intervals[1].start_reason, "session_start");
+    }
+
+    #[tokio::test]
+    async fn vessel_catalog_keeps_static_identity_and_forecasts_are_capped_per_minute() {
+        let store = Store::in_memory().await.unwrap();
+        let mut transaction = store.begin_transaction().await.unwrap();
+        transaction
+            .record_ais_vessel_observation(AisVesselObservation {
+                mmsi: "367999111",
+                name: Some("MIAMI STAR"),
+                vessel_class: Some("passenger"),
+                call_sign: Some("WDF1234"),
+                imo_number: Some(9_876_543),
+                destination: Some("MIAMI RIVER"),
+                length_meters: Some(42.0),
+                beam_meters: Some(9.5),
+                draught_meters: Some(2.4),
+                observed_at_ms: 1_000,
+            })
+            .await
+            .unwrap();
+        transaction
+            .record_ais_vessel_observation(AisVesselObservation {
+                mmsi: "367999111",
+                name: None,
+                vessel_class: None,
+                call_sign: None,
+                imo_number: None,
+                destination: None,
+                length_meters: None,
+                beam_meters: None,
+                draught_meters: None,
+                observed_at_ms: 2_000,
+            })
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        let catalog = store.list_ais_ledger(100).await.unwrap();
+        let vessel = catalog
+            .iter()
+            .find(|entry| entry.mmsi == "367999111")
+            .unwrap();
+        assert_eq!(vessel.name.as_deref(), Some("MIAMI STAR"));
+        assert_eq!(vessel.call_sign.as_deref(), Some("WDF1234"));
+        assert_eq!(vessel.imo_number, Some(9_876_543));
+        assert_eq!((vessel.first_seen_ms, vessel.last_seen_ms), (1_000, 2_000));
+
+        for (evaluated_at_ms, state, score) in [(1_000, "clear", 1_200), (59_000, "likely", 6_800)]
+        {
+            store
+                .record_forecast_sample(ForecastSample {
+                    target_key: "brickell",
+                    evaluated_at_ms,
+                    model_version: "bridge-v2",
+                    state,
+                    predictive_score_bps: score,
+                    confidence_bps: score,
+                    eta_min_minutes: Some(6),
+                    eta_max_minutes: Some(9),
+                    schedule_mode: "on_signal",
+                    contribution_bps_json: r#"{"ais":4200,"upstream":2600}"#,
+                    source_freshness_json: r#"{"aisSeconds":3,"fl511Seconds":8}"#,
+                    session_id: "run-a",
+                })
+                .await
+                .unwrap();
+        }
+        let samples = store
+            .forecast_samples_since("brickell", 0, 100)
+            .await
+            .unwrap();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].evaluated_at_ms, 59_000);
+        assert_eq!(samples[0].state, "likely");
+    }
+
+    #[tokio::test]
+    async fn selected_vessel_history_joins_impact_counts_and_newest_crossings() {
+        let store = Store::in_memory().await.unwrap();
+        let mmsi = "367999112";
+        let base = 1_800_200_000_000_i64;
+        let mut transaction = store.begin_transaction().await.unwrap();
+        transaction
+            .record_ais_vessel_observation(AisVesselObservation {
+                mmsi,
+                name: Some("BRICKELL RUNNER"),
+                vessel_class: Some("tug"),
+                call_sign: Some("WDF5678"),
+                imo_number: Some(9_765_432),
+                destination: Some("MIAMI RIVER"),
+                length_meters: Some(31.0),
+                beam_meters: Some(8.0),
+                draught_meters: Some(2.2),
+                observed_at_ms: base,
+            })
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        for (index, (direction, outcome)) in [
+            ("upriver", None),
+            ("downriver", Some("unknown")),
+            ("upriver", Some("fits_under")),
+            ("downriver", Some("opened")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let crossed_at_ms = base + (index as i64 + 1) * 60_000;
+            sqlx::query(
+                r#"
+                INSERT INTO ais_transits(
+                    mmsi, crossed_at_ms, direction, speed_knots,
+                    outcome, resolved_at_ms, session_id
+                ) VALUES (?1, ?2, ?3, 5.0, ?4, ?5, 'detail-test')
+                "#,
+            )
+            .bind(mmsi)
+            .bind(crossed_at_ms)
+            .bind(direction)
+            .bind(outcome)
+            .bind(outcome.map(|_| crossed_at_ms + 30_000))
+            .execute(store.pool())
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "UPDATE ais_vessel_ledger SET transits_opened = 1, transits_fits_under = 1 WHERE mmsi = ?1",
+        )
+        .bind(mmsi)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let history = store
+            .get_ais_vessel_history(mmsi, 3)
+            .await
+            .unwrap()
+            .expect("catalogued vessel");
+        assert_eq!(history.ledger.name.as_deref(), Some("BRICKELL RUNNER"));
+        assert_eq!(history.ledger.transits_opened, 1);
+        assert_eq!(history.ledger.transits_fits_under, 1);
+        assert_eq!(history.ledger.transits_unknown, 1);
+        assert_eq!(history.ledger.transits_pending, 1);
+        assert_eq!(history.ledger.last_crossing_at_ms, Some(base + 240_000));
+        assert_eq!(history.ledger.last_opened_at_ms, Some(base + 240_000));
+        assert_eq!(history.recent_crossings.len(), 3);
+        assert_eq!(
+            history.recent_crossings[0].outcome.as_deref(),
+            Some("opened")
+        );
+        assert_eq!(
+            history.recent_crossings[0].resolved_at_ms,
+            Some(base + 270_000)
+        );
+        assert_eq!(
+            history.recent_crossings[2].outcome.as_deref(),
+            Some("unknown")
+        );
+        assert!(
+            store
+                .get_ais_vessel_history("999999998", 3)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_learning_import_is_idempotent_and_recounts_crossing_outcomes() {
+        let directory = tempdir().unwrap();
+        let legacy_path = directory.path().join("legacy.sqlite");
+        let legacy = Store::open(&legacy_path).await.unwrap();
+        let mut transaction = legacy.begin_transaction().await.unwrap();
+        transaction
+            .record_ais_vessel_observation(AisVesselObservation {
+                mmsi: "367888999",
+                name: Some("RIVER WORKHORSE"),
+                vessel_class: Some("tug"),
+                call_sign: None,
+                imo_number: None,
+                destination: Some("MIAMI RIVER"),
+                length_meters: Some(27.0),
+                beam_meters: Some(8.0),
+                draught_meters: Some(2.8),
+                observed_at_ms: 10_000,
+            })
+            .await
+            .unwrap();
+        transaction
+            .record_ais_crossing(AisCrossingObservation {
+                mmsi: "367888999",
+                vessel_name: Some("RIVER WORKHORSE"),
+                vessel_class: Some("tug"),
+                length_meters: Some(27.0),
+                draught_meters: Some(2.8),
+                direction: "downriver",
+                crossed_at_ms: 20_000,
+                speed_knots: 3.8,
+                session_id: "legacy-run",
+            })
+            .await
+            .unwrap();
+        transaction
+            .record_ais_track_fix(AisTrackFix {
+                mmsi: "367888999",
+                observed_at_ms: 19_000,
+                latitude: 25.769,
+                longitude: -80.191,
+                speed_knots: Some(3.8),
+                course_degrees: Some(95.0),
+                branch: Some("river"),
+                s_meters: Some(120.0),
+                offset_meters: Some(4.0),
+                posture: Some("underway"),
+                session_id: "legacy-run",
+            })
+            .await
+            .unwrap();
+        transaction
+            .record_river_transit(RiverTransitObservation {
+                source_id: "bbpilots.board",
+                movement_key: "river-workhorse-1",
+                vessel: "RIVER WORKHORSE",
+                action: "sailing",
+                river_direction: Some("downriver"),
+                scheduled_at_ms: 5_000,
+                estimated_bridge_at_ms: Some(20_000),
+                estimated_offset_minutes: Some(15),
+                observed_at_ms: 4_000,
+                session_id: "legacy-run",
+            })
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        sqlx::query(
+            "UPDATE ais_transits SET outcome = 'opened', resolved_at_ms = 21000 WHERE mmsi = '367888999'",
+        )
+        .execute(legacy.pool())
+        .await
+        .unwrap();
+        drop(legacy);
+
+        let store = Store::in_memory().await.unwrap();
+        let first = store.import_legacy_learning(&legacy_path).await.unwrap();
+        assert_eq!(first.vessels_added, 1);
+        assert_eq!(first.transits_added, 1);
+        assert_eq!(first.track_fixes_added, 1);
+        assert_eq!(first.river_transits_added, 1);
+        let second = store.import_legacy_learning(&legacy_path).await.unwrap();
+        assert_eq!(second, LegacyLearningImportReport::default());
+
+        let catalog = store.list_ais_ledger(100).await.unwrap();
+        let imported = catalog
+            .iter()
+            .find(|entry| entry.mmsi == "367888999")
+            .unwrap();
+        assert_eq!(imported.name.as_deref(), Some("RIVER WORKHORSE"));
+        assert_eq!(imported.transits_opened, 1);
+        assert_eq!(imported.last_opened_at_ms, Some(20_000));
+        assert_eq!(store.track_fixes_since(0).await.unwrap().len(), 1);
+        let movements: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM river_transits")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(movements, 1);
     }
 
     #[tokio::test]
@@ -1732,11 +3156,13 @@ mod tests {
         assert_eq!(intervals.len(), 2);
         assert_eq!(intervals[0].state, "down");
         assert_eq!(intervals[0].started_at_ms, 1_000);
-        assert_eq!(intervals[0].ended_at_ms, Some(3_000));
-        // The session stamp is what separates a real transition from one that
-        // only looks like a transition because the app restarted.
+        assert_eq!(intervals[0].last_confirmed_at_ms, 2_000);
+        assert_eq!(intervals[0].ended_at_ms, Some(2_000));
+        // A new engine run starts a new observation interval even if its first
+        // reading differs. Downtime is not classified as a bridge transition.
         assert_eq!(intervals[0].session_id.as_deref(), Some("run-a"));
         assert_eq!(intervals[1].session_id.as_deref(), Some("run-b"));
+        assert_eq!(intervals[1].start_reason, "session_start");
         assert_eq!(intervals[1].state, "up");
         assert_eq!(intervals[1].started_at_ms, 3_000);
         assert_eq!(intervals[1].ended_at_ms, None);
@@ -2295,49 +3721,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn observed_track_is_kept_for_a_week_and_survives_being_offered_twice() {
+    async fn observed_tracks_are_deduplicated_and_known_opener_history_is_preserved() {
         let store = Store::in_memory().await.unwrap();
         let week_ms = 7 * 24 * 60 * 60 * 1_000;
         let now_ms = 1_787_000_000_000_i64;
-        let fix = |observed_at_ms: i64| AisTrackFix {
-            mmsi: "367123456",
-            observed_at_ms,
-            latitude: 25.7699,
-            longitude: -80.190_05,
-            speed_knots: Some(4.2),
-            course_degrees: Some(271.0),
-            branch: Some("river"),
-            s_meters: Some(-12.0),
-            offset_meters: Some(31.0),
-            posture: Some("underway"),
-            session_id: "session-a",
-        };
+        fn fix(mmsi: &str, observed_at_ms: i64) -> AisTrackFix<'_> {
+            AisTrackFix {
+                mmsi,
+                observed_at_ms,
+                latitude: 25.7699,
+                longitude: -80.190_05,
+                speed_knots: Some(4.2),
+                course_degrees: Some(271.0),
+                branch: Some("river"),
+                s_meters: Some(-12.0),
+                offset_meters: Some(31.0),
+                posture: Some("underway"),
+                session_id: "session-a",
+            }
+        }
 
         let mut transaction = store.begin_transaction().await.unwrap();
-        transaction.record_ais_track_fix(fix(now_ms)).await.unwrap();
+        transaction
+            .record_ais_track_fix(fix("367123456", now_ms))
+            .await
+            .unwrap();
+        transaction
+            .record_ais_track_fix(fix("367123456", now_ms + 15_000))
+            .await
+            .unwrap();
+        transaction
+            .record_ais_track_fix(fix("367123456", now_ms + 30_000))
+            .await
+            .unwrap();
         // The live window is re-offered whole every cycle, so the same fix
         // arriving again must not fail or double-count.
-        transaction.record_ais_track_fix(fix(now_ms)).await.unwrap();
         transaction
-            .record_ais_track_fix(fix(now_ms - week_ms - 1))
+            .record_ais_track_fix(fix("367123456", now_ms))
+            .await
+            .unwrap();
+        transaction
+            .record_ais_track_fix(fix("367123456", now_ms - week_ms - 1))
+            .await
+            .unwrap();
+        // SARA is a schema-seeded opener. Its full historical run survives
+        // ordinary raw-fix retention so the bridge-opening corridor remains
+        // learnable indefinitely.
+        transaction
+            .record_ais_track_fix(fix("367705810", now_ms - week_ms - 1))
             .await
             .unwrap();
         transaction.commit().await.unwrap();
 
         let held = store.track_fixes_since(0).await.unwrap();
-        assert_eq!(held.len(), 2, "the repeat must be ignored, not stored");
-        assert_eq!(held[0].mmsi, "367123456");
-        assert_eq!(held[1].offset_meters, Some(31.0));
-        assert_eq!(held[1].branch.as_deref(), Some("river"));
+        assert_eq!(
+            held.len(),
+            4,
+            "exact and nearby repeats must be ignored; the 30 s boundary is retained"
+        );
+        assert!(held.iter().any(|fix| fix.observed_at_ms == now_ms + 30_000));
+        assert!(held.iter().all(|fix| fix.offset_meters == Some(31.0)));
+        assert!(
+            held.iter()
+                .all(|fix| fix.branch.as_deref() == Some("river"))
+        );
 
         let report = store
             .prune_history("2026-04-01T00:00:00Z", now_ms - week_ms)
             .await
             .unwrap();
-        assert_eq!(report.track_fixes, 1, "only the fix past a week goes");
+        assert_eq!(report.track_fixes, 1, "only the ordinary old fix goes");
         let remaining = store.track_fixes_since(0).await.unwrap();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].observed_at_ms, now_ms);
+        assert_eq!(remaining.len(), 3);
+        assert!(
+            remaining
+                .iter()
+                .any(|fix| fix.mmsi == "367705810" && fix.observed_at_ms < now_ms)
+        );
     }
 
     #[tokio::test]

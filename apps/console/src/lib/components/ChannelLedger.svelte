@@ -53,8 +53,8 @@
   <section>
     <header class="ruled-header">
       <div>
-        <p class="registration-label">Roster</p>
-        <h2>Enabled channels</h2>
+        <p class="registration-label">Channels</p>
+        <h2>Channels on</h2>
       </div>
       <a href="/channels">Edit</a>
     </header>
@@ -82,16 +82,16 @@
   <section class="outputs">
     <header class="ruled-header">
       <div>
-        <p class="registration-label">Routes</p>
+        <p class="registration-label">Alerts</p>
         <h2>Destinations</h2>
       </div>
-      <a href="/outputs">Edit</a>
+      <a href="/system/outputs">Edit</a>
     </header>
 
     <div class="ledger-list">
       {#each outputs as output (output.id)}
         {@const OutputIcon = iconForOutput(output.id)}
-        <a class="ledger-row output-row" href="/outputs">
+        <a class="ledger-row output-row" href="/system/outputs">
           <OutputIcon size={21} strokeWidth={1.55} aria-hidden="true" />
           <span class="ledger-copy">
             <strong>{output.title}</strong>

@@ -76,11 +76,19 @@
     // measures 0x0, so the anchor shift is zero and every mark sits a fixed
     // number of screen pixels from its coordinate -- which does not look like a
     // constant offset, it looks like the marks sliding around as you zoom.
+    // MapLibre also requires every marker root to be absolute. Letting this
+    // button fall back into normal flow adds its place in the horizontal row to
+    // the projected coordinate, which lines otherwise unrelated vessels up
+    // east of their real fixes.
+    element.style.position = 'absolute';
     element.style.width = '34px';
     element.style.height = '34px';
     if (point.enabled === false) element.classList.add('is-disabled');
     if (point.id === selectedId || point.id === candidate?.id) element.classList.add('is-selected');
-    element.setAttribute('aria-label', `${point.label}. Select location.`);
+    element.setAttribute(
+      'aria-label',
+      `${point.label}. Select ${point.kind === 'vessel' ? 'vessel' : 'location'}.`
+    );
     element.title = point.detail ? `${point.label} · ${point.detail}` : point.label;
     if (point.courseDegrees != null) element.style.setProperty('--course', `${point.courseDegrees}deg`);
     // MapLibre writes an inline transform on the root every camera frame, so
@@ -472,8 +480,8 @@
     width: 15px;
     height: 15px;
     margin-top: 1px;
-    background: rgba(140, 110, 200, 0.42);
-    border: 1px solid #a88fd4;
+    background: var(--corridor);
+    border: 1px solid var(--corridor-sheet);
   }
 
   .map-corridor-key strong {
@@ -604,7 +612,10 @@
      the bottom edge, dead centre. `anchor: 'bottom'` then puts that tip on the
      coordinate. Change the square and this box has to change with it. */
   :global(.location-map-pin) {
-    position: relative;
+    /* Preserve MapLibre's positioning contract. The root itself must never
+       participate in layout; its transform is the projected longitude and
+       latitude. */
+    position: absolute;
     width: 34px;
     height: 34px;
     padding: 0;

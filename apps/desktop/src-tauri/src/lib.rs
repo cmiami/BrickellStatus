@@ -49,7 +49,7 @@ use brickellstatus_runtime::{
     ChannelKindDto, ChannelSnapshot, CredentialFreeCollectorFactory, DeliveryStateDto,
     DestinationIdDto, DispatchRecord, DisplayOrientation, DisplayTransport, InterruptPreset,
     LocationSearchResult, MutationResult, OutputStateDto, RuntimeConfig, RuntimeEngine,
-    SchedulerHandle, SurfacePresence, UrgencyDto, whatsapp_consent_is_current,
+    SchedulerHandle, SurfacePresence, UrgencyDto, VesselDetailDto, whatsapp_consent_is_current,
 };
 use brickellstatus_storage::{IncidentRecord, OutboxLease, OutboxRecord, Store};
 use jiff::{Timestamp, tz::TimeZone};
@@ -310,6 +310,19 @@ impl ActiveDisplay {
                 .map_err(|error| error.to_string()),
         }
     }
+
+    async fn read_banner(&self) -> Result<Option<String>, String> {
+        match self {
+            Self::Usb { transport, .. } => transport
+                .read_banner()
+                .await
+                .map_err(|error| error.to_string()),
+            Self::Ble { transport, .. } => transport
+                .read_banner()
+                .await
+                .map_err(|error| error.to_string()),
+        }
+    }
 }
 
 /// How many refused frames in a row it takes before the app is willing to say
@@ -331,7 +344,10 @@ const BOOT_SETTLE_AFTER_FLASH: Duration = Duration::from_millis(1_800);
 const FIRMWARE_REENUMERATION_TIMEOUT: Duration = Duration::from_secs(6);
 /// A full e-paper initialization happens before the decoder loop starts. Give
 /// that bounded work enough time to finish and answer the repeatable `?` query.
-const FIRMWARE_READY_TIMEOUT: Duration = Duration::from_secs(8);
+const FIRMWARE_READY_TIMEOUT: Duration = Duration::from_secs(20);
+/// A status read does not redraw the glass. Five minutes catches a weak battery
+/// promptly without turning the panel connection into constant radio traffic.
+const PANEL_BATTERY_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 struct DisplayController {
     operation: AsyncMutex<()>,
@@ -341,6 +357,10 @@ struct DisplayController {
     rotation_index: AtomicU64,
     automatic_reconnect: std::sync::atomic::AtomicBool,
     delivery_armed: std::sync::atomic::AtomicBool,
+    /// Suppresses repeated native alerts while the same low-voltage condition
+    /// is present. A valid non-low reading clears it for the next transition;
+    /// legacy firmware with no battery reading leaves it unchanged.
+    battery_low_notified: std::sync::atomic::AtomicBool,
     /// Frames sent to a connected board that went unacknowledged in a row.
     ///
     /// A board that will not take a frame is the only reliable sign of a board
@@ -396,6 +416,7 @@ impl DisplayController {
                 saved_usb.is_some() || saved_ble,
             ),
             delivery_armed: std::sync::atomic::AtomicBool::new(false),
+            battery_low_notified: std::sync::atomic::AtomicBool::new(false),
             unanswered_frames: AtomicU32::new(0),
             attached_panel: std::sync::RwLock::new(PanelModel::default()),
             preferred_usb_port: AsyncMutex::new(saved_usb),
@@ -405,6 +426,18 @@ impl DisplayController {
 
     async fn has_active(&self) -> bool {
         self.active.read().await.is_some()
+    }
+
+    /// Reads current device status without sending a frame or refreshing the
+    /// e-paper glass. This still works when an unchanged image is deduplicated.
+    async fn read_banner(&self) -> Result<Option<DeviceBanner>, String> {
+        let Some(active) = self.active.read().await.clone() else {
+            return Ok(None);
+        };
+        active
+            .read_banner()
+            .await
+            .map(|line| line.as_deref().map(DeviceBanner::parse))
     }
 
     /// Current slot without consuming it. An alert reads the rotation position
@@ -436,6 +469,19 @@ impl DisplayController {
     /// is not a board running the wrong firmware.
     fn note_frame_unanswered(&self) {
         self.unanswered_frames.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records the firmware's measured low-battery state and returns whether
+    /// this is a new low transition that deserves a native notification.
+    fn note_battery_state(&self, low_battery: Option<bool>) -> bool {
+        match low_battery {
+            Some(true) => !self.battery_low_notified.swap(true, Ordering::Relaxed),
+            Some(false) => {
+                self.battery_low_notified.store(false, Ordering::Relaxed);
+                false
+            }
+            None => false,
+        }
     }
 
     /// What the live route says about the board, for the firmware decision.
@@ -930,6 +976,19 @@ impl DisplayController {
             Ok(receipt) => receipt,
             Err(error) => {
                 self.note_frame_unanswered();
+                self.delivery_armed.store(false, Ordering::Relaxed);
+                // A failed BLE frame can leave CoreBluetooth holding a live
+                // GATT link even though the UI correctly reports an error. A
+                // connected peripheral does not advertise, so keeping that
+                // stale route here makes the panel disappear from the app's
+                // own scanner. Release it and let the ordinary reconnect
+                // ladder establish a fresh session.
+                let failed = self.active.write().await.take();
+                if let Some(failed) = failed
+                    && let Err(disconnect_error) = failed.disconnect().await
+                {
+                    warn!(%disconnect_error, "failed display route did not disconnect cleanly");
+                }
                 return Err(error);
             }
         };
@@ -1987,6 +2046,25 @@ async fn get_aisstream_status(state: State<'_, DesktopState>) -> Result<AisStrea
     })
 }
 
+fn validated_mmsi_argument(mmsi: &str) -> Result<&str, String> {
+    (mmsi.len() == 9 && mmsi.bytes().all(|byte| byte.is_ascii_digit()))
+        .then_some(mmsi)
+        .ok_or_else(|| "MMSI must contain exactly 9 digits.".to_owned())
+}
+
+#[tauri::command]
+async fn get_vessel_detail(
+    state: State<'_, DesktopState>,
+    mmsi: String,
+) -> Result<Option<VesselDetailDto>, String> {
+    let mmsi = validated_mmsi_argument(&mmsi)?;
+    state
+        .engine
+        .get_vessel_detail(mmsi)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 async fn save_preferences(
     app: AppHandle,
@@ -2127,7 +2205,7 @@ async fn scan_display_devices(
                 transport: None,
                 device_name: None,
                 detail: if errors.is_empty() {
-                    "No compatible e-paper panel found. Check USB power or Bluetooth advertising."
+                    "No powered e-paper panel found. E-ink can keep this screen visible after the battery dies; connect USB power, then look again."
                         .into()
                 } else {
                     format!("No compatible display found. {}", errors.join(" "))
@@ -2560,15 +2638,13 @@ async fn send_rendered_frame_to_display(
         Ok(Some((receipt, name))) => {
             let at = Timestamp::now().to_string();
             let transport = receipt_transport(receipt.transport);
-            let detail = format!(
-                "{}{}",
-                receipt.acknowledgement,
-                if receipt.ready_observed {
-                    " · READY observed"
-                } else {
-                    ""
-                }
-            );
+            let detail = observe_panel_battery(
+                app,
+                display,
+                receipt.battery_millivolts(),
+                receipt.low_battery(),
+            )
+            .unwrap_or_else(|| "Panel connected".into());
             let status = DisplayConnectionStatus {
                 state: DisplayConnectionState::Connected,
                 transport: Some(transport),
@@ -2599,6 +2675,61 @@ async fn send_rendered_frame_to_display(
             mutation_error(format!("Display did not acknowledge the frame: {error}"))
         }
     }
+}
+
+fn observe_panel_battery(
+    app: &AppHandle,
+    display: &DisplayController,
+    battery_millivolts: Option<u16>,
+    low_battery: Option<bool>,
+) -> Option<String> {
+    if display.note_battery_state(low_battery)
+        && let Err(error) = app
+            .notification()
+            .builder()
+            .title("Panel battery low")
+            .body("Connect the BrickellStatus panel to USB power.")
+            .show()
+    {
+        warn!(%error, "low-battery notification could not be shown");
+    }
+    match (battery_millivolts, low_battery) {
+        (Some(millivolts), Some(true)) => format!(
+            "Panel connected · Battery low — connect USB ({})",
+            battery_voltage_label(millivolts)
+        )
+        .into(),
+        (Some(millivolts), Some(false)) => format!(
+            "Panel connected · Battery {}",
+            battery_voltage_label(millivolts)
+        )
+        .into(),
+        _ => None,
+    }
+}
+
+fn publish_banner_battery_status(
+    app: &AppHandle,
+    display: &DisplayController,
+    banner: &DeviceBanner,
+) {
+    let Some(detail) =
+        observe_panel_battery(app, display, banner.battery_millivolts, banner.low_battery)
+    else {
+        return;
+    };
+    let mut status = get_current_status(app);
+    if status.state != DisplayConnectionState::Connected {
+        return;
+    }
+    status.detail = detail;
+    status.panel = banner.panel.or(status.panel);
+    set_e213_transport_status(app, status);
+}
+
+fn battery_voltage_label(millivolts: u16) -> String {
+    let centivolts = (u32::from(millivolts) + 5) / 10;
+    format!("{}.{:02} V", centivolts / 100, centivolts % 100)
 }
 
 fn connected_status(
@@ -2851,9 +2982,35 @@ fn install_runtime(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error
     let data_dir = app.path().app_data_dir()?;
     fs::create_dir_all(&data_dir)?;
     let database_path = data_dir.join("brickellstatus.sqlite3");
+    // The bundle identifier changed before the AIS learning loop was complete.
+    // Preserve the useful vessel/crossing/track observations from that local
+    // database, but never import its bridge intervals: those rows predate
+    // successful-poll continuity and cannot prove the app was watching.
+    let legacy_database_path = data_dir.parent().map(|parent| {
+        parent
+            .join("com.cmiami.puentegonorrea")
+            .join("tenders-log.sqlite3")
+    });
     let secret_store = LocalSecretStore::new(data_dir.join("credentials.json"));
     let engine = tauri::async_runtime::block_on(async {
         let store = Store::open(database_path).await?;
+        if let Some(path) = legacy_database_path.as_deref()
+            && path.is_file()
+        {
+            match store.import_legacy_learning(path).await {
+                Ok(report) => info!(
+                    vessels = report.vessels_added,
+                    crossings = report.transits_added,
+                    track_fixes = report.track_fixes_added,
+                    river_transits = report.river_transits_added,
+                    "older local AIS learning merged"
+                ),
+                // Import is intentionally opportunistic and idempotent. A
+                // locked or damaged old database must not strand the live app;
+                // the next launch gets another chance.
+                Err(error) => warn!(%error, "older local AIS learning could not be merged"),
+            }
+        }
         let config = RuntimeConfig::default();
         let factory = Arc::new(CredentialFreeCollectorFactory::new(
             config.user_agent.clone(),
@@ -2961,6 +3118,7 @@ async fn run_display_worker(
     let mut next_display_at = tokio::time::Instant::now();
     let mut next_reconnect_at = tokio::time::Instant::now();
     let mut reconnect_failures = 0_u32;
+    let mut next_battery_poll_at = tokio::time::Instant::now();
     // Opening the port resets the board, so looking for one to adopt is done
     // sparingly rather than on every pass of a five-second loop.
     let mut next_adopt_at = tokio::time::Instant::now();
@@ -3067,6 +3225,16 @@ async fn run_display_worker(
             next_prove_at = tokio::time::Instant::now() + prove_backoff(prove_failures);
         }
 
+        if display.has_active().await && tokio::time::Instant::now() >= next_battery_poll_at {
+            next_battery_poll_at = tokio::time::Instant::now() + PANEL_BATTERY_POLL_INTERVAL;
+            match tokio::time::timeout(Duration::from_secs(3), display.read_banner()).await {
+                Ok(Ok(Some(banner))) => publish_banner_battery_status(&app, &display, &banner),
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => debug!(%error, "panel battery status read failed"),
+                Err(_) => debug!("panel battery status read timed out"),
+            }
+        }
+
         if display.has_active().await && tokio::time::Instant::now() >= next_display_at {
             // The rotation index is read without advancing it. Only serving the
             // rotation lane consumes a slot; an alert must not, or a burst of
@@ -3110,10 +3278,19 @@ async fn run_display_worker(
             .await
             {
                 Ok(result) => result,
-                Err(_) => (
-                    mutation_error("Display frame exceeded its 30 second deadline"),
-                    None,
-                ),
+                Err(_) => {
+                    // Cancellation happens outside `send_frame`, so its normal
+                    // error cleanup cannot run. Explicitly release any GATT
+                    // link: otherwise the panel remains connected, stops
+                    // advertising, and cannot be found by the next scan.
+                    if let Err(error) = display.disconnect(false).await {
+                        warn!(%error, "timed-out display route did not disconnect cleanly");
+                    }
+                    (
+                        mutation_error("Display frame exceeded its 30 second deadline"),
+                        None,
+                    )
+                }
             };
             // An alert holds for a fixed, bounded time; a rotation frame keeps
             // its channel's configured dwell.
@@ -3265,22 +3442,34 @@ async fn run_dispatch_worker(
         if tokio::time::Instant::now() >= next_maintenance_at {
             let now_ms = Timestamp::now().as_millisecond();
             let delivery_cutoff = iso_at(now_ms.saturating_sub(90 * 24 * 60 * 60 * 1_000));
-            // A week of observed track is what the charted centreline is
-            // calibrated against; past that it is weight without evidence.
-            let track_cutoff_ms = now_ms.saturating_sub(7 * 24 * 60 * 60 * 1_000);
+            // Keep a full seasonal cycle for every observed hull. Storage
+            // exempts confirmed bridge-openers from this cutoff, preserving
+            // their movement catalog indefinitely.
+            let track_cutoff_ms = Store::default_ais_track_cutoff_ms(now_ms);
+            let forecast_cutoff_ms = Store::default_forecast_cutoff_ms(now_ms);
             match delivery_cutoff {
                 Ok(delivery_cutoff) => {
                     match store.prune_history(&delivery_cutoff, track_cutoff_ms).await {
                         Ok(report) => {
-                            debug!(
-                                scrubbed_destinations = report.scrubbed_destinations,
-                                outbox_rows = report.outbox_rows,
-                                incidents = report.incidents,
-                                track_fixes = report.track_fixes,
-                                "local history retention completed"
-                            );
-                            next_maintenance_at =
-                                tokio::time::Instant::now() + Duration::from_secs(24 * 60 * 60);
+                            match store.prune_forecast_samples(forecast_cutoff_ms).await {
+                                Ok(forecast_samples) => {
+                                    debug!(
+                                        scrubbed_destinations = report.scrubbed_destinations,
+                                        outbox_rows = report.outbox_rows,
+                                        incidents = report.incidents,
+                                        track_fixes = report.track_fixes,
+                                        forecast_samples,
+                                        "local history retention completed"
+                                    );
+                                    next_maintenance_at = tokio::time::Instant::now()
+                                        + Duration::from_secs(24 * 60 * 60);
+                                }
+                                Err(error) => {
+                                    warn!(%error, "forecast history retention failed");
+                                    next_maintenance_at =
+                                        tokio::time::Instant::now() + Duration::from_secs(60 * 60);
+                                }
+                            }
                         }
                         Err(error) => {
                             warn!(%error, "local history retention failed");
@@ -3351,6 +3540,7 @@ pub fn run() {
             get_app_snapshot,
             get_preferences,
             get_aisstream_status,
+            get_vessel_detail,
             save_preferences,
             refresh_sources,
             search_locations,
