@@ -18,7 +18,8 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     type SchematicStation,
     type SchematicVessel
   } from '$lib/riverSchematic';
-  import { currentVesselTracks } from '$lib/river';
+  import { currentVesselTracks, travelDirection, type TravelDirection } from '$lib/river';
+  import { layoutVesselAnnotations } from '$lib/vesselAnnotationLayout';
   import type {
     BridgeCrossing,
     BridgeStateInterval,
@@ -42,6 +43,27 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     localTimeZone?: string;
   } = $props();
 
+  interface VesselReading {
+    label: string;
+    vesselClass?: string;
+    direction: TravelDirection;
+    directionLabel?: string;
+    speedKnots: number;
+    knownOpener: boolean;
+    likelyToOpenBrickell: boolean;
+    etaMinMinutes?: number;
+    etaMaxMinutes?: number;
+    predictedOpeningAt?: string;
+  }
+
+  interface IdentifierVessel extends VesselReading {
+    mmsi: string;
+    track: VesselTrack;
+    closing: boolean;
+    ordinal: number;
+    positioned?: SchematicVessel;
+  }
+
   const bridgeStates = $derived.by(() => {
     const latest = new Map<string, BridgeStateInterval>();
     for (const interval of intervals) {
@@ -63,7 +85,10 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
   });
 
   const liveVesselTracks = $derived(currentVesselTracks(vesselTracks, generatedAt));
-  const schematic = $derived(riverSchematic(corridor, liveVesselTracks, bridgeStates));
+  const passageVesselTracks = $derived(
+    liveVesselTracks.filter((track) => track.routeIntersects)
+  );
+  const schematic = $derived(riverSchematic(corridor, passageVesselTracks, bridgeStates));
   const targetState = $derived(schematic.target?.state ?? 'unknown');
   const visibleStations = $derived(
     schematic.stations.filter(
@@ -71,17 +96,86 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     )
   );
 
-  const manifest = $derived.by(() =>
-    schematic.vessels.slice().sort((left, right) => {
-      const impact = (vessel: SchematicVessel) =>
-        Number(vessel.opener) * 4 + Number(vessel.closing) * 2;
-      return impact(right) - impact(left) || left.distanceMeters - right.distanceMeters;
-    })
+  const identifierVessels = $derived.by(() => {
+    const positionedByMmsi = new Map(
+      schematic.vessels.map((vessel) => [vessel.mmsi, vessel] as const)
+    );
+    return passageVesselTracks
+      .map((track): Omit<IdentifierVessel, 'ordinal'> => {
+        const positioned = positionedByMmsi.get(track.mmsi);
+        return {
+          mmsi: track.mmsi,
+          track,
+          label:
+            positioned?.label ??
+            (track.vesselName?.trim() || track.callSign?.trim() || track.mmsi),
+          vesselClass: positioned?.vesselClass ?? track.vesselClass,
+          direction: positioned?.direction ?? travelDirection(track),
+          directionLabel: positioned ? undefined : unpositionedDirection(track),
+          speedKnots: positioned?.speedKnots ?? track.speedKnots,
+          knownOpener: positioned?.knownOpener ?? track.knownOpener === true,
+          likelyToOpenBrickell:
+            positioned?.likelyToOpenBrickell ?? track.likelyToOpenBrickell === true,
+          etaMinMinutes: positioned?.etaMinMinutes ?? track.etaMinMinutes,
+          etaMaxMinutes: positioned?.etaMaxMinutes ?? track.etaMaxMinutes,
+          predictedOpeningAt: positioned?.predictedOpeningAt ?? track.predictedOpeningAt,
+          closing: positioned?.closing ?? track.routeIntersects,
+          positioned
+        };
+      })
+      .sort((left, right) => {
+        const impact = (vessel: Omit<IdentifierVessel, 'ordinal'>) =>
+          Number(vessel.likelyToOpenBrickell) * 8 + Number(vessel.knownOpener) * 4;
+        const distance = (vessel: Omit<IdentifierVessel, 'ordinal'>) =>
+          vessel.positioned?.distanceMeters ?? Number.MAX_SAFE_INTEGER;
+        return (
+          impact(right) - impact(left) ||
+          distance(left) - distance(right) ||
+          left.mmsi.localeCompare(right.mmsi)
+        );
+      })
+      .map((vessel, index): IdentifierVessel => ({ ...vessel, ordinal: index + 1 }));
+  });
+  const ordinalByMmsi = $derived(
+    new Map(identifierVessels.map((vessel) => [vessel.mmsi, vessel.ordinal] as const))
   );
-
-  const calloutMmsis = $derived(
-    new Set(manifest.slice(0, Math.min(3, manifest.length)).map((vessel) => vessel.mmsi))
+  const identifierByMmsi = $derived(
+    new Map(identifierVessels.map((vessel) => [vessel.mmsi, vessel] as const))
   );
+  const CALLOUT_WIDTH = 210;
+  const CALLOUT_HEIGHT = 58;
+  const annotationLayout = $derived.by(() => {
+    const target = schematic.target;
+    return layoutVesselAnnotations({
+      bounds: { x: 0, y: 0, width: schematic.width, height: schematic.height },
+      routes: schematic.routes.map((route) => ({
+        points: route.points,
+        halfWidth: route.role === 'river' ? 18.5 : 13.5
+      })),
+      targetExclusion: target
+        ? { x: target.x - 234, y: target.y - 274, width: 468, height: 548 }
+        : { x: 0, y: 0, width: 0, height: 0 },
+      obstacles: visibleStations.map((station) =>
+        station.kind === 'bridge'
+          ? { x: station.x - 82, y: station.y - 86, width: 164, height: 172 }
+          : { x: station.x - 62, y: station.y - 66, width: 124, height: 112 }
+      ),
+      vessels: schematic.vessels.map((vessel) => ({
+        id: vessel.mmsi,
+        anchor: { x: vessel.x, y: vessel.y },
+        angleDegrees: vessel.angleDegrees,
+        hullWidth: Math.max(48, Math.min(68, vessel.hullLength * 2.5)),
+        hullHeight: Math.max(30, Math.min(42, vessel.hullLength * 1.48)),
+        avoidanceRect: vesselDecorationBounds(vessel),
+        cardWidth: CALLOUT_WIDTH,
+        cardHeight: CALLOUT_HEIGHT,
+        priority:
+          Number(vessel.likelyToOpenBrickell) * 8 +
+          Number(vessel.knownOpener) * 4 +
+          Number(vessel.closing) * 2
+      }))
+    });
+  });
 
   const clock = $derived.by(() => {
     try {
@@ -97,6 +191,9 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
 
   let schematicScroll: HTMLElement | null = $state(null);
   let manifestScroll: HTMLElement | null = $state(null);
+  let highlightedVesselMmsi = $state<string | null>(null);
+  let previewedVesselMmsi = $state<string | null>(null);
+  const activeVesselMmsi = $derived(previewedVesselMmsi ?? highlightedVesselMmsi);
 
   const STATE_WORD = { up: 'up', down: 'down', unknown: 'no reading' } as const;
   const ROAD_WORD = {
@@ -110,17 +207,34 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     holding: 'Holding'
   } as const;
 
+  function unpositionedDirection(track: VesselTrack): string {
+    switch (track.movement) {
+      case 'approaching':
+        return 'Toward Brickell';
+      case 'diverging':
+        return 'Away from Brickell';
+      case 'stationary':
+        return 'Stationary';
+      default:
+        return Number.isFinite(track.courseDegrees)
+          ? `Course ${track.courseDegrees.toFixed(0)}°`
+          : 'Direction unavailable';
+    }
+  }
+
   function titleCase(value: string): string {
     return value.replace(/\b\w/g, (letter) => letter.toUpperCase());
   }
 
-  function typeName(vessel: SchematicVessel): string {
+  function typeName(vessel: Pick<VesselReading, 'vesselClass'>): string {
     return vessel.vesselClass && vessel.vesselClass !== 'vessel'
       ? titleCase(vessel.vesselClass)
       : 'Vessel';
   }
 
-  function etaReading(vessel: SchematicVessel): string | null {
+  function etaReading(
+    vessel: Pick<VesselReading, 'etaMinMinutes' | 'etaMaxMinutes'>
+  ): string | null {
     if (vessel.etaMinMinutes == null) return null;
     const max = vessel.etaMaxMinutes ?? vessel.etaMinMinutes;
     return max > vessel.etaMinMinutes
@@ -128,7 +242,7 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
       : `${vessel.etaMinMinutes} min`;
   }
 
-  function openingReading(vessel: SchematicVessel): string | null {
+  function openingReading(vessel: Pick<VesselReading, 'predictedOpeningAt'>): string | null {
     if (!vessel.predictedOpeningAt) return null;
     const parsed = new Date(vessel.predictedOpeningAt);
     return Number.isNaN(parsed.getTime()) ? null : clock.format(parsed);
@@ -140,13 +254,14 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
       : station.label;
   }
 
-  function vesselLabel(vessel: SchematicVessel): string {
+  function vesselLabel(vessel: VesselReading): string {
     const eta = etaReading(vessel);
     const parts = [
-      `${vessel.label}. ${typeName(vessel)}. ${DIRECTION_WORD[vessel.direction]} at ${vessel.speedKnots.toFixed(1)} knots.`
+      `${vessel.label}. ${typeName(vessel)}. ${vessel.directionLabel ?? DIRECTION_WORD[vessel.direction]} at ${vessel.speedKnots.toFixed(1)} knots.`
     ];
     if (eta) parts.push(`${eta} to Brickell Avenue Bridge.`);
-    if (vessel.opener) parts.push('Expected to open the bridge.');
+    if (vessel.knownOpener) parts.push('Known Brickell opener.');
+    if (vessel.likelyToOpenBrickell) parts.push('Likely to open Brickell on this passage.');
     return parts.join(' ');
   }
 
@@ -185,31 +300,59 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     return heading > 90 && heading < 270;
   }
 
-  function calloutX(vessel: SchematicVessel): number {
-    if (vessel.x > schematic.width - 280) return -250;
-    if (schematic.target && vessel.x < schematic.target.x && vessel.x > schematic.target.x - 300) {
-      return -260;
+  function identifierProfileFacesLeft(vessel: IdentifierVessel): boolean {
+    return vessel.positioned
+      ? vesselProfileFacesLeft(vessel.positioned)
+      : vessel.direction === 'upriver';
+  }
+
+  function vesselDecorationBounds(vessel: SchematicVessel) {
+    const hullWidth = Math.max(48, Math.min(68, vessel.hullLength * 2.5));
+    const hullHeight = Math.max(30, Math.min(42, vessel.hullLength * 1.48));
+    const radians = (vessel.angleDegrees * Math.PI) / 180;
+    const rotate = (x: number, y: number) => ({
+      x: x * Math.cos(radians) - y * Math.sin(radians),
+      y: x * Math.sin(radians) + y * Math.cos(radians)
+    });
+    const localPoints = [
+      { x: -hullWidth / 2, y: -hullHeight / 2 },
+      { x: hullWidth / 2, y: hullHeight / 2 },
+      { x: -44, y: -38 },
+      { x: -18, y: -14 },
+      { x: -42, y: -42 },
+      { x: 42, y: 42 },
+      ...[
+        [38, -8],
+        [60, -8],
+        [38, 8],
+        [60, 8]
+      ].map(([x, y]) => rotate(x, y))
+    ];
+    const xs = localPoints.map((point) => point.x);
+    const ys = localPoints.map((point) => point.y);
+    const left = Math.min(...xs);
+    const top = Math.min(...ys);
+    return {
+      x: vessel.x + left,
+      y: vessel.y + top,
+      width: Math.max(...xs) - left,
+      height: Math.max(...ys) - top
+    };
+  }
+
+  function placementReading(vessel: IdentifierVessel): string {
+    if (vessel.track.posture === 'off_channel' || vessel.track.sMeters == null) {
+      return 'Outside route corridor';
     }
-    return 34;
+    if (vessel.track.posture === 'moored') return 'Moored';
+    if (vessel.track.posture === 'holding') return 'Holding position';
+    if (vessel.track.posture === 'deep_draft') return 'Too deep for river';
+    return vessel.positioned ? 'Shown on route' : 'Position not shown on route';
   }
 
-  function calloutY(vessel: SchematicVessel, index: number): number {
-    const slot = index % 3;
-    if (vessel.y < 160) return [32, 128, 224][slot];
-    if (vessel.y > schematic.height - 150) return [-108, -204, -300][slot];
-    return [-110, 34, 130][slot];
-  }
-
-  function miniCalloutX(vessel: SchematicVessel, index: number): number {
-    if (vessel.x > schematic.width - 240) return -216;
-    return index % 2 === 0 ? 30 : -216;
-  }
-
-  function miniCalloutY(vessel: SchematicVessel, index: number): number {
-    const slot = (index - 3) % 4;
-    if (vessel.y < 130) return [26, 76, 126, 176][slot];
-    if (vessel.y > schematic.height - 110) return [-64, -114, -164, -214][slot];
-    return [28, -64, 80, -116][slot];
+  function shortVesselName(value: string): string {
+    const characters = Array.from(value);
+    return characters.length <= 15 ? value : `${characters.slice(0, 14).join('')}…`;
   }
 
   function centerOnTarget(node: HTMLElement) {
@@ -250,20 +393,21 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     {corridor.aisLive ? 'Miami River live vessel traffic' : 'Miami River vessel traffic unavailable'}
   </h2>
 
-  <div class:has-manifest={manifest.length > 0} class="river-body">
-    <div
-      class="schematic-scroll"
-      bind:this={schematicScroll}
-      use:centerOnTarget
-      role="region"
-      aria-label="Scrollable Miami River transit schematic centered on Brickell Avenue Bridge"
-    >
+  <div class:has-manifest={identifierVessels.length > 0} class="river-body">
+    <div class="schematic-stack">
+      <div
+        class="schematic-scroll"
+        bind:this={schematicScroll}
+        use:centerOnTarget
+        role="region"
+        aria-label="Scrollable Miami River transit schematic centered on Brickell Avenue Bridge"
+      >
       {#if schematic.routes.length}
         <svg
           class="schematic-plot"
           viewBox="0 0 {schematic.width} {schematic.height}"
           role="img"
-          aria-label="{corridor.aisLive ? 'Live Miami River vessel network' : 'Miami River vessel traffic unavailable'} with Brickell Avenue Bridge as the focal target, {visibleStations.length} other bridge or junction stations, and {manifest.length} vessels under way."
+          aria-label="{corridor.aisLive ? 'Live Miami River vessel network' : 'Miami River vessel traffic unavailable'} with Brickell Avenue Bridge as the focal target, {visibleStations.length} other bridge or junction stations, and {schematic.vessels.length} vessels shown on the route."
         >
           <defs>
             <pattern id="transit-grid" width="72" height="72" patternUnits="userSpaceOnUse">
@@ -367,6 +511,19 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
             {/each}
           </g>
 
+          <g class="annotation-leaders" aria-hidden="true">
+            {#each annotationLayout.placements as placement (placement.id)}
+              {@const vessel = identifierByMmsi.get(placement.id)}
+              <line
+                class:is-likely-opener={vessel?.likelyToOpenBrickell}
+                x1={placement.leader.from.x}
+                y1={placement.leader.from.y}
+                x2={placement.leader.to.x}
+                y2={placement.leader.to.y}
+              />
+            {/each}
+          </g>
+
           {#if schematic.target}
             <g
               class="target-station"
@@ -400,92 +557,78 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
 
           <g class="vessels">
             {#each schematic.vessels as vessel (vessel.mmsi)}
-              {@const calloutIndex = manifest.findIndex((item) => item.mmsi === vessel.mmsi)}
-              {@const expanded = calloutMmsis.has(vessel.mmsi)}
+              {@const ordinal = ordinalByMmsi.get(vessel.mmsi)}
               <g
                 class="vessel"
-                class:is-opener={vessel.opener}
+                class:is-known-opener={vessel.knownOpener}
+                class:is-likely-opener={vessel.likelyToOpenBrickell}
+                class:is-highlighted={activeVesselMmsi === vessel.mmsi}
                 class:is-closing={vessel.closing}
                 data-mmsi={vessel.mmsi}
                 transform="translate({vessel.x.toFixed(1)} {vessel.y.toFixed(1)})"
               >
                 <title>{vesselLabel(vessel)}</title>
-                {#if vessel.opener}<circle class="opener-pulse" r="34" />{/if}
+                {#if activeVesselMmsi === vessel.mmsi}<circle class="identifier-selection" r="42" />{/if}
+                {#if vessel.likelyToOpenBrickell}<circle class="opener-pulse" r="34" />{/if}
                 <g
-                  class="heading-runway"
+                  class="direction-chevrons"
                   transform="rotate({vessel.angleDegrees.toFixed(1)})"
                   aria-hidden="true"
                 >
-                  <line x1="-48" y1="0" x2="53" y2="0" />
-                  <path d="M53 0L42 -7V7Z" />
+                  <path d="M38 -8L48 0L38 8 M50 -8L60 0L50 8" />
                 </g>
                 <g class="vessel-ship">
                   <VesselGlyph
                     kind={vessel.vesselClass}
                     length={Math.max(48, Math.min(68, vessel.hullLength * 2.5))}
                     flip={vesselProfileFacesLeft(vessel)}
-                    opener={vessel.opener}
+                    opener={vessel.likelyToOpenBrickell}
                   />
                 </g>
-
-                {#if expanded}
-                  <line
-                    class="callout-leader"
-                    x1="0"
-                    y1="0"
-                    x2={calloutX(vessel)}
-                    y2={calloutY(vessel, calloutIndex) + 43}
-                  />
-                  <g
-                    class="vessel-callout"
-                    data-opener={vessel.opener}
-                    transform="translate({calloutX(vessel)} {calloutY(vessel, calloutIndex)})"
-                  >
-                    <path class="callout-plate" d="M0 0H238V86H10L0 76Z" />
-                    <text class="vessel-tag" x="13" y="23">{vessel.label}</text>
-                    <text class="vessel-type" x="13" y="43">{typeName(vessel)}</text>
-                    <text class="vessel-direction" x="13" y="68">
-                      {DIRECTION_WORD[vessel.direction]} · {vessel.speedKnots.toFixed(1)} kn
-                    </text>
-                    <line class="callout-rule" x1="146" y1="11" x2="146" y2="75" />
-                    {#if etaReading(vessel)}
-                      <text class="vessel-eta" x="226" y="43">{etaReading(vessel)}</text>
-                      <text class="vessel-eta-label" x="226" y="65">TO BRICKELL</text>
-                    {:else}
-                      <text class="vessel-eta no-eta" x="226" y="42">—</text>
-                      <text class="vessel-eta-label" x="226" y="64">NO ETA</text>
-                    {/if}
-                    {#if vessel.opener}
-                      <g class="callout-opener" transform="translate(10 84)">
-                        <rect width="102" height="19" />
-                        <text x="51" y="13">EXPECTED OPENER</text>
-                      </g>
-                    {/if}
-                  </g>
-                {:else}
-                  <line
-                    class="callout-leader compact-leader"
-                    x1="0"
-                    y1="0"
-                    x2={miniCalloutX(vessel, calloutIndex)}
-                    y2={miniCalloutY(vessel, calloutIndex) + 22}
-                  />
-                  <g
-                    class="vessel-mini-readout"
-                    transform="translate({miniCalloutX(vessel, calloutIndex)} {miniCalloutY(vessel, calloutIndex)})"
-                  >
-                    <rect width="210" height="44" />
-                    <text class="mini-name" x="9" y="15">{vessel.label}</text>
-                    <text class="mini-type" x="9" y="32">{typeName(vessel)}</text>
-                    <text class="mini-movement" x="201" y="15">
-                      {DIRECTION_WORD[vessel.direction]} · {vessel.speedKnots.toFixed(1)} kn
-                    </text>
-                    <text class="mini-eta" x="201" y="33">
-                      {etaReading(vessel) ?? 'NO ETA'} · BRICKELL
-                    </text>
+                {#if ordinal != null}
+                  <g class="vessel-number" transform="translate(-31 -26)" aria-hidden="true">
+                    <rect x="-13" y="-12" width="26" height="24" />
+                    <text y="5">{ordinal.toString().padStart(2, '0')}</text>
                   </g>
                 {/if}
               </g>
+            {/each}
+          </g>
+
+          <g
+            class="vessel-annotations"
+            data-unplaced={annotationLayout.unplacedIds.length}
+            aria-hidden="true"
+          >
+            {#each annotationLayout.placements as placement (placement.id)}
+              {@const vessel = identifierByMmsi.get(placement.id)}
+              {#if vessel}
+                <g
+                  class="vessel-callout"
+                  class:is-known-opener={vessel.knownOpener}
+                  class:is-likely-opener={vessel.likelyToOpenBrickell}
+                  class:is-highlighted={activeVesselMmsi === vessel.mmsi}
+                  data-mmsi={vessel.mmsi}
+                  transform="translate({placement.card.x.toFixed(1)} {placement.card.y.toFixed(1)})"
+                >
+                  <path class="callout-plate" d="M0 0H{CALLOUT_WIDTH}V{CALLOUT_HEIGHT}H8L0 {CALLOUT_HEIGHT - 8}Z" />
+                  <rect class="callout-index" x="8" y="8" width="27" height="24" />
+                  <text class="callout-index-text" x="21.5" y="25">
+                    {vessel.ordinal.toString().padStart(2, '0')}
+                  </text>
+                  <text class="callout-name" x="42" y="19">{shortVesselName(vessel.label)}</text>
+                  <text class="callout-motion" x="42" y="39">
+                    {vessel.directionLabel ?? DIRECTION_WORD[vessel.direction]} · {vessel.speedKnots.toFixed(1)} kn
+                  </text>
+                  <line class="callout-rule" x1="153" y1="8" x2="153" y2="50" />
+                  <text class:unavailable={!etaReading(vessel)} class="callout-eta" x="201" y="23">
+                    {etaReading(vessel) ?? '—'}
+                  </text>
+                  <text class="callout-eta-label" x="201" y="42">
+                    {etaReading(vessel) ? 'TO BRICKELL' : 'NO ETA'}
+                  </text>
+                </g>
+              {/if}
             {/each}
           </g>
 
@@ -494,17 +637,19 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
         <p class="map-unavailable">River corridor unavailable.</p>
       {/if}
 
-      <div class="map-pan-controls" role="group" aria-label="Pan the river schematic">
-        <button type="button" onclick={() => panMap(-1)} aria-label="Pan schematic upriver">←</button>
-        <button type="button" onclick={() => panMap(1)} aria-label="Pan schematic toward the bay">→</button>
+        <div class="map-pan-controls" role="group" aria-label="Pan the river schematic">
+          <button type="button" onclick={() => panMap(-1)} aria-label="Pan schematic upriver">←</button>
+          <button type="button" onclick={() => panMap(1)} aria-label="Pan schematic toward the bay">→</button>
+        </div>
       </div>
+
     </div>
 
-    {#if manifest.length}
+    {#if identifierVessels.length}
       <aside class="manifest-rail" aria-labelledby="manifest-heading">
         <header class="manifest-head">
           <div>
-            <p>VESSELS TO</p>
+            <p>VESSELS TO · {identifierVessels.length}</p>
             <h3 id="manifest-heading">BRICKELL</h3>
           </div>
           <div class="manifest-actions">
@@ -520,49 +665,68 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
           class="manifest-scroll"
           bind:this={manifestScroll}
           role="region"
-          aria-label="Vessels approaching Brickell Avenue Bridge"
+          aria-label="All vessels expected to pass Brickell Avenue Bridge"
         >
           <ol class="manifest">
-          {#each manifest as vessel (vessel.mmsi)}
+          {#each identifierVessels as vessel (vessel.mmsi)}
             <li
-              class:is-opener={vessel.opener}
+              class:is-known-opener={vessel.knownOpener}
+              class:is-likely-opener={vessel.likelyToOpenBrickell}
               class:is-closing={vessel.closing}
+              class:is-selected={highlightedVesselMmsi === vessel.mmsi}
               title={vesselLabel(vessel)}
             >
-              <svg class="profile" viewBox="-28 -23 56 32" aria-hidden="true">
-                <VesselGlyph
-                  kind={vessel.vesselClass}
-                  length={48}
-                  flip={vesselProfileFacesLeft(vessel)}
-                  opener={vessel.opener}
-                />
-              </svg>
+              <button
+                type="button"
+                aria-pressed={highlightedVesselMmsi === vessel.mmsi}
+                aria-label={vesselLabel(vessel)}
+                onmouseenter={() => (previewedVesselMmsi = vessel.mmsi)}
+                onmouseleave={() => {
+                  if (previewedVesselMmsi === vessel.mmsi) previewedVesselMmsi = null;
+                }}
+                onfocus={() => (previewedVesselMmsi = vessel.mmsi)}
+                onblur={() => {
+                  if (previewedVesselMmsi === vessel.mmsi) previewedVesselMmsi = null;
+                }}
+                onclick={() => (highlightedVesselMmsi = highlightedVesselMmsi === vessel.mmsi ? null : vessel.mmsi)}
+              >
+                <span class="manifest-index">{vessel.ordinal.toString().padStart(2, '0')}</span>
+                <svg class="profile" viewBox="-28 -23 56 32" aria-hidden="true">
+                  <VesselGlyph
+                    kind={vessel.vesselClass}
+                    length={48}
+                    flip={identifierProfileFacesLeft(vessel)}
+                    opener={vessel.likelyToOpenBrickell}
+                  />
+                </svg>
 
-              <div class="strip">
-                <div class="strip-head">
-                  <div>
-                    <p class="strip-id">{vessel.label}</p>
-                    <p class="strip-type">{typeName(vessel)}</p>
+                <div class="strip">
+                  <div class="strip-head">
+                    <div>
+                      <p class="strip-id">{vessel.label}</p>
+                      <p class="strip-type">{typeName(vessel)} · {placementReading(vessel)}</p>
+                    </div>
+                    {#if etaReading(vessel)}
+                      <p class="strip-eta">{etaReading(vessel)}<small>TO BRICKELL</small></p>
+                    {:else}
+                      <p class="strip-eta unavailable">—<small>NO ETA</small></p>
+                    {/if}
                   </div>
-                  {#if etaReading(vessel)}
-                    <p class="strip-eta">{etaReading(vessel)}<small>TO BRICKELL</small></p>
-                  {:else}
-                    <p class="strip-eta unavailable">—<small>NO ETA</small></p>
+
+                  <p class="strip-movement">
+                    <strong>{vessel.directionLabel ?? DIRECTION_WORD[vessel.direction]}</strong>
+                    <span>{vessel.speedKnots.toFixed(1)} kn</span>
+                  </p>
+
+                  {#if vessel.knownOpener || vessel.likelyToOpenBrickell || openingReading(vessel)}
+                    <p class="impact">
+                      {#if vessel.knownOpener}<strong>KNOWN OPENER</strong>{/if}
+                      {#if vessel.likelyToOpenBrickell}<strong>LIKELY TO OPEN BRICKELL</strong>{/if}
+                      {#if openingReading(vessel)}<span>{openingReading(vessel)}</span>{/if}
+                    </p>
                   {/if}
                 </div>
-
-                <p class="strip-movement">
-                  <strong>{DIRECTION_WORD[vessel.direction]}</strong>
-                  <span>{vessel.speedKnots.toFixed(1)} kn</span>
-                </p>
-
-                {#if vessel.opener || openingReading(vessel)}
-                  <p class="impact">
-                    {#if vessel.opener}<strong>EXPECTED OPENER</strong>{/if}
-                    {#if openingReading(vessel)}<span>{openingReading(vessel)}</span>{/if}
-                  </p>
-                {/if}
-              </div>
+              </button>
             </li>
           {/each}
           </ol>
@@ -599,6 +763,14 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     grid-template-columns: minmax(0, 1fr) clamp(286px, 23vw, 344px);
   }
 
+  .schematic-stack {
+    display: grid;
+    min-width: 0;
+    min-height: 0;
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+  }
+
   .schematic-scroll {
     position: relative;
     min-width: 0;
@@ -607,7 +779,7 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     background: var(--white);
   }
 
-  .river-body.has-manifest .schematic-scroll {
+  .river-body.has-manifest .schematic-stack {
     border-right: 1px solid var(--rule-strong);
   }
 
@@ -881,31 +1053,35 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
   }
 
   .vessel-ship,
-  .heading-runway {
+  .direction-chevrons {
     transition: transform 680ms cubic-bezier(0.2, 0.72, 0.18, 1);
   }
 
-  .heading-runway {
-    opacity: 0.58;
-  }
-
-  .heading-runway line {
+  .direction-chevrons path {
+    fill: none;
     stroke: var(--corridor);
-    stroke-dasharray: 3 7;
-    stroke-width: 2px;
+    stroke-width: 3px;
+    stroke-linecap: square;
+    stroke-linejoin: miter;
   }
 
-  .heading-runway path {
-    fill: var(--corridor);
-  }
-
-  .vessel.is-opener .heading-runway line,
-  .vessel.is-opener .callout-leader {
+  .vessel.is-likely-opener .direction-chevrons path {
     stroke: var(--amber-ink);
   }
 
-  .vessel.is-opener .heading-runway path {
-    fill: var(--amber-ink);
+  .vessel-number rect {
+    fill: var(--marine);
+    stroke: var(--white);
+    stroke-width: 2px;
+  }
+
+  .vessel-number text {
+    fill: var(--white);
+    font-family: var(--font-instrument);
+    font-size: var(--type-caption);
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-anchor: middle;
   }
 
   .opener-pulse {
@@ -917,87 +1093,82 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     animation: opener-pulse 1.8s ease-out infinite;
   }
 
-  .callout-leader {
+  .identifier-selection {
+    fill: var(--corridor-wash);
+    stroke: var(--marine);
+    stroke-width: 3px;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .annotation-leaders line {
     stroke: var(--marine);
     stroke-width: 1.5px;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .annotation-leaders line.is-likely-opener {
+    stroke: var(--amber-ink);
+  }
+
+  .vessel-callout {
+    pointer-events: none;
   }
 
   .callout-plate {
     fill: var(--white);
     stroke: var(--marine);
     stroke-width: 1.5px;
+    vector-effect: non-scaling-stroke;
   }
 
-  .vessel-mini-readout rect {
-    fill: var(--white);
-    stroke: var(--marine);
-    stroke-width: 1.2px;
+  .vessel-callout.is-known-opener .callout-plate {
+    fill: var(--corridor-sheet);
   }
 
-  .mini-name,
-  .mini-type,
-  .mini-movement,
-  .mini-eta {
-    fill: var(--graphite);
-    font-family: var(--font-instrument);
-    font-size: var(--type-caption);
-    font-weight: 700;
-    letter-spacing: 0.045em;
-    text-transform: uppercase;
-  }
-
-  .mini-name {
-    font-size: var(--type-label);
-  }
-
-  .mini-type {
-    fill: var(--muted);
-    font-weight: 600;
-  }
-
-  .mini-movement,
-  .mini-eta {
-    fill: var(--corridor);
-    text-anchor: end;
-  }
-
-  .mini-eta {
-    fill: var(--muted);
-  }
-
-  .vessel-callout[data-opener='true'] .callout-plate {
+  .vessel-callout.is-likely-opener .callout-plate {
     fill: var(--amber-sheet);
     stroke: var(--amber-ink);
   }
 
-  .vessel-tag,
-  .vessel-type,
-  .vessel-direction,
-  .vessel-eta,
-  .vessel-eta-label {
-    fill: var(--graphite);
+  .vessel-callout.is-highlighted .callout-plate {
+    stroke-width: 3px;
+  }
+
+  .callout-index {
+    fill: var(--marine);
+  }
+
+  .vessel-callout.is-likely-opener .callout-index {
+    fill: var(--amber-ink);
+  }
+
+  .callout-index-text,
+  .callout-name,
+  .callout-motion,
+  .callout-eta,
+  .callout-eta-label {
     font-family: var(--font-instrument);
+    font-weight: 700;
     text-transform: uppercase;
   }
 
-  .vessel-tag {
-    font-size: var(--type-label);
-    font-weight: 700;
-    letter-spacing: 0.035em;
+  .callout-index-text {
+    fill: var(--white);
+    font-size: 11px;
+    letter-spacing: 0.03em;
+    text-anchor: middle;
   }
 
-  .vessel-type {
-    fill: var(--muted);
-    font-size: var(--type-caption);
-    font-weight: 600;
-    letter-spacing: 0.07em;
+  .callout-name {
+    fill: var(--graphite);
+    font-size: 12px;
+    letter-spacing: 0.025em;
   }
 
-  .vessel-direction {
+  .callout-motion {
     fill: var(--corridor);
-    font-size: var(--type-caption);
-    font-weight: 700;
-    letter-spacing: 0.075em;
+    font-size: 10px;
+    letter-spacing: 0.035em;
   }
 
   .callout-rule {
@@ -1005,38 +1176,22 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     stroke-width: 1px;
   }
 
-  .vessel-eta {
-    font-size: var(--type-title);
-    font-weight: 700;
-    letter-spacing: -0.015em;
+  .callout-eta {
+    fill: var(--corridor);
+    font-size: 15px;
+    letter-spacing: -0.02em;
     text-anchor: end;
   }
 
-  .vessel-eta.no-eta {
+  .callout-eta.unavailable {
     fill: var(--steel);
   }
 
-  .vessel-eta-label {
+  .callout-eta-label {
     fill: var(--muted);
-    font-size: var(--type-caption);
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-anchor: end;
-  }
-
-  .callout-opener rect {
-    fill: var(--amber);
-    stroke: var(--amber-ink);
-    stroke-width: 0.8px;
-  }
-
-  .callout-opener text {
-    fill: var(--graphite);
-    font-family: var(--font-instrument);
-    font-size: var(--type-caption);
-    font-weight: 700;
+    font-size: 8px;
     letter-spacing: 0.07em;
-    text-anchor: middle;
+    text-anchor: end;
   }
 
   .manifest-rail {
@@ -1138,21 +1293,66 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
   }
 
   .manifest li {
-    display: grid;
-    grid-template-columns: 58px minmax(0, 1fr);
-    gap: 11px;
-    align-items: start;
-    padding: 16px 15px;
     background: var(--white);
     border-bottom: 1px solid var(--rule-strong);
   }
 
-  .manifest li.is-opener {
+  .manifest li > button {
+    display: grid;
+    width: 100%;
+    grid-template-columns: 28px 52px minmax(0, 1fr);
+    gap: 9px;
+    align-items: start;
+    padding: 14px 12px;
+    color: inherit;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .manifest li > button:hover {
+    box-shadow: inset 4px 0 0 var(--corridor);
+  }
+
+  .manifest li > button:focus-visible {
+    position: relative;
+    z-index: 1;
+    outline: var(--focus);
+    outline-offset: -3px;
+  }
+
+  .manifest li.is-selected > button {
+    box-shadow: inset 5px 0 0 var(--marine);
+  }
+
+  .manifest-index {
+    display: grid;
+    width: 26px;
+    height: 26px;
+    place-items: center;
+    color: var(--white);
+    background: var(--marine);
+    border: 1px solid var(--marine);
+    font-family: var(--font-instrument);
+    font-size: var(--type-caption);
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    line-height: 1;
+  }
+
+  .manifest li.is-known-opener {
+    background: var(--corridor-sheet);
+  }
+
+  .manifest li.is-likely-opener {
     background: var(--amber-sheet);
   }
 
   .profile {
-    width: 56px;
+    width: 52px;
     height: 32px;
     margin-top: 2px;
   }
@@ -1282,6 +1482,11 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
       grid-template-columns: minmax(0, 1fr);
     }
 
+    .river-body.has-manifest .schematic-stack {
+      border-right: 0;
+      border-bottom: 1px solid var(--rule-strong);
+    }
+
     .schematic-scroll {
       height: min(68vh, 620px);
       min-height: 460px;
@@ -1289,7 +1494,6 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
       overflow-y: hidden;
       overscroll-behavior-x: contain;
       border-right: 0;
-      border-bottom: 1px solid var(--rule-strong);
     }
 
     .schematic-plot {
@@ -1319,8 +1523,8 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
   }
 
   @media (max-width: 560px) {
-    .manifest li {
-      grid-template-columns: 50px minmax(0, 1fr);
+    .manifest li > button {
+      grid-template-columns: 26px 46px minmax(0, 1fr);
       padding-inline: 11px;
     }
 
@@ -1332,7 +1536,7 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
   @media (prefers-reduced-motion: reduce) {
     .vessel,
     .vessel-ship,
-    .heading-runway {
+    .direction-chevrons {
       transition: none;
     }
 
@@ -1344,35 +1548,35 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
   @media (forced-colors: active) {
     .route-color,
     .wakes line,
-    .heading-runway line,
-    .callout-leader,
+    .direction-chevrons path,
+    .annotation-leaders line,
     .target-disc,
     .target-ticks {
       stroke: CanvasText;
-    }
-
-    .callout-plate,
-    .vessel-mini-readout rect {
-      fill: Canvas;
-      stroke: CanvasText;
-    }
-
-    .vessel-tag,
-    .vessel-type,
-    .vessel-direction,
-    .vessel-eta,
-    .vessel-eta-label,
-    .mini-name,
-    .mini-type,
-    .mini-movement,
-    .mini-eta {
-      fill: CanvasText;
     }
 
     .target-state-board rect,
     .target-chip,
     .impact strong {
       forced-color-adjust: none;
+    }
+
+    .identifier-selection {
+      fill: Canvas;
+      stroke: Highlight;
+    }
+
+    .callout-plate {
+      fill: Canvas;
+      stroke: CanvasText;
+    }
+
+    .callout-index-text,
+    .callout-name,
+    .callout-motion,
+    .callout-eta,
+    .callout-eta-label {
+      fill: CanvasText;
     }
   }
 </style>

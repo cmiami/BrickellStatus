@@ -2,10 +2,11 @@
   import { Clock3, Navigation, RotateCcw, X } from '@lucide/svelte';
 
   import VesselGlyph from '$lib/components/VesselGlyph.svelte';
-  import type { BridgeCrossing, VesselDetail, VesselTrack } from '$lib/types';
+  import type { BridgeCrossing, KnownOpener, VesselDetail, VesselTrack } from '$lib/types';
 
   let {
-    track,
+    track = null,
+    knownOpener = null,
     detail = null,
     loading = false,
     error = null,
@@ -13,7 +14,8 @@
     onclose,
     onretry = () => {}
   }: {
-    track: VesselTrack;
+    track?: VesselTrack | null;
+    knownOpener?: KnownOpener | null;
     detail?: VesselDetail | null;
     loading?: boolean;
     error?: string | null;
@@ -25,14 +27,23 @@
   let panel = $state<HTMLElement | null>(null);
   let focusedMmsi = '';
 
+  const mmsi = $derived(track?.mmsi ?? knownOpener?.mmsi ?? detail?.mmsi ?? '');
+  const vesselClass = $derived(track?.vesselClass ?? knownOpener?.vesselClass);
+  const vesselName = $derived(
+    track?.vesselName?.trim() || knownOpener?.vesselName?.trim() || `Vessel ${mmsi}`
+  );
+  const isKnownOpener = $derived(
+    track?.knownOpener === true ||
+      (knownOpener?.transitsOpened ?? detail?.transitsOpened ?? 0) > 0
+  );
+  const isLikelyToOpen = $derived(track?.likelyToOpenBrickell === true);
+
   $effect(() => {
-    const mmsi = track.mmsi;
-    if (mmsi === focusedMmsi) return;
-    focusedMmsi = mmsi;
+    const activeMmsi = mmsi;
+    if (!activeMmsi || activeMmsi === focusedMmsi) return;
+    focusedMmsi = activeMmsi;
     queueMicrotask(() => panel?.focus());
   });
-
-  const vesselName = $derived(track.vesselName?.trim() || `Vessel ${track.mmsi}`);
   const resolvedPassages = $derived(
     (detail?.transitsOpened ?? 0) + (detail?.transitsFitsUnder ?? 0)
   );
@@ -89,6 +100,7 @@
   }
 
   function dimensions(): string | null {
+    if (!track) return null;
     const length = formatDimension(track.lengthMeters);
     const beam = formatDimension(track.beamMeters);
     const draught = formatDimension(track.draughtMeters);
@@ -103,6 +115,7 @@
   }
 
   function etaWords(): string | null {
+    if (!track) return null;
     if (track.etaMinMinutes == null) return null;
     if (track.etaMaxMinutes == null || track.etaMaxMinutes === track.etaMinMinutes) {
       return `${track.etaMinMinutes} min to Brickell`;
@@ -111,10 +124,18 @@
   }
 
   function impactSummary(): string {
+    if (!track) {
+      return 'No AIS position in the last hour. This vessel is not affecting the live Brickell forecast right now.';
+    }
+    if (track.likelyToOpenBrickell) {
+      return etaWords()
+        ? `Likely to open Brickell on this passage · ${etaWords()}`
+        : 'Likely to open Brickell on this passage. Arrival time is not clear yet.';
+    }
     if (track.routeIntersects) {
       return etaWords()
-        ? `Latest reading: on a Brickell-bound path · ${etaWords()}`
-        : 'Latest reading: on a Brickell-bound path. Arrival time is not clear yet.';
+        ? `On a Brickell-bound path · ${etaWords()}. Its opening impact is not established.`
+        : 'On a Brickell-bound path. Its opening impact and arrival time are not established yet.';
     }
     if (track.movement === 'approaching') {
       return 'Latest reading: moving toward Brickell, but too far out to count as an expected passage.';
@@ -173,12 +194,18 @@
 >
   <header class="detail-header">
     <svg class="vessel-mark" viewBox="-42 -27 84 54" role="img" aria-label={`${vesselName} vessel profile`}>
-      <VesselGlyph kind={track.vesselClass} length={54} />
+      <VesselGlyph kind={vesselClass} length={54} opener={isLikelyToOpen} />
     </svg>
     <div>
       <p class="registration-label">Vessel details</p>
       <h2 id="vessel-detail-title">{vesselName}</h2>
-      <p>MMSI {track.mmsi}{track.vesselClass ? ` · ${track.vesselClass}` : ''}</p>
+      <p class="vessel-meta">MMSI {mmsi}{vesselClass ? ` · ${vesselClass}` : ''}</p>
+      {#if isKnownOpener || isLikelyToOpen}
+        <div class="opener-status" aria-label="Brickell opener status">
+          {#if isKnownOpener}<span>Known opener</span>{/if}
+          {#if isLikelyToOpen}<strong>Likely to open Brickell</strong>{/if}
+        </div>
+      {/if}
     </div>
     <button class="detail-close" type="button" aria-label="Close vessel details" onclick={onclose}>
       <X size={18} aria-hidden="true" />
@@ -187,32 +214,43 @@
 
   <section class="current-reading" aria-labelledby="current-reading-title">
     <h3 id="current-reading-title">Latest AIS reading</h3>
-    <div class="reading-strip">
-      <div><strong>{track.speedKnots.toFixed(1)}</strong><span>knots</span></div>
-      <div><strong>{track.courseDegrees.toFixed(0)}°</strong><span>course</span></div>
-      <div>
-        <strong>{movementWords[track.movement]}</strong>
-        <span>{track.posture ? postureWords[track.posture] : 'Standing unavailable'}</span>
+    {#if track}
+      <div class="reading-strip">
+        <div><strong>{track.speedKnots.toFixed(1)}</strong><span>knots</span></div>
+        <div><strong>{track.courseDegrees.toFixed(0)}°</strong><span>course</span></div>
+        <div>
+          <strong>{movementWords[track.movement]}</strong>
+          <span>{track.posture ? postureWords[track.posture] : 'Standing unavailable'}</span>
+        </div>
       </div>
-    </div>
 
-    <dl class="identity-grid">
-      {#if track.callSign}<div><dt>Call sign</dt><dd>{track.callSign}</dd></div>{/if}
-      {#if track.imoNumber}<div><dt>IMO</dt><dd>{track.imoNumber}</dd></div>{/if}
-      {#if track.destination}<div class="wide"><dt>Destination</dt><dd>{track.destination}</dd></div>{/if}
-      {#if dimensions()}<div class="wide"><dt>Dimensions</dt><dd>{dimensions()}</dd></div>{/if}
-      <div><dt>Waterway</dt><dd>{track.branch ? branchWords[track.branch] : 'Not placed on the channel'}</dd></div>
-      <div><dt>Latest position</dt><dd><time datetime={track.observedAt}>{formatDateTime(track.observedAt)}</time></dd></div>
-    </dl>
+      <dl class="identity-grid">
+        {#if track.callSign}<div><dt>Call sign</dt><dd>{track.callSign}</dd></div>{/if}
+        {#if track.imoNumber}<div><dt>IMO</dt><dd>{track.imoNumber}</dd></div>{/if}
+        {#if track.destination}<div class="wide"><dt>Destination</dt><dd>{track.destination}</dd></div>{/if}
+        {#if dimensions()}<div class="wide"><dt>Dimensions</dt><dd>{dimensions()}</dd></div>{/if}
+        <div><dt>Waterway</dt><dd>{track.branch ? branchWords[track.branch] : 'Not placed on the channel'}</dd></div>
+        <div><dt>Latest position</dt><dd><time datetime={track.observedAt}>{formatDateTime(track.observedAt)}</time></dd></div>
+      </dl>
+    {:else}
+      <p class="no-live-reading">
+        {#if knownOpener?.lastSeenAt}
+          Last seen <time datetime={knownOpener.lastSeenAt}>{formatDateTime(knownOpener.lastSeenAt)}</time>.
+        {:else}
+          No recent position is available.
+        {/if}
+        Its saved Brickell history remains available below.
+      </p>
+    {/if}
   </section>
 
-  <section class:expected={track.routeIntersects} class="brickell-impact" aria-labelledby="brickell-impact-title">
+  <section class:expected={isLikelyToOpen} class="brickell-impact" aria-labelledby="brickell-impact-title">
     <div class="section-heading">
       <Navigation size={18} strokeWidth={1.7} aria-hidden="true" />
       <h3 id="brickell-impact-title">Brickell impact</h3>
     </div>
     <p id="vessel-detail-impact">{impactSummary()}</p>
-    {#if track.predictedOpeningAt}
+    {#if track?.predictedOpeningAt}
       <p class="passage-time">
         <Clock3 size={15} aria-hidden="true" />
         Possible passage {formatDateTime(track.predictedOpeningAt)}{track.waitsForSlot ? ' · waits for the next opening time' : ''}
@@ -232,7 +270,7 @@
       <p class="history-state" role="status">Loading this vessel’s Brickell history…</p>
     {:else if error}
       <div class="history-state history-error" role="alert">
-        <p>Brickell history could not be loaded. The latest AIS reading above is still available.</p>
+        <p>Brickell history could not be loaded. {track ? 'The latest AIS reading above is still available.' : 'The saved opener summary above is still available.'}</p>
         <button type="button" onclick={onretry}><RotateCcw size={15} aria-hidden="true" /> Try again</button>
       </div>
     {:else}
@@ -319,10 +357,40 @@
     text-transform: uppercase;
   }
 
-  .detail-header p:last-child {
+  .detail-header .vessel-meta {
     margin: 5px 0 0;
     color: var(--nav-muted);
     font-size: var(--type-caption);
+  }
+
+  .opener-status {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 9px;
+  }
+
+  .opener-status span,
+  .opener-status strong {
+    padding: 4px 6px;
+    font-family: var(--font-instrument);
+    font-size: var(--type-micro);
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    line-height: 1;
+    text-transform: uppercase;
+  }
+
+  .opener-status span {
+    color: var(--marine);
+    background: var(--corridor-sheet);
+    border: 1px solid var(--corridor);
+  }
+
+  .opener-status strong {
+    color: var(--graphite);
+    background: var(--amber);
+    border: 1px solid var(--amber-ink);
   }
 
   .detail-close {
@@ -369,6 +437,13 @@
     margin-top: 12px;
     color: var(--marine);
     border-block: 1px solid var(--rule-strong);
+  }
+
+  .no-live-reading {
+    margin: 12px 0 0;
+    color: var(--muted);
+    font-size: var(--type-body-small);
+    line-height: 1.5;
   }
 
   .reading-strip > div {

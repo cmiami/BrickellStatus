@@ -1599,6 +1599,52 @@ impl Store {
         .await?)
     }
 
+    /// Every vessel with at least one confirmed bridge-up passage.
+    ///
+    /// This is the durable opener catalog, not a recent-position query, so it
+    /// deliberately has no time cutoff. The set is naturally small and must
+    /// not lose an older opener merely because the bay was busy this hour.
+    pub async fn list_known_ais_openers(&self) -> Result<Vec<AisLedgerEntry>, StorageError> {
+        Ok(sqlx::query_as::<_, AisLedgerEntry>(
+            r#"
+            SELECT
+                l.mmsi,
+                l.name,
+                l.vessel_class,
+                l.call_sign,
+                l.imo_number,
+                l.destination,
+                l.length_meters,
+                l.beam_meters,
+                l.draught_meters,
+                l.transits_opened,
+                l.transits_fits_under,
+                COALESCE(t.transits_unknown, 0) AS transits_unknown,
+                COALESCE(t.transits_pending, 0) AS transits_pending,
+                l.first_seen_ms,
+                l.last_seen_ms,
+                t.last_crossing_at_ms,
+                t.last_opened_at_ms
+            FROM ais_vessel_ledger l
+            LEFT JOIN (
+                SELECT
+                    mmsi,
+                    SUM(CASE WHEN outcome = 'unknown' THEN 1 ELSE 0 END) AS transits_unknown,
+                    SUM(CASE WHEN outcome IS NULL THEN 1 ELSE 0 END) AS transits_pending,
+                    MAX(crossed_at_ms) AS last_crossing_at_ms,
+                    MAX(CASE WHEN outcome = 'opened' THEN crossed_at_ms END) AS last_opened_at_ms
+                FROM ais_transits
+                GROUP BY mmsi
+            ) t ON t.mmsi = l.mmsi
+            WHERE l.transits_opened > 0
+            ORDER BY COALESCE(t.last_opened_at_ms, l.last_seen_ms) DESC,
+                     l.mmsi ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// One hull's durable identity and Brickell crossing history.
     ///
     /// This is deliberately separate from the broad one-hour map snapshot:
@@ -2957,6 +3003,15 @@ mod tests {
         assert_eq!(
             history.recent_crossings[2].outcome.as_deref(),
             Some("unknown")
+        );
+        let known_openers = store.list_known_ais_openers().await.unwrap();
+        assert!(
+            known_openers.iter().any(|entry| entry.mmsi == mmsi),
+            "a vessel with one confirmed opening remains in the durable catalog"
+        );
+        assert!(
+            known_openers.iter().all(|entry| entry.transits_opened > 0),
+            "fits-under-only and unresolved vessels are not called known openers"
         );
         assert!(
             store

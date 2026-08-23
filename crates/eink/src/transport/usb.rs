@@ -390,9 +390,14 @@ where
             }
             received.extend_from_slice(&chunk[..count]);
             match device_reply(&received) {
-                Some(DeviceReply::Ready(banner)) => return Ok(Some(banner)),
-                Some(DeviceReply::Nack(message)) => return Err(TransportError::Nack(message)),
+                Some(DeviceReply::Ready(banner)) if serial_line_complete(&received, "READY") => {
+                    return Ok(Some(banner));
+                }
+                Some(DeviceReply::Nack(message)) if serial_line_complete(&received, "NACK") => {
+                    return Err(TransportError::Nack(message));
+                }
                 Some(DeviceReply::Ack) | None => {}
+                Some(DeviceReply::Ready(_) | DeviceReply::Nack(_)) => {}
             }
         }
     })
@@ -421,15 +426,17 @@ async fn wait_for_ack(
             }
             received.extend_from_slice(&chunk[..count]);
             match device_reply(&received) {
-                Some(DeviceReply::Ack) => {
+                Some(DeviceReply::Ack) if serial_line_complete(&received, "ACK INK1") => {
                     let text = String::from_utf8_lossy(&received);
                     let start = text.find("ACK INK1").expect("reply matched ACK above");
                     return Ok(safe_device_text(
                         text[start..].lines().next().unwrap_or("ACK INK1"),
                     ));
                 }
-                Some(DeviceReply::Nack(message)) => return Err(TransportError::Nack(message)),
-                Some(DeviceReply::Ready(_)) | None => {}
+                Some(DeviceReply::Nack(message)) if serial_line_complete(&received, "NACK") => {
+                    return Err(TransportError::Nack(message));
+                }
+                Some(DeviceReply::Ack | DeviceReply::Ready(_) | DeviceReply::Nack(_)) | None => {}
             }
         }
     })
@@ -438,6 +445,18 @@ async fn wait_for_ack(
         transport: TransportKind::Usb,
         waiting_for: "ACK INK1",
     })?
+}
+
+/// Serial reads may split one firmware reply at any byte. Wait for the CR/LF
+/// written by `Serial.println` before parsing it; otherwise a long READY banner
+/// can be cached before its trailing `FW<n>` version reaches the host.
+fn serial_line_complete(bytes: &[u8], marker: &str) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    text.find(marker).is_some_and(|start| {
+        text[start..]
+            .bytes()
+            .any(|byte| matches!(byte, b'\r' | b'\n'))
+    })
 }
 
 fn usb_io(message: String) -> TransportError {
@@ -471,6 +490,33 @@ mod tests {
         assert_eq!(
             banner.as_deref(),
             Some("READY INK1 250x122 3904 abc1234 E213 26B4")
+        );
+        responder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn identity_query_waits_for_a_fragmented_versioned_banner() {
+        let (mut host, mut device) = duplex(256);
+        let responder = tokio::spawn(async move {
+            let mut query = [0_u8; 1];
+            device.read_exact(&mut query).await.unwrap();
+            assert_eq!(query, [b'?']);
+            device
+                .write_all(
+                    b"PROBE attempt=0 pin1=driven pin6=floating\r\nREADY INK1 250x122 3904 e0f6a4d-dirty-261db27dbf0f E213 26B4",
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            device.write_all(b" FW4 BAT4270\r\n").await.unwrap();
+        });
+
+        let banner = request_identity(&mut host, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            banner.as_deref(),
+            Some("READY INK1 250x122 3904 e0f6a4d-dirty-261db27dbf0f E213 26B4 FW4 BAT4270")
         );
         responder.await.unwrap();
     }

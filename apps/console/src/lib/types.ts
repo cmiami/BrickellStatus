@@ -182,6 +182,10 @@ export interface VesselTrack {
    * means unproven, which is not the same as "fits under".
    */
   openingPropensity?: number;
+  /** This MMSI has at least one confirmed Brickell bridge-up passage. */
+  knownOpener?: boolean;
+  /** Current route and opening evidence indicate an approaching bridge impact. */
+  likelyToOpenBrickell?: boolean;
   /** Minutes until this vessel reaches the span. Absent when it is not closing. */
   etaMinMinutes?: number;
   etaMaxMinutes?: number;
@@ -254,6 +258,21 @@ export interface VesselDetail {
   recentCrossings: BridgeCrossing[];
 }
 
+/** A durable opener remains here even without a position in the Map's live hour. */
+export interface KnownOpener {
+  mmsi: string;
+  vesselName?: string;
+  vesselClass?: string;
+  callSign?: string;
+  imoNumber?: number;
+  transitsOpened: number;
+  transitsFitsUnder: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  lastOpenedAt?: string;
+  openingPropensity?: number;
+}
+
 export interface RiverCorridor {
   bridgeLatitude: number;
   bridgeLongitude: number;
@@ -272,6 +291,8 @@ export interface AppSnapshot {
   dispatches: DispatchRecord[];
   bridgeIntervals: BridgeStateInterval[];
   vesselTracks: VesselTrack[];
+  /** Every locally learned Brickell opener, whether currently broadcasting or not. */
+  knownOpeners: KnownOpener[];
   /** Always present; `aisLive` says whether vessels are being received. */
   riverCorridor: RiverCorridor;
   /** Recent bridge-line crossings, newest first. */
@@ -348,6 +369,8 @@ export interface LocationMapPoint {
   enabled?: boolean;
   draggable?: boolean;
   courseDegrees?: number;
+  knownOpener?: boolean;
+  likelyToOpenBrickell?: boolean;
 }
 
 export interface PolicyProfile {

@@ -275,17 +275,38 @@ Confidence is a rectangular ink stamp containing the numeric score and a word (`
 
 Location is visual before it is numeric. Place-based settings use the shared MapLibre surface with pan/zoom, search, saved markers, real AIS vessel positions, and one draggable amber candidate pin. Search or one-shot device location stages a pin before saving. Latitude, longitude, time zone, and radius remain under **Advanced coordinates**. Attribution stays visible, and an unavailable map falls back to search and the saved-place list without pretending vessel positions are live.
 
+Map also owns a persistent **Known Openers** catalog. It is durable history, not a filtered copy of the current AIS window, so a vessel remains browsable when it is no longer live or nearby. Each catalog row names the vessel or its MMSI and summarizes its confirmed Brickell opening record; selecting it opens the same vessel detail surface used by live marks, with identity, first and last sighting, confirmed bridge impacts, and recent passage history. Live readings and saved history occupy visibly separate sections so an old opening can never read as a current approach.
+
 ### Vessel Marks
 
 Vessels are authored side-profile drawings, not generic map pins. The outer silhouette must identify the class before a user reads its label: a tug has a deep workboat hull and tall pilothouse; cargo has an aft house and stacked container mass; a tanker has a long flush deck and manifold; a sailboat has a curved hull, keel, and separated sloop rig; passenger, fishing, pilot, and yacht profiles each retain their own working anatomy. A missing or unrecognized type uses one complete Miami flybridge yacht. It is never dashed, hollow, ghosted, or marked with a question symbol.
 
 Every profile shares a 44 × 26 drawing register and one waterline, then renders at the real 48–68 px live-view sizes. Recognition comes from bow, stern, sheer, cabin, and three to five class-defining details—not ornamental linework that only survives when zoomed in. Meaningful strokes remain at least 0.9 px at final size, windows remain at least 2 px, and masts or working gear never clip the view box.
 
-The normal two-tone construction is a Corridor Violet hull and working gear, White superstructure, Marine glazing, and a restrained Marine register shadow. An expected opener replaces Corridor Violet with Amber Ink while preserving the white structure and internal contrast. Vessel color never invents a class, confidence level, or broadcast state. Exact diagonal travel belongs to the adjacent course arrow; the illustrated vessel stays upright and mirrors horizontally to face upriver or downriver.
+The normal two-tone construction is a Corridor Violet hull and working gear, White superstructure, Marine glazing, and a restrained Marine register shadow. A **known opener** keeps that normal violet construction: it is the durable historical fact that Brickell has gone up for that vessel before, not a statement about where it is now. State the history in words as `KNOWN OPENER`; never turn the hull amber merely because it is in the catalog.
+
+Amber Ink is reserved for a **current likely opener**: a live track whose present route and bridge-impact evidence say it is likely to raise Brickell on this passage. Pair amber with the written state `LIKELY TO OPEN BRICKELL`, and remove both as soon as the live judgement clears. A known opener moving away stays violet; a vessel with no recorded opening may become amber when its current evidence supports likely impact. If several vessels contribute to one predicted opening, they form one amber action cluster rather than spending amber on unrelated vessel history.
+
+The Live schematic and its one scrollable right-hand register contain all and only current tracks the engine says will cross Brickell Avenue Bridge. “All” means no arbitrary top-three cap, priority cutoff, `+N` summary, second vessel list, or hidden qualifying vessel; it does not mean every AIS contact in Miami. Moving-away, moored, off-corridor, and no-path traffic belongs on Map and in stored history, not on the Brickell decision surface. An AIS sailing or yacht type may strengthen the opening-impact estimate after a route is committed, but vessel type alone never turns inbound bay traffic into a Brickell passage. The register states the full qualifying count, gives every row a stable two-digit number, names the vessel or falls back to its MMSI, and shows its recognizable type, direction, speed in knots, and Brickell ETA when one is supported. Durable `KNOWN OPENER` history remains separate from current `LIKELY TO OPEN BRICKELL` impact.
+
+Every vessel honestly positioned on the schematic repeats its register number beside a compact detail plate containing its name, direction, knots, and ETA. Place all plates in one global collision pass: like matching-polarity magnets, plates may not cover any route ribbon, Brickell or another bridge, another vessel, or another plate. A leader connects each displaced plate to its exact AIS hull; if no legal plate position exists, the numbered hull and complete register row remain rather than forcing an overlap. Put two unmistakable chevrons ahead of each hull along its actual route tangent—never behind it and never as a line through the vessel. Selecting a register row emphasizes its matching hull and plate without moving the AIS position.
+
+Vessel color never invents a class, confidence level, or broadcast state. Exact diagonal travel belongs to the adjacent course arrow; the illustrated vessel stays upright and mirrors horizontally to face upriver or downriver.
 
 ### Channel Status
 
 Every channel has a written `ON`, `OFF`, `UNAVAILABLE`, or `NEEDS ATTENTION` state separate from whether it appears on the display. Turning a channel off stops updates and alerts while leaving its settings editable. Active states use a success registration edge, off uses steel, and faults use the danger edge. Detailed source names and failure reasons remain available on System Health.
+
+### E-Paper Headline Card
+
+A headline card is a compact front page, not a generic alert. Its header names
+`NEWS` and urgency; the ruled subject row names the publisher; the display face
+gets up to two headline lines; and the lower field gets up to three smaller
+lines of synopsis. Freshness remains in the bottom tape. Do not spend the
+synopsis field repeating the headline, drawing an action box around a publisher,
+or listing “related” stories that cannot be opened from the panel. When a feed
+supplies no synopsis, show only truthful item metadata such as byline and
+publication age—never manufacture story detail.
 
 ### Panel Connection
 

@@ -206,6 +206,8 @@ function track(overrides: Partial<VesselTrack> = {}): VesselTrack {
     beamMeters: 9,
     draughtMeters: 3.1,
     openingPropensity: 6_700,
+    knownOpener: true,
+    likelyToOpenBrickell: true,
     etaMinMinutes: 6,
     etaMaxMinutes: 9,
     scheduleExempt: true,
@@ -392,7 +394,8 @@ describe('riverSchematic', () => {
       scheduleExempt: true,
       predictedOpeningAt: '2026-08-17T17:56:00Z',
       waitsForSlot: false,
-      opener: true
+      knownOpener: true,
+      likelyToOpenBrickell: true
     });
   });
 

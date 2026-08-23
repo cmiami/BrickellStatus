@@ -18,7 +18,6 @@
  */
 import type { RiverCorridor, RiverStation, VesselTrack } from './types';
 import {
-  isOpener,
   makeChannelProjector,
   reachVessels,
   type ReachVessel
@@ -618,5 +617,3 @@ function layOutVessels(
     });
   });
 }
-
-export { isOpener };

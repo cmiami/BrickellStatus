@@ -1,10 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  OPENER_PROPENSITY_BASIS_POINTS,
   corridorRing,
   currentVesselTracks,
-  isOpener,
   isUnderway,
   makeChannelProjector,
   reachScale,
@@ -136,20 +134,16 @@ describe('what counts as under way', () => {
   });
 });
 
-describe('naming an opener', () => {
-  it('marks a hull the ledger has watched open the span', () => {
-    expect(isOpener(track({ openingPropensity: OPENER_PROPENSITY_BASIS_POINTS }))).toBe(true);
-    expect(isOpener(track({ openingPropensity: 6700 }))).toBe(true);
-  });
-
-  it('marks a sailing rig on sight', () => {
-    expect(isOpener(track({ vesselClass: 'sailing', openingPropensity: undefined }))).toBe(true);
-  });
-
-  it('leaves an unproven hull unclaimed, and one seen fitting under', () => {
-    expect(isOpener(track({ openingPropensity: undefined }))).toBe(false);
-    // Beta-smoothed: one crossing under a closed span reads 3300, not zero.
-    expect(isOpener(track({ openingPropensity: 3300 }))).toBe(false);
+describe('opener facts published by the engine', () => {
+  it('keeps durable history separate from current bridge impact', () => {
+    const [known, likely] = reachVessels([
+      track({ knownOpener: true, likelyToOpenBrickell: false }),
+      track({ mmsi: '367705811', knownOpener: false, likelyToOpenBrickell: true })
+    ]);
+    expect(known.knownOpener).toBe(true);
+    expect(known.likelyToOpenBrickell).toBe(false);
+    expect(likely.knownOpener).toBe(false);
+    expect(likely.likelyToOpenBrickell).toBe(true);
   });
 });
 

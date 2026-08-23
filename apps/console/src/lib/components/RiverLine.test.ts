@@ -108,6 +108,8 @@ function vessel(overrides: Partial<VesselTrack> = {}): VesselTrack {
     sMeters: 1200,
     branch: 'river',
     openingPropensity: 6700,
+    knownOpener: true,
+    likelyToOpenBrickell: true,
     etaMinMinutes: 6,
     etaMaxMinutes: 9,
     scheduleExempt: true,
@@ -288,8 +290,8 @@ describe('RiverLine', () => {
 
     const mark = document.querySelector('.vessel');
     const ship = mark?.querySelector('.vessel-ship');
-    const callout = mark?.querySelector('.vessel-callout');
     const railItem = document.querySelector('.manifest li');
+    const callout = document.querySelector('.vessel-callout');
     const point = translatedPoint(mark!);
 
     expect(Number.isFinite(point.x)).toBe(true);
@@ -297,29 +299,117 @@ describe('RiverLine', () => {
     expect(ship).not.toHaveAttribute('transform');
     expect(glyphScaleX(ship!.querySelector('.vessel-glyph')!)).toBeGreaterThan(0);
     expect(ship?.querySelector('.vessel-glyph')).toHaveAttribute('data-family', 'tug');
-    expect(compactText(callout?.querySelector('.vessel-tag') ?? null)).toBe('SARA');
-    expect(compactText(callout?.querySelector('.vessel-type') ?? null)).toBe('Tug');
-    expect(compactText(callout?.querySelector('.vessel-direction') ?? null)).toBe(
-      'Downriver · 3.4 kn'
+    expect(compactText(railItem?.querySelector('.strip-id') ?? null)).toBe('SARA');
+    expect(compactText(railItem?.querySelector('.strip-type') ?? null)).toBe(
+      'Tug · Shown on route'
     );
-    expect(compactText(callout?.querySelector('.vessel-eta') ?? null)).toBe('6–9 min');
-    expect(compactText(callout?.querySelector('.vessel-eta-label') ?? null)).toBe('TO BRICKELL');
-    expect(compactText(callout?.querySelector('.callout-opener') ?? null)).toBe(
-      'EXPECTED OPENER'
-    );
+    expect(compactText(railItem?.querySelector('.manifest-index') ?? null)).toBe('01');
     expect(compactText(railItem?.querySelector('.strip-movement') ?? null)).toBe(
       'Downriver 3.4 kn'
     );
     expect(compactText(railItem?.querySelector('.strip-eta') ?? null)).toBe(
       '6–9 minTO BRICKELL'
     );
+    expect(compactText(railItem?.querySelector('.impact') ?? null)).toContain('KNOWN OPENER');
     expect(compactText(railItem?.querySelector('.impact') ?? null)).toContain(
-      'EXPECTED OPENER'
+      'LIKELY TO OPEN BRICKELL'
     );
+    expect(compactText(callout?.querySelector('.callout-index-text') ?? null)).toBe('01');
+    expect(compactText(callout?.querySelector('.callout-name') ?? null)).toBe('SARA');
+    expect(compactText(callout?.querySelector('.callout-motion') ?? null)).toBe(
+      'Downriver · 3.4 kn'
+    );
+    expect(compactText(callout?.querySelector('.callout-eta') ?? null)).toBe('6–9 min');
 
     const copy = compactText(document.body);
     expect(copy).not.toMatch(/AIS type|Type not broadcast/i);
     expect(document.querySelector('.type-key')).toBeNull();
+  });
+
+  it('shows every Brickell-bound vessel beyond three and excludes unrelated AIS contacts', () => {
+    const tracks = [
+      vessel({ mmsi: '111111111', vesselName: 'SARA' }),
+      vessel({ mmsi: '111111112', vesselName: 'COSTA V', sMeters: 1320 }),
+      vessel({ mmsi: '111111113', vesselName: 'PEPIN', sMeters: 1440 }),
+      vessel({ mmsi: '111111114', vesselName: 'MIA BELLA', sMeters: 1560 }),
+      vessel({ mmsi: '111111115', vesselName: 'JEANNINE D', sMeters: 1680 }),
+      vessel({
+        mmsi: '222222222',
+        vesselName: 'PORT WATCH',
+        vesselClass: 'passenger',
+        posture: 'off_channel',
+        branch: 'government_cut',
+        sMeters: -2300,
+        movement: 'unknown',
+        routeIntersects: false,
+        speedKnots: 7.3,
+        courseDegrees: 87,
+        knownOpener: false,
+        likelyToOpenBrickell: false,
+        etaMinMinutes: undefined,
+        etaMaxMinutes: undefined,
+        predictedOpeningAt: undefined
+      }),
+      vessel({
+        mmsi: '333333333',
+        vesselName: 'PEPIN',
+        posture: 'moored',
+        sMeters: 640,
+        movement: 'stationary',
+        routeIntersects: false,
+        speedKnots: 0,
+        knownOpener: true,
+        likelyToOpenBrickell: false,
+        etaMinMinutes: undefined,
+        etaMaxMinutes: undefined,
+        predictedOpeningAt: undefined
+      }),
+      vessel({
+        mmsi: '444444444',
+        vesselName: 'BAY HOLD',
+        posture: 'holding',
+        branch: 'government_cut',
+        sMeters: -1900,
+        movement: 'stationary',
+        routeIntersects: false,
+        speedKnots: 0,
+        knownOpener: false,
+        likelyToOpenBrickell: false,
+        etaMinMinutes: undefined,
+        etaMaxMinutes: undefined,
+        predictedOpeningAt: undefined
+      }),
+      vessel({
+        mmsi: '555555555',
+        vesselName: 'OPEN WATER',
+        posture: 'off_channel',
+        branch: undefined,
+        sMeters: undefined,
+        movement: 'diverging',
+        routeIntersects: false,
+        speedKnots: 8.2,
+        knownOpener: false,
+        likelyToOpenBrickell: false,
+        etaMinMinutes: undefined,
+        etaMaxMinutes: undefined,
+        predictedOpeningAt: undefined
+      })
+    ];
+
+    render(RiverLine, { corridor: CORRIDOR, vesselTracks: tracks, intervals: INTERVALS });
+
+    const rows = Array.from(document.querySelectorAll('.manifest li'));
+    const names = new Set(rows.map((row) => compactText(row.querySelector('.strip-id'))));
+
+    expect(rows).toHaveLength(5);
+    expect(document.querySelectorAll('.vessel')).toHaveLength(5);
+    expect(document.querySelectorAll('.vessel-callout')).toHaveLength(5);
+    expect(document.querySelector('.identifier-rail')).toBeNull();
+    expect(names).toEqual(new Set(['SARA', 'COSTA V', 'PEPIN', 'MIA BELLA', 'JEANNINE D']));
+    expect(names).not.toContain('PORT WATCH');
+    expect(names).not.toContain('BAY HOLD');
+    expect(names).not.toContain('OPEN WATER');
+    expect(compactText(document.querySelector('.manifest-head'))).toContain('VESSELS TO · 5');
   });
 
   it('keeps side-profile boats upright and mirrors them along every schematic route', () => {
@@ -350,12 +440,16 @@ describe('RiverLine', () => {
       for (const direction of ['upriver', 'downriver'] as const) {
         const mark = document.querySelector(`.vessel[data-mmsi='${direction}-${index}']`)!;
         const ship = mark.querySelector('.vessel-ship')!;
-        const runway = mark.querySelector('.heading-runway')!;
+        const chevrons = mark.querySelector('.direction-chevrons')!;
         const glyph = ship.querySelector('.vessel-glyph')!;
 
         expect(ship).not.toHaveAttribute('transform');
-        expect(runway.getAttribute('transform')).toMatch(/^rotate\(-?[\d.]+\)$/);
-        expect(runway.getAttribute('transform')).not.toContain('NaN');
+        expect(chevrons.getAttribute('transform')).toMatch(/^rotate\(-?[\d.]+\)$/);
+        expect(chevrons.getAttribute('transform')).not.toContain('NaN');
+        expect(chevrons.querySelector('path')).toHaveAttribute(
+          'd',
+          'M38 -8L48 0L38 8 M50 -8L60 0L50 8'
+        );
         expect(glyphScaleX(glyph) < 0).toBe(direction === 'upriver');
       }
     }
@@ -382,7 +476,6 @@ describe('RiverLine', () => {
 
     const mark = document.querySelector(".vessel[data-mmsi='367354090']");
     const glyph = mark?.querySelector('.vessel-glyph');
-    const callout = mark?.querySelector('.vessel-callout');
     const railItem = document.querySelector('.manifest li');
 
     expect(glyph).toHaveAttribute('data-family', 'generic-motor-yacht');
@@ -390,19 +483,19 @@ describe('RiverLine', () => {
     expect(glyph?.querySelectorAll('.house')).toHaveLength(2);
     expect(glyph?.querySelector('text')).toBeNull();
     expect(glyph?.querySelector('[stroke-dasharray]')).toBeNull();
-    expect(compactText(callout?.querySelector('.vessel-tag') ?? null)).toBe('367354090');
-    expect(compactText(callout?.querySelector('.vessel-type') ?? null)).toBe('Vessel');
     expect(compactText(railItem?.querySelector('.strip-id') ?? null)).toBe('367354090');
-    expect(compactText(railItem?.querySelector('.strip-type') ?? null)).toBe('Vessel');
+    expect(compactText(railItem?.querySelector('.strip-type') ?? null)).toBe(
+      'Vessel · Shown on route'
+    );
     expect(compactText(document.body)).not.toMatch(/unknown type|not broadcast|AIS type/i);
   });
 
-  it('omits the vessel sidebar when there are no vessels under way', () => {
+  it('omits the vessel sidebar when no current track will cross Brickell', () => {
     render(RiverLine, {
       corridor: CORRIDOR,
       vesselTracks: [
-        vessel({ mmsi: '111111111', posture: 'moored' }),
-        vessel({ mmsi: '222222222', posture: 'off_channel' })
+        vessel({ mmsi: '111111111', posture: 'moored', routeIntersects: false }),
+        vessel({ mmsi: '222222222', posture: 'off_channel', routeIntersects: false })
       ],
       intervals: INTERVALS
     });
@@ -434,7 +527,7 @@ describe('RiverLine', () => {
     });
 
     expect(document.querySelector('.strip-id')?.textContent).toBe('WDF7318');
-    expect(document.querySelector('.vessel-tag')?.textContent).toBe('WDF7318');
+    expect(compactText(document.querySelector('.vessel title'))).toContain('WDF7318');
     expect(compactText(document.body)).not.toContain('367705810');
   });
 
@@ -475,14 +568,10 @@ describe('RiverLine', () => {
       Math.max(...points.map((point) => point.y)) - Math.min(...points.map((point) => point.y))
     ).toBeLessThan(6);
 
-    const fullCallouts = Array.from(document.querySelectorAll('.vessel-callout'));
-    expect(new Set(fullCallouts.map((node) => node.getAttribute('transform'))).size).toBe(3);
-    expect(new Set(fullCallouts.map((node) => compactText(node.querySelector('.vessel-tag'))))).toEqual(
-      new Set(['SARA', 'COSTA V', 'PEPIN'])
-    );
-    expect(compactText(document.querySelector('.vessel-mini-readout'))).toContain('MIA BELLA');
-    expect(compactText(document.querySelector('.vessel-mini-readout'))).toContain('3.4 kn');
-    expect(compactText(document.querySelector('.vessel-mini-readout'))).toContain('BRICKELL');
+    const callouts = Array.from(document.querySelectorAll('.vessel-callout'));
+    expect(callouts).toHaveLength(4);
+    expect(new Set(callouts.map((callout) => callout.getAttribute('transform'))).size).toBe(4);
+    expect(document.querySelector('.vessel-mini-readout')).toBeNull();
     expect(
       new Set(Array.from(document.querySelectorAll('.manifest .strip-id')).map(compactText))
     ).toEqual(new Set(['SARA', 'COSTA V', 'PEPIN', 'MIA BELLA']));

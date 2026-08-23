@@ -21,6 +21,7 @@
   import type {
     AlertArea,
     AppPreferences,
+    KnownOpener,
     LocationMapPoint,
     LocationSearchResult,
     RadarLayer,
@@ -35,6 +36,8 @@
   let candidateEditingId = $state<string | null>(null);
   let selectedAreaId = $state<string | null>(null);
   let selectedVesselId = $state<string | null>(null);
+  let selectedKnownOpenerMmsi = $state<string | null>(null);
+  let vesselRegisterTab = $state<'live' | 'known'>('live');
   let vesselDetail = $state<VesselDetail | null>(null);
   let vesselDetailLoading = $state(false);
   let vesselDetailError = $state<string | null>(null);
@@ -93,12 +96,44 @@
     };
   });
   const vesselTracks = $derived<VesselTrack[]>($snapshot?.vesselTracks ?? []);
+  const knownOpeners = $derived<KnownOpener[]>($snapshot?.knownOpeners ?? []);
   const selectedVessel = $derived(
     selectedVesselId?.startsWith('vessel.')
       ? vesselTracks.find((track) => `vessel.${track.mmsi}` === selectedVesselId) ?? null
       : null
   );
+  const selectedKnownOpener = $derived(
+    selectedKnownOpenerMmsi
+      ? knownOpeners.find((vessel) => vessel.mmsi === selectedKnownOpenerMmsi) ?? null
+      : null
+  );
+  const selectedDetailMmsi = $derived(selectedVessel?.mmsi ?? selectedKnownOpener?.mmsi ?? null);
+  const selectedDetailTrack = $derived(
+    selectedVessel ??
+      (selectedKnownOpener
+        ? vesselTracks.find((track) => track.mmsi === selectedKnownOpener.mmsi) ?? null
+        : null)
+  );
+  const selectedKnownRecord = $derived(
+    selectedDetailMmsi
+      ? knownOpeners.find((vessel) => vessel.mmsi === selectedDetailMmsi) ?? null
+      : null
+  );
   const corridor = $derived($snapshot?.riverCorridor ?? null);
+
+  function movementLabel(track: VesselTrack): string {
+    switch (track.movement) {
+      case 'approaching':
+        return 'Toward Brickell';
+      case 'diverging':
+        return 'Away from Brickell';
+      case 'stationary':
+        return 'Holding position';
+      default:
+        return 'Direction not clear';
+    }
+  }
+
   const mapPoints = $derived<LocationMapPoint[]>([
     ...(draft?.areas.map((area) => ({
       id: area.id,
@@ -118,10 +153,12 @@
         label: track.vesselName ?? `Vessel ${track.mmsi}`,
         latitude: latest.latitude,
         longitude: latest.longitude,
-        detail: `${track.movement} · ${track.speedKnots.toFixed(1)} kn · ${track.points.length} course points`,
+        detail: `${movementLabel(track)} · ${track.speedKnots.toFixed(1)} kn · ${track.points.length} course points`,
         kind: 'vessel' as const,
         enabled: true,
-        courseDegrees: track.courseDegrees
+        courseDegrees: track.courseDegrees,
+        knownOpener: track.knownOpener === true,
+        likelyToOpenBrickell: track.likelyToOpenBrickell === true
       }];
     })
   ]);
@@ -186,10 +223,12 @@
     candidateEditingId = null;
     selectedAreaId = null;
     selectedVesselId = null;
+    selectedKnownOpenerMmsi = null;
   }
 
   function stagePinnedLocation(latitude: number, longitude: number) {
     selectedVesselId = null;
+    selectedKnownOpenerMmsi = null;
     if (candidate) {
       candidate.latitude = Number(latitude.toFixed(5));
       candidate.longitude = Number(longitude.toFixed(5));
@@ -215,6 +254,7 @@
     candidateEditingId = area.id;
     selectedAreaId = null;
     selectedVesselId = null;
+    selectedKnownOpenerMmsi = null;
   }
 
   function selectVessel(mmsi: string) {
@@ -223,6 +263,19 @@
       vesselSelectionReturnFocus = active;
     }
     selectedVesselId = `vessel.${mmsi}`;
+    selectedKnownOpenerMmsi = null;
+    selectedAreaId = null;
+    candidate = null;
+    candidateEditingId = null;
+  }
+
+  function selectKnownOpener(mmsi: string) {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && !active.closest('.vessel-detail-slot')) {
+      vesselSelectionReturnFocus = active;
+    }
+    selectedKnownOpenerMmsi = mmsi;
+    selectedVesselId = null;
     selectedAreaId = null;
     candidate = null;
     candidateEditingId = null;
@@ -230,6 +283,7 @@
 
   function closeVesselDetails() {
     selectedVesselId = null;
+    selectedKnownOpenerMmsi = null;
     const returnFocus = vesselSelectionReturnFocus;
     vesselSelectionReturnFocus = null;
     queueMicrotask(() => {
@@ -258,7 +312,7 @@
   }
 
   $effect(() => {
-    const mmsi = selectedVessel?.mmsi;
+    const mmsi = selectedDetailMmsi;
     if (!mmsi) {
       requestedVesselMmsi = '';
       vesselDetailRequest += 1;
@@ -448,6 +502,7 @@
           } else {
             selectedAreaId = point.id;
             selectedVesselId = null;
+            selectedKnownOpenerMmsi = null;
           }
           candidate = null;
           candidateEditingId = null;
@@ -455,16 +510,17 @@
         onpick={stagePinnedLocation}
       />
 
-      {#if selectedVessel}
+      {#if selectedDetailMmsi}
         <div class="vessel-detail-slot">
           <VesselDetailPanel
-            track={selectedVessel}
+            track={selectedDetailTrack}
+            knownOpener={selectedKnownRecord}
             detail={vesselDetail}
             loading={vesselDetailLoading}
             error={vesselDetailError}
             localTimeZone={$snapshot?.localTimeZone}
             onclose={closeVesselDetails}
-            onretry={() => void loadSelectedVesselDetail(selectedVessel.mmsi)}
+            onretry={() => void loadSelectedVesselDetail(selectedDetailMmsi)}
           />
         </div>
       {/if}
@@ -473,29 +529,59 @@
     <section class="ais-map-register" aria-labelledby="ais-map-heading">
       <header>
         <div>
-          <p class="registration-label">Vessel history</p>
-          <h2 id="ais-map-heading">Vessels seen in the last hour</h2>
+          <p class="registration-label">Vessel intelligence</p>
+          <h2 id="ais-map-heading">{vesselRegisterTab === 'live' ? 'Vessels seen in the last hour' : 'Known Brickell openers'}</h2>
         </div>
-        <strong>{vesselTracks.length.toString().padStart(2, '0')}</strong>
+        <strong>{(vesselRegisterTab === 'live' ? vesselTracks.length : knownOpeners.length).toString().padStart(2, '0')}</strong>
       </header>
-      {#if vesselTracks.length}
-        <div class="vessel-ledger">
-          {#each vesselTracks as track (track.mmsi)}
-            <button class:selected={selectedVesselId === `vessel.${track.mmsi}`} onclick={() => {
-              selectVessel(track.mmsi);
-            }}>
-              <span><strong>{track.vesselName ?? `Vessel ${track.mmsi}`}</strong><small>MMSI {track.mmsi}</small></span>
-              <span><strong>{track.movement}</strong><small>{track.routeIntersects ? 'Path crosses the Brickell approach' : 'Path does not cross the Brickell approach'}</small></span>
-              <span><strong>{track.speedKnots.toFixed(1)} kn</strong><small>{track.courseDegrees.toFixed(0)}° course · {track.points.length} points</small></span>
-              <time datetime={track.observedAt}>{new Date(track.observedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
-            </button>
-          {/each}
+      <div class="vessel-register-tabs" role="tablist" aria-label="Map vessel lists">
+        <button role="tab" aria-selected={vesselRegisterTab === 'live'} aria-controls="live-vessel-register" class:active={vesselRegisterTab === 'live'} onclick={() => (vesselRegisterTab = 'live')}>Live vessels <span>{vesselTracks.length}</span></button>
+        <button role="tab" aria-selected={vesselRegisterTab === 'known'} aria-controls="known-opener-register" class:active={vesselRegisterTab === 'known'} onclick={() => (vesselRegisterTab = 'known')}>Known openers <span>{knownOpeners.length}</span></button>
+      </div>
+
+      {#if vesselRegisterTab === 'live'}
+        <div id="live-vessel-register" role="tabpanel" class="vessel-register-panel">
+          {#if vesselTracks.length}
+            <div class="vessel-ledger">
+              {#each vesselTracks as track (track.mmsi)}
+                <button
+                  class:selected={selectedVesselId === `vessel.${track.mmsi}`}
+                  class:is-known-opener={track.knownOpener}
+                  class:is-likely-opener={track.likelyToOpenBrickell}
+                  onclick={() => selectVessel(track.mmsi)}
+                >
+                  <span><strong>{track.vesselName ?? `Vessel ${track.mmsi}`}</strong><small>MMSI {track.mmsi}{track.knownOpener ? ' · Known opener' : ''}</small></span>
+                  <span><strong>{track.likelyToOpenBrickell ? 'Likely to open Brickell' : movementLabel(track)}</strong><small>{track.routeIntersects ? 'Path crosses the Brickell approach' : 'No expected Brickell passage'}</small></span>
+                  <span><strong>{track.speedKnots.toFixed(1)} kn</strong><small>{track.courseDegrees.toFixed(0)}° course · {track.points.length} points</small></span>
+                  <time datetime={track.observedAt}>{new Date(track.observedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+                </button>
+              {/each}
+            </div>
+          {:else}
+            {@const aisSource = $snapshot?.system.sources.find((source) => source.sourceId.startsWith('aisstream.'))}
+            <p class="empty-vessels">
+              {aisSource?.detail ?? 'AISStream has not reported a vessel position yet.'}
+            </p>
+          {/if}
         </div>
       {:else}
-        {@const aisSource = $snapshot?.system.sources.find((source) => source.sourceId.startsWith('aisstream.'))}
-        <p class="empty-vessels">
-          {aisSource?.detail ?? 'AISStream has not reported a vessel position yet.'}
-        </p>
+        <div id="known-opener-register" role="tabpanel" class="vessel-register-panel">
+          {#if knownOpeners.length}
+            <div class="vessel-ledger known-opener-ledger">
+              {#each knownOpeners as vessel (vessel.mmsi)}
+                {@const confirmedPassages = vessel.transitsOpened + vessel.transitsFitsUnder}
+                <button class:selected={selectedKnownOpenerMmsi === vessel.mmsi} onclick={() => selectKnownOpener(vessel.mmsi)}>
+                  <span><strong>{vessel.vesselName ?? `Vessel ${vessel.mmsi}`}</strong><small>MMSI {vessel.mmsi}</small></span>
+                  <span><strong>Known opener</strong><small>{vessel.vesselClass ?? 'Vessel type not reported'}</small></span>
+                  <span><strong>Bridge up {vessel.transitsOpened} of {confirmedPassages}</strong><small>{vessel.openingPropensity != null ? `${Math.round(vessel.openingPropensity / 100)}% estimated opening chance` : 'Opening chance not calculated'}</small></span>
+                  <time datetime={vessel.lastOpenedAt ?? vessel.lastSeenAt}>{vessel.lastOpenedAt ? `Opened ${new Date(vessel.lastOpenedAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}` : `Seen ${new Date(vessel.lastSeenAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}`}</time>
+                </button>
+              {/each}
+            </div>
+          {:else}
+            <p class="empty-vessels">No vessel has a confirmed Brickell bridge-up passage yet.</p>
+          {/if}
+        </div>
       {/if}
     </section>
 
@@ -694,6 +780,61 @@
     font-size: var(--type-section);
   }
 
+  .vessel-register-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    border-top: 1px solid var(--rule);
+    border-inline: 1px solid var(--rule);
+  }
+
+  .vessel-register-tabs button {
+    display: flex;
+    min-height: 44px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    color: var(--muted);
+    background: var(--frost);
+    border: 0;
+    border-right: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule-strong);
+    padding: 10px 14px;
+    font-family: var(--font-instrument);
+    font-size: var(--type-label);
+    font-weight: 700;
+    letter-spacing: 0.055em;
+    text-align: left;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+
+  .vessel-register-tabs button:last-child {
+    border-right: 0;
+  }
+
+  .vessel-register-tabs button:hover {
+    color: var(--marine);
+    background: var(--paper);
+  }
+
+  .vessel-register-tabs button.active {
+    color: var(--white);
+    background: var(--marine);
+    border-bottom-color: var(--marine);
+  }
+
+  .vessel-register-tabs button:focus-visible,
+  .vessel-ledger button:focus-visible {
+    position: relative;
+    z-index: 1;
+    outline: 3px solid var(--amber);
+    outline-offset: -3px;
+  }
+
+  .vessel-register-tabs span {
+    font-variant-numeric: tabular-nums;
+  }
+
   .vessel-ledger {
     border-top: 1px solid var(--rule);
   }
@@ -716,6 +857,19 @@
   .vessel-ledger button:hover,
   .vessel-ledger button.selected {
     background: var(--amber-sheet);
+  }
+
+  .vessel-ledger button.is-known-opener:not(.is-likely-opener) {
+    box-shadow: inset 5px 0 0 var(--corridor);
+  }
+
+  .vessel-ledger button.is-likely-opener {
+    background: var(--amber-sheet);
+    box-shadow: inset 5px 0 0 var(--amber);
+  }
+
+  .known-opener-ledger button {
+    box-shadow: inset 5px 0 0 var(--corridor);
   }
 
   .vessel-ledger span {

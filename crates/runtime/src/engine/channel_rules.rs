@@ -381,18 +381,12 @@ fn channel_signal(
                 40,
             ),
         ),
-        // The action line used to read "Headline only. Open the story for
-        // detail." on every single card, which fits the panel as
-        // "HEADLINE ONLY. OPEN THE S>" and tells the reader nothing they had
-        // not already worked out. The publisher is the one fact the line can
-        // carry that the headline above it does not, and the parser has had it
-        // all along.
+        // This used to say "Headline only. Open the story for detail", which
+        // told a non-interactive panel reader nothing. Keep the publisher as a
+        // structured fact; the panel projection promotes it to the ruled row
+        // and spends the lower field on the synopsis.
         ChannelKindDto::News => (
-            signal_text(
-                item.summary.as_deref(),
-                "A current publisher item matches this channel's topic rules.",
-                360,
-            ),
+            syndicated_item_detail(item, now_ms),
             item_publisher(item),
             Some(if news_item_is_breaking(item) {
                 "Breaking".into()
@@ -401,11 +395,7 @@ fn channel_signal(
             }),
         ),
         ChannelKindDto::Sports => (
-            signal_text(
-                item.summary.as_deref(),
-                "A current item matches this channel's leagues and teams.",
-                360,
-            ),
+            syndicated_item_detail(item, now_ms),
             item_publisher(item),
             Some(if sports_item_is_transaction(item) {
                 "Roster move".into()
@@ -693,6 +683,90 @@ fn item_publisher(item: &CollectorItem) -> String {
         "Syndicated feed".into()
     } else {
         name.to_owned()
+    }
+}
+
+/// Supporting copy for a syndicated headline, with each fact stated once.
+///
+/// Google News descriptions open by repeating the complete headline, then
+/// concatenate links to other reporting. That is not a synopsis and the panel
+/// cannot open those links, so it is discarded rather than presented as useful
+/// story detail. Direct feeds keep their real summary. When a publisher supplied
+/// no synopsis at all, a byline and the story's publication age are the next
+/// useful facts the item actually knows.
+fn syndicated_item_detail(item: &CollectorItem, now_ms: i64) -> String {
+    let title = bounded_signal_text(&item.title, 360);
+    if let Some(summary) = item
+        .summary
+        .as_deref()
+        .map(|summary| bounded_signal_text(summary, 360))
+        .filter(|summary| !summary.is_empty())
+    {
+        if let Some(remainder) = copy_without_leading(&summary, &title) {
+            let google_cluster = item
+                .source
+                .url
+                .as_ref()
+                .and_then(url::Url::host_str)
+                .is_some_and(|host| host.eq_ignore_ascii_case("news.google.com"));
+            if !google_cluster && !copy_key(remainder).is_empty() {
+                return bounded_signal_text(remainder, 360);
+            }
+        } else if copy_key(&summary) != copy_key(&title) {
+            return summary;
+        }
+    }
+
+    let age = publication_age(item, now_ms);
+    let authors = item
+        .attributes
+        .get("authors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|author| !author.is_empty())
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if authors.is_empty() {
+        format!("Published {age}")
+    } else {
+        bounded_signal_text(&format!("By {authors} · {age}"), 360)
+    }
+}
+
+/// Removes one repeated leading field plus punctuation used as a separator.
+fn copy_without_leading<'a>(value: &'a str, repeated: &str) -> Option<&'a str> {
+    let candidate = value.get(..repeated.len())?;
+    candidate.eq_ignore_ascii_case(repeated).then(|| {
+        value[repeated.len()..].trim_start_matches(|character: char| {
+            character.is_whitespace()
+                || matches!(character, ':' | '-' | '\u{2013}' | '\u{2014}' | '·' | '|')
+        })
+    })
+}
+
+/// Case- and punctuation-insensitive key used only to detect duplicate copy.
+fn copy_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn publication_age(item: &CollectorItem, now_ms: i64) -> String {
+    let age_seconds = item
+        .observed_at
+        .as_ref()
+        .map_or(0, |observed| now_ms.saturating_sub(observed.timestamp_millis()).max(0) / 1_000);
+    match age_seconds {
+        0..=59 => "just now".into(),
+        60..=3_599 => format!("{} min ago", age_seconds / 60),
+        3_600..=86_399 => format!("{} hr ago", age_seconds / 3_600),
+        _ => format!("{} days ago", age_seconds / 86_400),
     }
 }
 
@@ -1544,6 +1618,10 @@ const MAX_AIS_STATUS_VESSELS: usize = 512;
 const MAX_MAP_VESSEL_TRACKS: usize = 64;
 const MAX_MAP_TRACK_POINTS: usize = 121;
 const MAP_TRACK_RETENTION_MS: i64 = 60 * 60 * 1_000;
+/// Current surface claim. This is deliberately lower than far-channel
+/// forecast pre-arming: once a vessel has a committed ETA, one confirmed
+/// opening is enough to tell the user it is likely to need the span again.
+const LIKELY_TO_OPEN_BRICKELL_BPS: u16 = 6_000;
 
 fn source_health(
     preferences: &AppPreferences,
@@ -1672,7 +1750,15 @@ fn vessel_tracks(state: &PersistedRuntimeState, now_ms: i64) -> Vec<VesselTrackS
             Some((observed_ms, track))
         })
         .collect::<Vec<_>>();
-    tracks.sort_by_key(|(observed_ms, _)| std::cmp::Reverse(*observed_ms));
+    // Live consumes the same bounded snapshot as Map. Keep every credible
+    // Brickell passage ahead of unrelated port traffic before applying that
+    // display bound, then preserve recency within each group.
+    tracks.sort_by(|(left_ms, left), (right_ms, right)| {
+        right
+            .route_intersects
+            .cmp(&left.route_intersects)
+            .then_with(|| right_ms.cmp(left_ms))
+    });
     tracks.truncate(MAX_MAP_VESSEL_TRACKS);
     let schedule = BrickellSchedule::new().ok();
     tracks
@@ -1687,6 +1773,12 @@ fn vessel_tracks(state: &PersistedRuntimeState, now_ms: i64) -> Vec<VesselTrackS
             if let Some(schedule) = schedule.as_ref() {
                 annotate_predicted_opening(&mut track, schedule, now_ms);
             }
+            let opening_evidence = track
+                .opening_propensity
+                .is_some_and(|score| score >= LIKELY_TO_OPEN_BRICKELL_BPS)
+                || track.vessel_class.as_deref() == Some("sailing");
+            track.likely_to_open_brickell =
+                opening_evidence && track.predicted_opening_at.is_some();
             track
         })
         .collect()

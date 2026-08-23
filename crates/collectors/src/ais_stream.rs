@@ -1753,15 +1753,14 @@ fn classify_corridor_fix(
         "underway"
     });
 
-    // On the river trunk every continuing course crosses the span; on an
-    // approach channel, commitment builds as the vessel nears the mouth, and
-    // a sailing rig is river-intent on any channel (the mast is why the
-    // bridge exists).
+    // On the river trunk every continuing course crosses the span. An inbound
+    // vessel on an approach channel is not committed to Brickell until it is
+    // near the river mouth: ship type can tell us whether a real passage needs
+    // an opening, but it cannot turn general bay traffic into a passage.
     let committed = match fix.branch {
         RiverBranch::River => true,
         RiverBranch::NorthApproach | RiverBranch::GovernmentCut | RiverBranch::SouthApproach => {
             distance_meters <= 1_600.0
-                || vessel_static.and_then(|value| value.ship_type) == Some(36)
         }
     };
     let route_intersects =
@@ -2717,6 +2716,37 @@ mod tests {
         assert_eq!(track.item.attributes["posture"], json!("deep_draft"));
         assert_eq!(track.item.attributes["route_intersects"], json!(false));
         assert!(!track.item.attributes.contains_key("eta_min_minutes"));
+    }
+
+    #[test]
+    fn a_far_inbound_sailboat_is_not_a_brickell_passage_until_it_reaches_the_mouth() {
+        let source_time = "2026-08-14T16:20:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("fixture time");
+        let latitude = 25.7637;
+        let longitude = -80.1340;
+        let fix = river::project(latitude, longitude);
+        assert_eq!(fix.branch, RiverBranch::GovernmentCut);
+        assert!(fix.channel_distance_meters() > 1_600.0);
+
+        let sailing = VesselStatic {
+            ship_type: Some(36),
+            ..VesselStatic::default()
+        };
+        let classification = classify_corridor_fix(
+            latitude,
+            longitude,
+            6.0,
+            fix.bridgeward_bearing_degrees,
+            source_time,
+            None,
+            Some(&sailing),
+            None,
+        );
+
+        assert_eq!(classification.movement, Movement::Approaching);
+        assert!(!classification.route_intersects);
+        assert!(classification.eta.is_none());
     }
 
     #[test]

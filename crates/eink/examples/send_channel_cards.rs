@@ -39,8 +39,8 @@ fn card(
         title,
         headline,
         detail,
-        // The action line carries the publisher now. Passing the same name to
-        // the source tape keeps this sheet honest about what the device shows.
+        // News puts this publisher in the subject row; other card families keep
+        // using the action field in their own way.
         source,
         ChannelSource::aged(source, age_seconds),
     )
@@ -84,13 +84,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cards = [
         (
-            "news / publisher on the action line",
+            "news / publisher above a three-line synopsis",
             card(
                 ChannelKind::News,
                 ChannelUrgency::Routine,
-                "Headlines",
+                "Miami Herald",
                 "Commission delays vote",
-                "Brickell zoning decision pushed to next month",
+                "Commissioners postponed the Brickell zoning decision until next month after residents requested a new traffic study.",
                 "Miami Herald",
                 420,
             ),
@@ -100,9 +100,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             card(
                 ChannelKind::News,
                 ChannelUrgency::Routine,
-                "Venezuela",
+                "Efecto Cocuyo",
                 "Sismo de magnitud 4 se sintió en La Guaira",
-                "Sin daños reportados en la zona costera",
+                "Sin daños reportados en la zona costera después del movimiento registrado durante la madrugada.",
                 "Efecto Cocuyo",
                 1_800,
             ),

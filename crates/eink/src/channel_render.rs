@@ -111,8 +111,12 @@ pub fn render_channel_card_with_radar(
             u16::try_from(RADAR_FIGURE_Y).unwrap_or(0),
         );
     }
-    draw_detail(&mut frame, card);
-    draw_action(&mut frame, card);
+    if card.channel == crate::ChannelKind::News {
+        draw_news_detail(&mut frame, card);
+    } else {
+        draw_detail(&mut frame, card);
+        draw_action(&mut frame, card);
+    }
     draw_source_tape(&mut frame, card);
     draw_rail(&mut frame, card);
     Ok(frame)
@@ -279,6 +283,29 @@ fn draw_detail(frame: &mut MonoFrame, card: &ChannelCard) {
         detail_rule_y(grid),
         BinaryColor::On,
     );
+}
+
+/// A news card is read, not acted on. Use the detail and action rows together
+/// for three lines of synopsis; the publisher has moved to the subject row and
+/// freshness remains in the bottom tape. This turns the lower half into useful
+/// story context on a panel where a link cannot be followed.
+fn draw_news_detail(frame: &mut MonoFrame, card: &ChannelCard) {
+    const LINES: usize = 3;
+    const LEADING: i32 = 11;
+
+    let grid = frame.grid();
+    for (index, value) in wrap(&card.detail, detail_characters(grid), LINES)
+        .iter()
+        .enumerate()
+    {
+        label(
+            frame,
+            DETAIL_TEXT_X,
+            detail_baseline(grid) + i32::try_from(index).unwrap_or(0) * LEADING,
+            value,
+            BinaryColor::On,
+        );
+    }
 }
 
 /// The action line, and the panel's emphasis ration.

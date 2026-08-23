@@ -85,11 +85,19 @@
     element.style.height = '34px';
     if (point.enabled === false) element.classList.add('is-disabled');
     if (point.id === selectedId || point.id === candidate?.id) element.classList.add('is-selected');
+    if (point.knownOpener) element.classList.add('is-known-opener');
+    if (point.likelyToOpenBrickell) element.classList.add('is-likely-opener');
+    const vesselStatus = point.kind === 'vessel'
+      ? [
+          point.knownOpener ? 'Known Brickell opener.' : '',
+          point.likelyToOpenBrickell ? 'Likely to open Brickell on this passage.' : ''
+        ].filter(Boolean).join(' ')
+      : '';
     element.setAttribute(
       'aria-label',
-      `${point.label}. Select ${point.kind === 'vessel' ? 'vessel' : 'location'}.`
+      `${point.label}. ${vesselStatus} Select ${point.kind === 'vessel' ? 'vessel' : 'location'}.`
     );
-    element.title = point.detail ? `${point.label} · ${point.detail}` : point.label;
+    element.title = [point.label, vesselStatus, point.detail].filter(Boolean).join(' · ');
     if (point.courseDegrees != null) element.style.setProperty('--course', `${point.courseDegrees}deg`);
     // MapLibre writes an inline transform on the root every camera frame, so
     // the pin's own shape and hover motion live one level in; anything
@@ -271,7 +279,7 @@
 
   $effect(() => {
     const markerSignature = allPoints
-      .map((point) => `${point.id}:${point.latitude}:${point.longitude}:${point.enabled}:${point.draggable}`)
+      .map((point) => `${point.id}:${point.latitude}:${point.longitude}:${point.enabled}:${point.draggable}:${point.knownOpener}:${point.likelyToOpenBrickell}`)
       .join('|');
     const trackSignature = vesselTracks
       .map((track) => `${track.mmsi}:${track.observedAt}:${track.points.length}:${track.movement}`)
@@ -703,6 +711,17 @@
     border-radius: 0;
     clip-path: polygon(50% 0, 100% 100%, 50% 76%, 0 100%);
     transform: rotate(var(--course, 0deg));
+  }
+
+  :global(.location-map-pin--vessel.is-known-opener) :global(.location-map-pin__body) {
+    outline: 2px solid var(--marine);
+    outline-offset: 2px;
+  }
+
+  :global(.location-map-pin--vessel.is-likely-opener) :global(.location-map-pin__body) {
+    color: var(--graphite);
+    background: var(--amber);
+    border-color: var(--graphite);
   }
 
   :global(.location-map-pin.is-disabled) :global(.location-map-pin__body) {

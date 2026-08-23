@@ -434,6 +434,16 @@ pub struct VesselTrackSnapshot {
     /// same as "fits under" and must not be displayed as one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opening_propensity: Option<u16>,
+    /// Durable fact: this MMSI has at least one resolved Brickell passage
+    /// during which the bridge went up. This is history, not a claim about the
+    /// vessel's current course.
+    #[serde(default)]
+    pub known_opener: bool,
+    /// Current-track judgement that this vessel is both committed to Brickell
+    /// and likely to need the span raised. A known opener moving away is false;
+    /// an unrecorded sailing rig approaching the bridge can be true.
+    #[serde(default)]
+    pub likely_to_open_brickell: bool,
     /// Minutes until this vessel reaches the span, as a range. Absent when it
     /// is not closing on the span at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -506,6 +516,32 @@ pub struct VesselDetailDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opening_propensity: Option<u16>,
     pub recent_crossings: Vec<BridgeCrossingDto>,
+}
+
+/// One vessel in the durable catalog of hulls observed raising Brickell.
+///
+/// Unlike [`VesselTrackSnapshot`], this record remains available when the
+/// vessel has no position in the one-hour Map window.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnownOpenerDto {
+    pub mmsi: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vessel_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vessel_class: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_sign: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imo_number: Option<u32>,
+    pub transits_opened: u64,
+    pub transits_fits_under: u64,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_opened_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opening_propensity: Option<u16>,
 }
 
 /// The AIS corridor as drawable geometry, published so a surface highlights
@@ -597,6 +633,10 @@ pub struct AppSnapshot {
     pub dispatches: Vec<DispatchRecord>,
     pub bridge_intervals: Vec<BridgeStateIntervalDto>,
     pub vessel_tracks: Vec<VesselTrackSnapshot>,
+    /// Every locally learned Brickell opener, including vessels that have no
+    /// current AIS position and therefore cannot appear on the live map.
+    #[serde(default)]
+    pub known_openers: Vec<KnownOpenerDto>,
     /// The river this app reasons about. Always present; see `ais_live` for
     /// whether anything is currently being received on it.
     pub river_corridor: RiverCorridorDto,

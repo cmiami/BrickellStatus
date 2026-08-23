@@ -920,6 +920,94 @@ async fn snapshot_publishes_the_tracked_corridor_whenever_ais_is_running() {
 }
 
 #[tokio::test]
+async fn known_opener_history_and_current_opening_likelihood_are_independent() {
+    let now_ms = 1_786_741_200_000;
+    let clock = Arc::new(FixedClock(AtomicI64::new(now_ms)));
+    let engine = engine_with(Arc::new(DownFl511Collector), clock).await;
+
+    sqlx::query(
+        r#"
+        INSERT INTO ais_vessel_ledger(
+            mmsi, name, vessel_class, transits_opened, first_seen_ms, last_seen_ms
+        ) VALUES
+            ('367000101', 'PAST OPENER', 'yacht', 1, ?1, ?1),
+            ('367000102', 'RETURNING OPENER', 'yacht', 1, ?1, ?1)
+        "#,
+    )
+    .bind(now_ms - 86_400_000)
+    .execute(engine.store.pool())
+    .await
+    .unwrap();
+
+    let observed_at = iso_timestamp(now_ms).unwrap();
+    let track = |mmsi: &str, movement: &str, vessel_class: &str, eta: Option<u16>| {
+        serde_json::from_value::<VesselTrackSnapshot>(json!({
+            "mmsi": mmsi,
+            "movement": movement,
+            "routeIntersects": true,
+            "speedKnots": 5.0,
+            "courseDegrees": 270.0,
+            "observedAt": observed_at,
+            "vesselClass": vessel_class,
+            "posture": "underway",
+            "etaMinMinutes": eta,
+            "etaMaxMinutes": eta.map(|minutes| minutes + 2),
+            "points": [{
+                "latitude": 25.76975,
+                "longitude": -80.185,
+                "observedAt": observed_at
+            }]
+        }))
+        .unwrap()
+    };
+    let tracks = vec![
+        track("367000101", "diverging", "yacht", None),
+        track("367000102", "approaching", "yacht", Some(8)),
+        track("367000103", "approaching", "sailing", Some(8)),
+        track("367000104", "approaching", "yacht", Some(8)),
+    ];
+
+    let mut source = SourceState::empty("bridge.brickell");
+    source.cursor.metadata.insert(
+        AIS_VESSEL_TRACKS_CURSOR_KEY.into(),
+        serde_json::to_string(&tracks).unwrap(),
+    );
+    let propensities = engine.load_ais_propensities().await.unwrap();
+    let mut state = engine.state.lock().await;
+    state
+        .active_sources
+        .insert("aisstream.bridge.brickell".into(), "bridge.brickell".into());
+    state
+        .sources
+        .insert("aisstream.bridge.brickell".into(), source);
+    state.ais_propensities = propensities;
+    drop(state);
+
+    let flags = engine
+        .get_snapshot()
+        .await
+        .unwrap()
+        .vessel_tracks
+        .into_iter()
+        .map(|track| {
+            (
+                track.mmsi,
+                (track.known_opener, track.likely_to_open_brickell),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        flags,
+        BTreeMap::from([
+            ("367000101".into(), (true, false)),
+            ("367000102".into(), (true, true)),
+            ("367000103".into(), (false, true)),
+            ("367000104".into(), (false, false)),
+        ])
+    );
+}
+
+#[tokio::test]
 async fn corridor_is_published_even_when_the_ais_channel_is_switched_off() {
     // The failure this guards: with AIS disabled an earlier build sent no
     // corridor at all, so the live surface rendered an empty space that looked
@@ -2530,6 +2618,47 @@ fn news_signal_exposes_publisher_content_and_replacement_identity() {
         "Miami transportation service restored"
     );
     assert_eq!(replacement_signal.severity.as_deref(), Some("Routine"));
+}
+
+#[test]
+fn syndicated_signal_uses_new_context_instead_of_repeating_the_headline() {
+    let now_ms = 1_786_741_200_000;
+    let channel = &AppPreferences::default().profile.channels[4];
+    let title = "The Data Center Backlash Bursts Into the Midterms";
+    let mut clustered = news_item("news:cluster", title, now_ms - 18 * 60_000);
+    clustered.source.name = "The New York Times".into();
+    clustered.source.url =
+        Some(Url::parse("https://news.google.com/rss/articles/cluster-id").unwrap());
+    clustered.summary = Some(format!(
+        "{title} The New York Times See the moment politicians turned against data centers"
+    ));
+
+    let signal = channel_signal(
+        ChannelKindDto::News,
+        channel,
+        &[&clustered],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(signal.detail, "Published 18 min ago");
+
+    let mut no_synopsis = news_item("news:no-summary", title, now_ms - 18 * 60_000);
+    no_synopsis.summary = Some(title.into());
+    no_synopsis
+        .attributes
+        .insert("authors".into(), json!(["Signals Desk"]));
+    let signal = channel_signal(
+        ChannelKindDto::News,
+        channel,
+        &[&no_synopsis],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(signal.detail, "By Signals Desk · 18 min ago");
 }
 
 #[test]

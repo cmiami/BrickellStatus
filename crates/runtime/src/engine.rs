@@ -14,8 +14,8 @@ use crate::{
     BridgeStateIntervalDto, ChannelKindDto, ChannelPreference, ChannelPriorityDto,
     ChannelSignalDto, ChannelSnapshot, CredentialFreeCollectorFactory, DecisionSnapshot,
     DeliveryStateDto, DestinationIdDto, DisplayTransport, EvidenceStateDto, EvidenceStrip,
-    LocationSearchError, LocationSearchResult, LocationSearchService, MutationResult,
-    ObservedBridgeStateDto, OutputSnapshot, OutputStateDto, PreferencesError,
+    KnownOpenerDto, LocationSearchError, LocationSearchResult, LocationSearchService,
+    MutationResult, ObservedBridgeStateDto, OutputSnapshot, OutputStateDto, PreferencesError,
     RiverCorridorBranchDto, RiverCorridorDto, RiverStationDto, SourceHealth, SystemHealth,
     SystemStatusDto, UnitSystem, UrgencyDto, VesselDetailDto, VesselTrackSnapshot,
     WhatsAppRecipientConsent, validate_preferences, whatsapp_consent_is_current,
@@ -36,8 +36,8 @@ use brickellstatus_policy::{
     EvidenceKind, PredictionError,
 };
 use brickellstatus_storage::{
-    AisCrossingObservation, AisCrossingRecord, AisTrackFix, AisVesselObservation, ForecastSample,
-    StorageError, Store,
+    AisCrossingObservation, AisCrossingRecord, AisLedgerEntry, AisTrackFix, AisVesselObservation,
+    ForecastSample, StorageError, Store,
 };
 use futures::{StreamExt, stream};
 use jiff::{Timestamp, tz::TimeZone};
@@ -892,6 +892,21 @@ impl RuntimeEngine {
             .into_iter()
             .map(bridge_crossing_dto)
             .collect::<Result<Vec<_>, RuntimeError>>()?;
+        snapshot.known_openers = self
+            .store
+            .list_known_ais_openers()
+            .await?
+            .into_iter()
+            .map(known_opener_dto)
+            .collect::<Result<Vec<_>, _>>()?;
+        let known_mmsi = snapshot
+            .known_openers
+            .iter()
+            .map(|vessel| vessel.mmsi.as_str())
+            .collect::<BTreeSet<_>>();
+        for track in &mut snapshot.vessel_tracks {
+            track.known_opener = known_mmsi.contains(track.mmsi.as_str());
+        }
         snapshot.system.database_size_bytes = self.store.database_size_bytes().await?;
         Ok(snapshot)
     }
@@ -1417,6 +1432,7 @@ impl RuntimeEngine {
             dispatches: Vec::new(),
             bridge_intervals: Vec::new(),
             vessel_tracks,
+            known_openers: Vec::new(),
             river_corridor,
             bridge_crossings: Vec::new(),
             system: SystemHealth {
@@ -1750,6 +1766,34 @@ fn opening_propensity_bps(opened: i64, fits_under: i64) -> Option<u16> {
     }
     let score = (opened as f64 + 1.0) / (total as f64 + 2.0);
     Some((score * 10_000.0).round() as u16)
+}
+
+fn known_opener_dto(entry: AisLedgerEntry) -> Result<KnownOpenerDto, RuntimeError> {
+    Ok(KnownOpenerDto {
+        mmsi: entry.mmsi,
+        vessel_name: entry.name,
+        vessel_class: entry.vessel_class,
+        call_sign: entry.call_sign,
+        imo_number: entry
+            .imo_number
+            .map(|value| {
+                u32::try_from(value).map_err(|_| {
+                    RuntimeError::Normalization(
+                        "vessel ledger contains an invalid IMO number".into(),
+                    )
+                })
+            })
+            .transpose()?,
+        transits_opened: nonnegative_count("opened transits", entry.transits_opened)?,
+        transits_fits_under: nonnegative_count("fits-under transits", entry.transits_fits_under)?,
+        first_seen_at: iso_timestamp(entry.first_seen_ms)?,
+        last_seen_at: iso_timestamp(entry.last_seen_ms)?,
+        last_opened_at: entry.last_opened_at_ms.map(iso_timestamp).transpose()?,
+        opening_propensity: opening_propensity_bps(
+            entry.transits_opened,
+            entry.transits_fits_under,
+        ),
+    })
 }
 
 fn bridge_crossing_dto(crossing: AisCrossingRecord) -> Result<BridgeCrossingDto, RuntimeError> {
@@ -2538,8 +2582,7 @@ fn source_label(kind: ChannelKindDto, _channel: &ChannelPreference) -> &'static 
         ChannelKindDto::Weather => "Open-Meteo",
         ChannelKindDto::Official => "National Weather Service",
         ChannelKindDto::Hurricane => "National Hurricane Center",
-        // Kept per-kind. The card's action line now names the publisher that
-        // filed the item, which is the honest per-feed answer; this label
+        // Kept per-kind. The selected signal names its own publisher; this label
         // describes the whole channel's provenance, where a single name would
         // be a lie as soon as a second feed is ticked.
         ChannelKindDto::News => "Configured RSS/Atom",

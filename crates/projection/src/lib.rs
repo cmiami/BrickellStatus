@@ -84,11 +84,20 @@ pub fn channel_card(
     } else {
         "NO MATERIAL CHANGE"
     };
+    // A news card already says NEWS in its header. Give its subject row to the
+    // publisher, then spend the lower half on a multi-line synopsis rather than
+    // putting the publisher in a large action box and cutting the story to one
+    // small line.
+    let title = if channel.active && channel.kind == ChannelKindDto::News {
+        signal.map_or(channel.title.as_str(), |signal| signal.action.as_str())
+    } else {
+        channel.title.as_str()
+    };
     ChannelCard::new(
         kind,
         urgency,
         availability,
-        bounded_text(&channel.title, 96),
+        bounded_text(title, 96),
         bounded_text(headline, 160),
         bounded_text(detail, 240),
         bounded_text(action, 160),

@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { VesselDetail, VesselTrack } from '$lib/types';
+import type { KnownOpener, VesselDetail, VesselTrack } from '$lib/types';
 
 import VesselDetailPanel from './VesselDetailPanel.svelte';
 
@@ -19,6 +19,8 @@ const TRACK: VesselTrack = {
   draughtMeters: 1.8,
   movement: 'approaching',
   posture: 'underway',
+  knownOpener: true,
+  likelyToOpenBrickell: true,
   routeIntersects: true,
   branch: 'river',
   sMeters: -420,
@@ -58,8 +60,23 @@ const DETAIL: VesselDetail = {
   ]
 };
 
+const KNOWN_OPENER: KnownOpener = {
+  mmsi: TRACK.mmsi,
+  vesselName: TRACK.vesselName,
+  vesselClass: TRACK.vesselClass,
+  callSign: TRACK.callSign,
+  imoNumber: TRACK.imoNumber,
+  transitsOpened: 2,
+  transitsFitsUnder: 1,
+  firstSeenAt: DETAIL.firstSeenAt,
+  lastSeenAt: DETAIL.lastSeenAt,
+  lastOpenedAt: DETAIL.lastOpenedAt,
+  openingPropensity: DETAIL.openingPropensity
+};
+
 function mount(overrides: {
-  track?: VesselTrack;
+  track?: VesselTrack | null;
+  knownOpener?: KnownOpener | null;
   detail?: VesselDetail | null;
   loading?: boolean;
   error?: string | null;
@@ -67,7 +84,8 @@ function mount(overrides: {
   const onclose = vi.fn();
   const onretry = vi.fn();
   render(VesselDetailPanel, {
-    track: overrides.track ?? TRACK,
+    track: overrides.track === undefined ? TRACK : overrides.track,
+    knownOpener: overrides.knownOpener ?? null,
     detail: overrides.detail === undefined ? DETAIL : overrides.detail,
     loading: overrides.loading ?? false,
     error: overrides.error ?? null,
@@ -88,11 +106,13 @@ describe('VesselDetailPanel', () => {
     expect(screen.getByText('knots')).toBeInTheDocument();
     expect(screen.getByText('273°')).toBeInTheDocument();
     expect(screen.getByText('Toward Brickell')).toBeInTheDocument();
+    expect(screen.getByText('Known opener')).toBeInTheDocument();
+    expect(screen.getByText('Likely to open Brickell')).toBeInTheDocument();
     expect(screen.getByText('WDF7318')).toBeInTheDocument();
     expect(screen.getByText('9876543')).toBeInTheDocument();
     expect(screen.getByText('Waterway').parentElement).toHaveTextContent('Miami River');
     expect(screen.getByText(/24\.6 m long · 6\.4 m beam · 1\.8 m draught/i)).toBeInTheDocument();
-    expect(screen.getByText(/latest reading: on a Brickell-bound path · 3–6 min to Brickell/i)).toBeInTheDocument();
+    expect(screen.getByText(/likely to open Brickell on this passage · 3–6 min to Brickell/i)).toBeInTheDocument();
 
     await waitFor(() => expect(screen.getByRole('complementary')).toHaveFocus());
   });
@@ -147,5 +167,15 @@ describe('VesselDetailPanel', () => {
     await fireEvent.keyDown(window, { key: 'Escape' });
     expect(failed.onclose).toHaveBeenCalledOnce();
     expect(loading.onclose).not.toHaveBeenCalled();
+  });
+
+  it('opens saved Brickell history for a known opener outside the live AIS window', () => {
+    mount({ track: null, knownOpener: KNOWN_OPENER });
+
+    expect(screen.getByRole('heading', { name: 'Island Time' })).toBeInTheDocument();
+    expect(screen.getByText('Known opener')).toBeInTheDocument();
+    expect(screen.getByText(/no AIS position in the last hour/i)).toBeInTheDocument();
+    expect(screen.getByText(/its saved Brickell history remains available below/i)).toBeInTheDocument();
+    expect(screen.getByText(/went up for this vessel on 2 of 3 confirmed passages/i)).toBeInTheDocument();
   });
 });
