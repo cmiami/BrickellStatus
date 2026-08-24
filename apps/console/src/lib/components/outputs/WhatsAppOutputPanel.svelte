@@ -119,7 +119,7 @@
 
   <div class="whatsapp-work">
     <div class="whatsapp-config">
-      <SwitchField checked={draft.whatsapp.enabled} label="WhatsApp delivery enabled" description="Only channels that include WhatsApp can enqueue a message." onchange={(enabled) => (draft.whatsapp.enabled = enabled)} />
+      <SwitchField checked={draft.whatsapp.enabled} label="WhatsApp delivery enabled" description="Important changes from every enabled channel use this route." onchange={(enabled) => (draft.whatsapp.enabled = enabled)} />
 
       <div class="two-fields">
         <label class="field"><span>Phone number ID</span><input bind:value={draft.whatsapp.phoneNumberId} maxlength="64" inputmode="numeric" autocomplete="off" /></label>
@@ -163,8 +163,8 @@
       </section>
 
       <div class="test-line">
-        <div><strong>{output?.detail ?? 'WhatsApp is not configured'}</strong><span>{settingsDirty ? 'Save these settings first.' : 'This sends one real template to the saved recipient.'}</span></div>
-        <button class="secondary-action action-with-icon" onclick={sendTest} disabled={testBusy || settingsDirty || !draft.whatsapp.enabled || !draft.whatsapp.tokenConfigured || !consentCurrent}><Send size={16} aria-hidden="true" /> {testBusy ? 'Submitting' : settingsDirty ? 'Save first' : 'Send template test'}</button>
+        <div><strong>{output?.detail ?? 'WhatsApp is not configured'}</strong><span>{settingsDirty ? 'Applying these settings…' : 'This sends one real template to the saved recipient.'}</span></div>
+        <button class="secondary-action action-with-icon" onclick={sendTest} disabled={testBusy || settingsDirty || !draft.whatsapp.enabled || !draft.whatsapp.tokenConfigured || !consentCurrent}><Send size={16} aria-hidden="true" /> {testBusy ? 'Submitting' : settingsDirty ? 'Applying changes…' : 'Send template test'}</button>
       </div>
     </div>
 
@@ -172,7 +172,7 @@
       <p>Message contract</p><h3>Material changes only</h3>
       <dl>
         <div><dt>Bridge</dt><dd>State, ETA, and confidence when predictive</dd></div>
-        <div><dt>Other channels</dt><dd>Only active, interruptible signals</dd></div>
+        <div><dt>Other channels</dt><dd>New or escalating important notices</dd></div>
         <div><dt>Resolved</dt><dd>One all-clear after an active signal clears</dd></div>
       </dl>
       <small>Meta acceptance is stored locally. The app does not infer delivered or read status.</small>

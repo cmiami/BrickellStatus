@@ -11,30 +11,34 @@ use std::{
 use crate::{
     AisConnectionStateDto, AisStreamStatusDto, AlertArea, AlertAreaSource, AppPreferences,
     AppSnapshot, AvailabilityDto, BridgeCrossingDto, BridgeRelationDto, BridgeStateDto,
-    BridgeStateIntervalDto, ChannelKindDto, ChannelPreference, ChannelPriorityDto,
-    ChannelSignalDto, ChannelSnapshot, CredentialFreeCollectorFactory, DecisionSnapshot,
-    DeliveryStateDto, DestinationIdDto, DisplayTransport, EvidenceStateDto, EvidenceStrip,
-    LocationSearchError, LocationSearchResult, LocationSearchService, MutationResult,
-    ObservedBridgeStateDto, OutputSnapshot, OutputStateDto, PreferencesError,
-    RiverCorridorBranchDto, RiverCorridorDto, RiverStationDto, SourceHealth, SystemHealth,
-    SystemStatusDto, UnitSystem, UrgencyDto, VesselTrackSnapshot, WhatsAppRecipientConsent,
-    validate_preferences, whatsapp_consent_is_current,
+    BridgeStateIntervalDto, ChannelKindDto, ChannelNoticeDto, ChannelPreference,
+    ChannelPriorityDto, ChannelSignalDto, ChannelSnapshot, CredentialFreeCollectorFactory,
+    DecisionSnapshot, DeliveryStateDto, DestinationIdDto, DisplayTransport, EvidenceStateDto,
+    EvidenceStrip, KnownOpenerDto, LocationSearchError, LocationSearchResult,
+    LocationSearchService, MutationResult, ObservedBridgeStateDto, OutputSnapshot, OutputStateDto,
+    PreferencesError, RiverCorridorBranchDto, RiverCorridorDto, RiverStationDto, SourceHealth,
+    SystemHealth, SystemStatusDto, UnitSystem, UrgencyDto, VesselDetailDto, VesselTrackSnapshot,
+    WhatsAppRecipientConsent, validate_preferences, whatsapp_consent_is_current,
 };
 use brickellstatus_collectors::{
-    AIS_CROSSINGS_CURSOR_KEY, AIS_VESSEL_TRACKS_CURSOR_KEY, AisCrossing, BRIDGE_LATITUDE,
-    BRIDGE_LONGITUDE, CollectContext, Collector, CollectorBatch, CollectorCursor, CollectorError,
-    CollectorItem, HealthState, ItemKind, corridor_geometry, project,
+    AIS_CROSSINGS_CURSOR_KEY, AIS_VESSEL_CATALOG_CURSOR_KEY, AIS_VESSEL_TRACKS_CURSOR_KEY,
+    AisCrossing, AisVesselCatalogEntry, BRIDGE_LATITUDE, BRIDGE_LONGITUDE, CollectContext,
+    Collector, CollectorBatch, CollectorCursor, CollectorError, CollectorItem, HealthState,
+    ItemKind, corridor_geometry, project,
 };
 use brickellstatus_model::{
-    Availability, AvailabilityStatus, BridgeControllerState, BridgeObservation, ChannelId,
-    Confidence, EtaRangeMinutes, Observation, ObservationId, OutboundProgressStage, SourceId,
-    TimestampMillis, VesselMovement,
+    Availability, AvailabilityStatus, BridgeControllerState, BridgeObservation,
+    BridgeOperatingMode, BridgeState, ChannelId, Confidence, EtaRangeMinutes, Observation,
+    ObservationId, OutboundProgressStage, SourceId, TimestampMillis, VesselMovement,
 };
 use brickellstatus_policy::{
     BrickellSchedule, BridgeEvidence, BridgePrediction, BridgePredictor, ContributionDisposition,
     EvidenceKind, PredictionError,
 };
-use brickellstatus_storage::{AisCrossingObservation, AisTrackFix, StorageError, Store};
+use brickellstatus_storage::{
+    AisCrossingObservation, AisCrossingRecord, AisLedgerEntry, AisTrackFix, AisVesselObservation,
+    ForecastSample, StorageError, Store,
+};
 use futures::{StreamExt, stream};
 use jiff::{Timestamp, tz::TimeZone};
 use serde::{Deserialize, Serialize};
@@ -51,9 +55,17 @@ use tracing::{debug, warn};
 
 const PREFERENCES_KEY: &str = "runtime.preferences";
 const LIVE_STATE_KEY: &str = "runtime.live_state";
+const FORECAST_TARGET_KEY: &str = "brickell";
+const FORECAST_MATERIAL_STEP_BPS: i64 = 250;
+const RECENT_VESSEL_CROSSINGS: u32 = 24;
+/// Far-channel commitment needs more than one matched opening. A single open
+/// crossing is Beta(1,1)-smoothed to 6,667 bps and may only be a hitchhiker;
+/// 7,000 therefore reserves pre-arming for repeated all-open outcomes.
+const KNOWN_OPENER_PREARM_BPS: u16 = 7_000;
+const KNOTS_TO_METERS_PER_SECOND: f64 = 0.514_444;
 /// Closest two kept fixes of one vessel may sit. Hulls do not move enough in
 /// half a minute to be worth a second row, and the spacing is what keeps a
-/// week of observed track inside a local database.
+/// one-year general archive inside a local database.
 const TRACK_FIX_MIN_SPACING_MS: i64 = 30_000;
 
 #[derive(Clone, Debug)]
@@ -352,6 +364,58 @@ struct PersistedRuntimeState {
     /// ledger query, not by this map.
     #[serde(default)]
     ais_propensities: BTreeMap<String, u16>,
+    /// Minute occupied by the last durable forecast row. Kept in live state so
+    /// a restart does not turn a 15-second collector cadence into duplicates.
+    #[serde(default)]
+    last_forecast_sample_minute_ms: Option<i64>,
+    /// Coarse signature used to replace the current minute's row when the
+    /// forecast changes materially, without banking freshness jitter.
+    #[serde(default)]
+    last_forecast_signature: Option<ForecastMaterialSignature>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+struct ForecastMaterialSignature {
+    model_version: String,
+    state: String,
+    predictive_score_bucket_bps: i64,
+    confidence_bucket_bps: i64,
+    eta_min_minutes: Option<i64>,
+    eta_max_minutes: Option<i64>,
+    schedule_mode: String,
+    contribution_buckets: BTreeMap<String, i64>,
+}
+
+#[derive(Clone, Debug)]
+struct ForecastStorageFields {
+    state: &'static str,
+    predictive_score_bps: i64,
+    confidence_bps: i64,
+    eta_min_minutes: Option<i64>,
+    eta_max_minutes: Option<i64>,
+    schedule_mode: &'static str,
+    contribution_bps: BTreeMap<String, i64>,
+    contribution_bps_json: String,
+    source_freshness_json: String,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct FreshnessAccumulator {
+    current: u32,
+    stale: u32,
+    unavailable: u32,
+    informational: u32,
+    freshness_total_bps: i64,
+    freshness_samples: u32,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct ForecastFreshnessSummary {
+    current: u32,
+    stale: u32,
+    unavailable: u32,
+    informational: u32,
+    average_freshness_bps: Option<i64>,
 }
 
 /// Two or more bridges reporting `unknown` in the same pass is the signature of
@@ -417,7 +481,11 @@ impl RuntimeEngine {
         // reached a fresh profile. Adopt the ones the user has never seen,
         // switched off, and leave every channel they already have alone.
         let adopted = adopt_new_default_channels(&mut preferences);
+        let standardized = crate::preferences::standardize_alert_policy(&mut preferences);
+        let quiet_time_zone_before = preferences.profile.quiet_hours.time_zone.clone();
         adopt_host_time_zone(&mut preferences);
+        let host_time_zone_adopted =
+            preferences.profile.quiet_hours.time_zone != quiet_time_zone_before;
         let secret_status_changed = if let Some(configured) = factory.aisstream_key_configured()? {
             let changed = preferences.ais.api_key_configured != configured
                 || preferences.ais.enabled != configured;
@@ -429,7 +497,12 @@ impl RuntimeEngine {
             false
         };
         validate_preferences(&preferences)?;
-        if stored_preferences.is_none() || secret_status_changed || adopted > 0 {
+        if stored_preferences.is_none()
+            || secret_status_changed
+            || adopted > 0
+            || standardized
+            || host_time_zone_adopted
+        {
             store
                 .set_json(PREFERENCES_KEY, &preferences, &iso_timestamp(now_ms)?)
                 .await?;
@@ -501,6 +574,7 @@ impl RuntimeEngine {
         if let Some(configured) = self.factory.aisstream_key_configured()? {
             preferences.ais.api_key_configured = configured;
         }
+        crate::preferences::standardize_alert_policy(&mut preferences);
         validate_preferences(&preferences)?;
         let registrations = self.factory.build(&preferences)?;
         let active_sources = active_source_map(&registrations)?;
@@ -562,6 +636,12 @@ impl RuntimeEngine {
 
         let mut preferences = self.preferences.read().await.clone();
         preferences.ais.api_key_configured = configured;
+        // The key decides here too, not only in the startup reconcile above.
+        // Setting the configured flag alone left a freshly saved key switched
+        // off until the next launch -- and deleting a key parks `enabled`, so
+        // replacing one landed exactly there: a stored key, a disabled source,
+        // and a mutation reporting that the live source was armed.
+        preferences.ais.enabled = configured;
         validate_preferences(&preferences)?;
         let registrations = self.factory.build(&preferences)?;
         let active_sources = active_source_map(&registrations)?;
@@ -780,6 +860,8 @@ impl RuntimeEngine {
             &current_evidence,
             next_state.previous_prediction.as_ref(),
         )?;
+        self.record_forecast_sample(&prediction, &mut next_state)
+            .await?;
         next_state.previous_prediction = Some(prediction);
 
         {
@@ -818,20 +900,76 @@ impl RuntimeEngine {
             .list_recent_ais_crossings(40)
             .await?
             .into_iter()
-            .map(|crossing| {
-                Ok(BridgeCrossingDto {
-                    mmsi: crossing.mmsi,
-                    vessel_name: crossing.name,
-                    vessel_class: crossing.vessel_class,
-                    direction: crossing.direction,
-                    crossed_at: iso_timestamp(crossing.crossed_at_ms)?,
-                    speed_knots: crossing.speed_knots,
-                    outcome: crossing.outcome,
-                })
-            })
+            .map(bridge_crossing_dto)
             .collect::<Result<Vec<_>, RuntimeError>>()?;
+        snapshot.known_openers = self
+            .store
+            .list_known_ais_openers()
+            .await?
+            .into_iter()
+            .map(known_opener_dto)
+            .collect::<Result<Vec<_>, _>>()?;
+        let known_mmsi = snapshot
+            .known_openers
+            .iter()
+            .map(|vessel| vessel.mmsi.as_str())
+            .collect::<BTreeSet<_>>();
+        for track in &mut snapshot.vessel_tracks {
+            track.known_opener = known_mmsi.contains(track.mmsi.as_str());
+        }
         snapshot.system.database_size_bytes = self.store.database_size_bytes().await?;
         Ok(snapshot)
+    }
+
+    /// Returns the durable Brickell impact record for one selected AIS hull.
+    ///
+    /// The one-hour map snapshot remains the source of live identity and
+    /// position. This read only joins the existing ledger and crossing tables;
+    /// it never changes collection breadth or retention.
+    pub async fn get_vessel_detail(
+        &self,
+        mmsi: &str,
+    ) -> Result<Option<VesselDetailDto>, RuntimeError> {
+        if !valid_mmsi(mmsi) {
+            return Err(RuntimeError::Configuration(
+                "MMSI must contain exactly 9 digits".into(),
+            ));
+        }
+        let Some(history) = self
+            .store
+            .get_ais_vessel_history(mmsi, RECENT_VESSEL_CROSSINGS)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let ledger = history.ledger;
+        let transits_opened = nonnegative_count("opened transits", ledger.transits_opened)?;
+        let transits_fits_under =
+            nonnegative_count("fits-under transits", ledger.transits_fits_under)?;
+        let transits_unknown = nonnegative_count("unknown transits", ledger.transits_unknown)?;
+        let transits_pending = nonnegative_count("pending transits", ledger.transits_pending)?;
+        let recent_crossings = history
+            .recent_crossings
+            .into_iter()
+            .map(bridge_crossing_dto)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Some(VesselDetailDto {
+            mmsi: ledger.mmsi,
+            transits_opened,
+            transits_fits_under,
+            transits_unknown,
+            transits_pending,
+            first_seen_at: iso_timestamp(ledger.first_seen_ms)?,
+            last_seen_at: iso_timestamp(ledger.last_seen_ms)?,
+            last_crossing_at: ledger.last_crossing_at_ms.map(iso_timestamp).transpose()?,
+            last_opened_at: ledger.last_opened_at_ms.map(iso_timestamp).transpose()?,
+            opening_propensity: opening_propensity_bps(
+                ledger.transits_opened,
+                ledger.transits_fits_under,
+            ),
+            recent_crossings,
+        }))
     }
 
     pub fn spawn_scheduler(self: &Arc<Self>) -> SchedulerHandle {
@@ -915,12 +1053,32 @@ impl RuntimeEngine {
     /// Persists where hulls actually ran. The live window the map reads from
     /// only reaches back an hour and is re-offered whole every cycle, so the
     /// fixes are thinned per vessel and re-inserts are ignored; what survives
-    /// is a week of observed water to calibrate the charted centreline
-    /// against.
+    /// is a one-year corridor archive for general traffic, while tracks from
+    /// hulls known to raise Brickell are retained as durable training history.
     async fn record_ais_track_fixes(
         &self,
         state: &PersistedRuntimeState,
     ) -> Result<(), RuntimeError> {
+        let mut catalog = BTreeMap::<String, AisVesselCatalogEntry>::new();
+        for encoded in state
+            .active_sources
+            .keys()
+            .filter(|source_id| source_id.starts_with("aisstream."))
+            .filter_map(|source_id| state.sources.get(source_id))
+            .filter_map(|source| source.cursor.metadata.get(AIS_VESSEL_CATALOG_CURSOR_KEY))
+        {
+            let Ok(entries) = serde_json::from_str::<Vec<AisVesselCatalogEntry>>(encoded) else {
+                continue;
+            };
+            for entry in entries {
+                let replace = catalog
+                    .get(&entry.mmsi)
+                    .is_none_or(|current| entry.observed_at > current.observed_at);
+                if replace {
+                    catalog.insert(entry.mmsi.clone(), entry);
+                }
+            }
+        }
         let tracks: Vec<VesselTrackSnapshot> = state
             .active_sources
             .keys()
@@ -930,10 +1088,62 @@ impl RuntimeEngine {
             .filter_map(|encoded| serde_json::from_str::<Vec<VesselTrackSnapshot>>(encoded).ok())
             .flatten()
             .collect();
-        if tracks.is_empty() {
+        if catalog.is_empty() && tracks.is_empty() {
             return Ok(());
         }
         let mut transaction = self.store.begin_transaction().await?;
+        let catalogued_mmsi = catalog.keys().cloned().collect::<BTreeSet<_>>();
+        for entry in catalog.values() {
+            transaction
+                .record_ais_vessel_observation(AisVesselObservation {
+                    mmsi: &entry.mmsi,
+                    name: entry.vessel_name.as_deref(),
+                    vessel_class: entry.vessel_class.as_deref(),
+                    call_sign: entry.call_sign.as_deref(),
+                    imo_number: entry.imo_number,
+                    destination: entry.destination.as_deref(),
+                    length_meters: entry.length_meters,
+                    beam_meters: entry.beam_meters,
+                    draught_meters: entry.draught_meters,
+                    observed_at_ms: entry.observed_at.timestamp_millis(),
+                })
+                .await?;
+        }
+
+        // Older persisted cursors have rich histories but no compact catalog.
+        // Keep their identities moving forward during the upgrade.
+        let mut catalog_tracks = BTreeMap::<&str, (&VesselTrackSnapshot, i64)>::new();
+        for track in &tracks {
+            if catalogued_mmsi.contains(&track.mmsi) {
+                continue;
+            }
+            let Ok(observed_at) = track.observed_at.parse::<Timestamp>() else {
+                continue;
+            };
+            let observed_at_ms = observed_at.as_millisecond();
+            let entry = catalog_tracks
+                .entry(track.mmsi.as_str())
+                .or_insert((track, observed_at_ms));
+            if observed_at_ms > entry.1 {
+                *entry = (track, observed_at_ms);
+            }
+        }
+        for (track, observed_at_ms) in catalog_tracks.into_values() {
+            transaction
+                .record_ais_vessel_observation(AisVesselObservation {
+                    mmsi: &track.mmsi,
+                    name: track.vessel_name.as_deref(),
+                    vessel_class: track.vessel_class.as_deref(),
+                    call_sign: track.call_sign.as_deref(),
+                    imo_number: track.imo_number,
+                    destination: track.destination.as_deref(),
+                    length_meters: track.length_meters,
+                    beam_meters: track.beam_meters,
+                    draught_meters: track.draught_meters,
+                    observed_at_ms,
+                })
+                .await?;
+        }
         for track in &tracks {
             let mut kept_at_ms: Option<i64> = None;
             for point in &track.points {
@@ -942,30 +1152,57 @@ impl RuntimeEngine {
                 };
                 let observed_at_ms = observed_at.as_millisecond();
                 // One fix per vessel per half-minute is finer than any hull
-                // changes position, and keeps a week inside a local database.
+                // changes position, and keeps a year practical locally.
                 if kept_at_ms
                     .is_some_and(|kept| (observed_at_ms - kept).abs() < TRACK_FIX_MIN_SPACING_MS)
                 {
                     continue;
                 }
                 kept_at_ms = Some(observed_at_ms);
-                let fix = project(point.latitude, point.longitude);
+                let projected = project(point.latitude, point.longitude);
                 transaction
                     .record_ais_track_fix(AisTrackFix {
                         mmsi: &track.mmsi,
                         observed_at_ms,
                         latitude: point.latitude,
                         longitude: point.longitude,
-                        speed_knots: Some(track.speed_knots),
-                        course_degrees: Some(track.course_degrees),
-                        branch: Some(fix.branch.as_str()),
-                        s_meters: Some(fix.s_meters),
-                        offset_meters: Some(fix.offset_meters),
+                        speed_knots: point.speed_knots.or(Some(track.speed_knots)),
+                        course_degrees: point.course_degrees.or(Some(track.course_degrees)),
+                        branch: point.branch.as_deref().or(Some(projected.branch.as_str())),
+                        s_meters: point.s_meters.or(Some(projected.s_meters)),
+                        offset_meters: point.offset_meters.or(Some(projected.offset_meters)),
                         posture: track.posture.as_deref(),
                         session_id: &self.session_id,
                     })
                     .await?;
             }
+        }
+        // Bank the broad catalog's one latest fix after the rich histories, so
+        // the storage spacing gate preserves exact per-point motion when both
+        // representations cover the same half-minute. Hulls outside the
+        // 64-history cap still contribute their latest position here.
+        for entry in catalog.values() {
+            let (Some(position_at), Some(latitude), Some(longitude)) =
+                (entry.position_observed_at, entry.latitude, entry.longitude)
+            else {
+                continue;
+            };
+            let projected = project(latitude, longitude);
+            transaction
+                .record_ais_track_fix(AisTrackFix {
+                    mmsi: &entry.mmsi,
+                    observed_at_ms: position_at.timestamp_millis(),
+                    latitude,
+                    longitude,
+                    speed_knots: entry.speed_knots,
+                    course_degrees: entry.course_degrees,
+                    branch: entry.branch.as_deref().or(Some(projected.branch.as_str())),
+                    s_meters: entry.s_meters.or(Some(projected.s_meters)),
+                    offset_meters: entry.offset_meters.or(Some(projected.offset_meters)),
+                    posture: entry.posture.as_deref(),
+                    session_id: &self.session_id,
+                })
+                .await?;
         }
         transaction.commit().await?;
         Ok(())
@@ -978,17 +1215,65 @@ impl RuntimeEngine {
             .list_ais_ledger(500)
             .await?
             .into_iter()
-            .filter(|entry| entry.transits_opened + entry.transits_fits_under > 0)
-            .map(|entry| {
-                // Beta(1,1)-smoothed share of observed crossings that needed
-                // the span raised: one opener reads ~0.67, never 1.0 — only
-                // repetition earns certainty.
-                let opened = entry.transits_opened as f64;
-                let total = (entry.transits_opened + entry.transits_fits_under) as f64;
-                let score = (opened + 1.0) / (total + 2.0);
-                (entry.mmsi, (score * 10_000.0).round() as u16)
+            .filter_map(|entry| {
+                opening_propensity_bps(entry.transits_opened, entry.transits_fits_under)
+                    .map(|score| (entry.mmsi, score))
             })
             .collect())
+    }
+
+    /// Keeps a compact calibration trace without mirroring the 15-second poll
+    /// cadence into SQLite. Each minute gets one row; a material change inside
+    /// that minute replaces the row through the storage uniqueness constraint.
+    async fn record_forecast_sample(
+        &self,
+        prediction: &BridgePrediction,
+        state: &mut PersistedRuntimeState,
+    ) -> Result<(), RuntimeError> {
+        let fields = forecast_storage_fields(prediction)?;
+        let minute_bucket_ms = prediction
+            .evaluated_at
+            .0
+            .saturating_sub(prediction.evaluated_at.0.rem_euclid(60_000));
+        let signature = ForecastMaterialSignature {
+            model_version: prediction.model_version.clone(),
+            state: fields.state.into(),
+            predictive_score_bucket_bps: material_bps(fields.predictive_score_bps),
+            confidence_bucket_bps: material_bps(fields.confidence_bps),
+            eta_min_minutes: fields.eta_min_minutes,
+            eta_max_minutes: fields.eta_max_minutes,
+            schedule_mode: fields.schedule_mode.into(),
+            contribution_buckets: fields
+                .contribution_bps
+                .iter()
+                .map(|(kind, score)| (kind.clone(), material_bps(*score)))
+                .collect(),
+        };
+        let new_minute = state.last_forecast_sample_minute_ms != Some(minute_bucket_ms);
+        let material_change = state.last_forecast_signature.as_ref() != Some(&signature);
+        if !new_minute && !material_change {
+            return Ok(());
+        }
+
+        self.store
+            .record_forecast_sample(ForecastSample {
+                target_key: FORECAST_TARGET_KEY,
+                evaluated_at_ms: prediction.evaluated_at.0,
+                model_version: &prediction.model_version,
+                state: fields.state,
+                predictive_score_bps: fields.predictive_score_bps,
+                confidence_bps: fields.confidence_bps,
+                eta_min_minutes: fields.eta_min_minutes,
+                eta_max_minutes: fields.eta_max_minutes,
+                schedule_mode: fields.schedule_mode,
+                contribution_bps_json: &fields.contribution_bps_json,
+                source_freshness_json: &fields.source_freshness_json,
+                session_id: &self.session_id,
+            })
+            .await?;
+        state.last_forecast_sample_minute_ms = Some(minute_bucket_ms);
+        state.last_forecast_signature = Some(signature);
+        Ok(())
     }
 
     async fn persist_refresh(
@@ -1006,6 +1291,11 @@ impl RuntimeEngine {
             let Some(source) = state.sources.get(source_id) else {
                 continue;
             };
+            // Cached rows stay available to the UI during backoff, but only a
+            // successful poll may advance durable last-confirmed time.
+            if source.last_success_ms != Some(now_ms) {
+                continue;
+            }
             let correlated_unknown = source
                 .items
                 .iter()
@@ -1067,6 +1357,9 @@ impl RuntimeEngine {
             let Some(source) = state.sources.get(source_id) else {
                 continue;
             };
+            if source.last_success_ms != Some(now_ms) {
+                continue;
+            }
             for item in &source.items {
                 if item.kind != ItemKind::VesselMovement {
                     continue;
@@ -1149,6 +1442,7 @@ impl RuntimeEngine {
             dispatches: Vec::new(),
             bridge_intervals: Vec::new(),
             vessel_tracks,
+            known_openers: Vec::new(),
             river_corridor,
             bridge_crossings: Vec::new(),
             system: SystemHealth {
@@ -1166,6 +1460,119 @@ impl RuntimeEngine {
                 sources,
             },
         })
+    }
+}
+
+fn forecast_storage_fields(
+    prediction: &BridgePrediction,
+) -> Result<ForecastStorageFields, RuntimeError> {
+    let mut contribution_bps = BTreeMap::<String, i64>::new();
+    let mut freshness = BTreeMap::<String, FreshnessAccumulator>::new();
+    for contribution in &prediction.contributions {
+        if contribution.kind == EvidenceKind::Controller {
+            continue;
+        }
+        if contribution.disposition == ContributionDisposition::Applied {
+            let kind = evidence_kind_name(contribution.kind);
+            *contribution_bps.entry(kind.into()).or_default() +=
+                score_basis_points(contribution.applied_score);
+        }
+        // Schedule and corroboration are locally derived terms, not source
+        // observations whose freshness can degrade.
+        if contribution.source_id.is_none() {
+            continue;
+        }
+        let summary = freshness
+            .entry(evidence_kind_name(contribution.kind).into())
+            .or_default();
+        match contribution.disposition {
+            ContributionDisposition::Applied => summary.current += 1,
+            ContributionDisposition::Informational => summary.informational += 1,
+            ContributionDisposition::Stale => summary.stale += 1,
+            ContributionDisposition::Unavailable => summary.unavailable += 1,
+            ContributionDisposition::Authoritative => continue,
+        }
+        if matches!(
+            contribution.disposition,
+            ContributionDisposition::Applied | ContributionDisposition::Informational
+        ) {
+            summary.freshness_total_bps +=
+                score_basis_points(contribution.freshness_factor.clamp(0.0, 1.0));
+            summary.freshness_samples += 1;
+        }
+    }
+
+    let freshness = freshness
+        .into_iter()
+        .map(|(kind, value)| {
+            (
+                kind,
+                ForecastFreshnessSummary {
+                    current: value.current,
+                    stale: value.stale,
+                    unavailable: value.unavailable,
+                    informational: value.informational,
+                    average_freshness_bps: (value.freshness_samples > 0)
+                        .then(|| value.freshness_total_bps / i64::from(value.freshness_samples)),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let contribution_bps_json = serde_json::to_string(&contribution_bps).map_err(|error| {
+        RuntimeError::Normalization(format!("could not encode forecast contributions: {error}"))
+    })?;
+    let source_freshness_json = serde_json::to_string(&freshness).map_err(|error| {
+        RuntimeError::Normalization(format!("could not encode forecast freshness: {error}"))
+    })?;
+
+    Ok(ForecastStorageFields {
+        state: bridge_state_name(prediction.predictive_state),
+        predictive_score_bps: i64::from(prediction.predictive_score.basis_points),
+        confidence_bps: i64::from(prediction.predictive_confidence.basis_points),
+        eta_min_minutes: prediction.eta.map(|eta| i64::from(eta.earliest)),
+        eta_max_minutes: prediction.eta.map(|eta| i64::from(eta.latest)),
+        schedule_mode: schedule_mode_name(prediction.schedule.mode),
+        contribution_bps,
+        contribution_bps_json,
+        source_freshness_json,
+    })
+}
+
+fn score_basis_points(score: f32) -> i64 {
+    (score * 10_000.0).round() as i64
+}
+
+fn material_bps(value: i64) -> i64 {
+    let magnitude = value.abs();
+    let rounded = ((magnitude + FORECAST_MATERIAL_STEP_BPS / 2) / FORECAST_MATERIAL_STEP_BPS)
+        * FORECAST_MATERIAL_STEP_BPS;
+    rounded * value.signum()
+}
+
+fn evidence_kind_name(kind: EvidenceKind) -> &'static str {
+    match kind {
+        EvidenceKind::Schedule => "schedule",
+        EvidenceKind::Ais => "ais",
+        EvidenceKind::Outbound => "outbound",
+        EvidenceKind::Controller => "controller",
+        EvidenceKind::Transit => "transit",
+        EvidenceKind::Corroboration => "corroboration",
+    }
+}
+
+fn bridge_state_name(state: BridgeState) -> &'static str {
+    match state {
+        BridgeState::Clear => "clear",
+        BridgeState::Likely => "likely",
+        BridgeState::Open => "open",
+    }
+}
+
+fn schedule_mode_name(mode: BridgeOperatingMode) -> &'static str {
+    match mode {
+        BridgeOperatingMode::OnSignal => "on_signal",
+        BridgeOperatingMode::Scheduled => "scheduled",
+        BridgeOperatingMode::Blackout => "blackout",
     }
 }
 
@@ -1238,6 +1645,7 @@ fn adopt_host_time_zone(preferences: &mut AppPreferences) {
     let Some(zone) = jiff::tz::TimeZone::system().iana_name().map(str::to_owned) else {
         return;
     };
+    preferences.profile.quiet_hours.time_zone.clone_from(&zone);
     for channel in &mut preferences.profile.channels {
         if channel.kind == ChannelKindDto::Bridge {
             channel
@@ -1348,6 +1756,68 @@ fn iso_timestamp(milliseconds: i64) -> Result<String, RuntimeError> {
     Timestamp::from_millisecond(milliseconds)
         .map(|timestamp| timestamp.to_string())
         .map_err(|error| RuntimeError::Time(error.to_string()))
+}
+
+fn valid_mmsi(mmsi: &str) -> bool {
+    mmsi.len() == 9 && mmsi.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn nonnegative_count(label: &str, value: i64) -> Result<u64, RuntimeError> {
+    u64::try_from(value).map_err(|_| {
+        RuntimeError::Normalization(format!("vessel ledger contains a negative {label}"))
+    })
+}
+
+/// Beta(1,1)-smoothed share of classified crossings that needed the span
+/// raised. One opener reads about 0.67, never 1.0; repetition earns certainty.
+fn opening_propensity_bps(opened: i64, fits_under: i64) -> Option<u16> {
+    let total = opened.checked_add(fits_under)?;
+    if opened < 0 || fits_under < 0 || total == 0 {
+        return None;
+    }
+    let score = (opened as f64 + 1.0) / (total as f64 + 2.0);
+    Some((score * 10_000.0).round() as u16)
+}
+
+fn known_opener_dto(entry: AisLedgerEntry) -> Result<KnownOpenerDto, RuntimeError> {
+    Ok(KnownOpenerDto {
+        mmsi: entry.mmsi,
+        vessel_name: entry.name,
+        vessel_class: entry.vessel_class,
+        call_sign: entry.call_sign,
+        imo_number: entry
+            .imo_number
+            .map(|value| {
+                u32::try_from(value).map_err(|_| {
+                    RuntimeError::Normalization(
+                        "vessel ledger contains an invalid IMO number".into(),
+                    )
+                })
+            })
+            .transpose()?,
+        transits_opened: nonnegative_count("opened transits", entry.transits_opened)?,
+        transits_fits_under: nonnegative_count("fits-under transits", entry.transits_fits_under)?,
+        first_seen_at: iso_timestamp(entry.first_seen_ms)?,
+        last_seen_at: iso_timestamp(entry.last_seen_ms)?,
+        last_opened_at: entry.last_opened_at_ms.map(iso_timestamp).transpose()?,
+        opening_propensity: opening_propensity_bps(
+            entry.transits_opened,
+            entry.transits_fits_under,
+        ),
+    })
+}
+
+fn bridge_crossing_dto(crossing: AisCrossingRecord) -> Result<BridgeCrossingDto, RuntimeError> {
+    Ok(BridgeCrossingDto {
+        mmsi: crossing.mmsi,
+        vessel_name: crossing.name,
+        vessel_class: crossing.vessel_class,
+        direction: crossing.direction,
+        crossed_at: iso_timestamp(crossing.crossed_at_ms)?,
+        speed_knots: crossing.speed_knots,
+        outcome: crossing.outcome,
+        resolved_at: crossing.resolved_at_ms.map(iso_timestamp).transpose()?,
+    })
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -1656,7 +2126,7 @@ fn bridge_fact(
                 "unknown" => VesselMovement::Unknown,
                 _ => return None,
             };
-            let eta = match (
+            let collector_eta = match (
                 item.attributes
                     .get("eta_min_minutes")
                     .and_then(Value::as_u64),
@@ -1679,15 +2149,33 @@ fn bridge_fact(
             // The ledger has watched this hull before; failing that, a
             // sailing rig is a near-certain opener on sight — the mast is the
             // reason the bascule exists.
-            let opening_propensity = mmsi
+            let learned_propensity = mmsi
                 .as_deref()
                 .and_then(|mmsi| propensities.get(mmsi))
                 .copied()
-                .map(Confidence::from_basis_points)
-                .or_else(|| {
-                    (item.attributes.get("vessel_class").and_then(Value::as_str) == Some("sailing"))
-                        .then(|| Confidence::from_basis_points(9_000))
-                });
+                .map(Confidence::from_basis_points);
+            let opening_propensity = learned_propensity.or_else(|| {
+                (item.attributes.get("vessel_class").and_then(Value::as_str) == Some("sailing"))
+                    .then(|| Confidence::from_basis_points(9_000))
+            });
+            let raw_route_intersects = item.attributes.get("route_intersects")?.as_bool()?;
+            // A hull that has repeatedly needed Brickell raised is useful
+            // before it reaches the short geometric intersection gate. Only
+            // pre-arm an approaching hull whose current posture still places
+            // it in the navigable corridor; a moored, off-channel, or
+            // deep-draft vessel keeps the collector's conservative result.
+            let known_opener_committed = movement == VesselMovement::Approaching
+                && learned_propensity
+                    .is_some_and(|value| value.basis_points >= KNOWN_OPENER_PREARM_BPS)
+                && matches!(
+                    item.attributes.get("posture").and_then(Value::as_str),
+                    Some("underway" | "waiting" | "holding")
+                );
+            let eta = collector_eta.or_else(|| {
+                (!raw_route_intersects && known_opener_committed)
+                    .then(|| known_opener_prearm_eta(item))
+                    .flatten()
+            });
             Some(BridgeObservation::AisTrack {
                 mmsi,
                 vessel_name: item
@@ -1696,13 +2184,40 @@ fn bridge_fact(
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned),
                 movement,
-                route_intersects: item.attributes.get("route_intersects")?.as_bool()?,
+                route_intersects: raw_route_intersects || known_opener_committed,
                 eta,
                 opening_propensity,
             })
         }
         _ => None,
     }
+}
+
+/// Supplies the ETA the collector intentionally withheld before learned hull
+/// history extended its short route-commitment gate. Distance is already the
+/// charted channel distance, and the collector has already established that
+/// this fix is approaching in-corridor. The physical cutoffs and uncertainty
+/// band deliberately match the collector's ETA estimator; keeping the helper
+/// here avoids making source normalization depend on runtime learning state.
+fn known_opener_prearm_eta(item: &CollectorItem) -> Option<EtaRangeMinutes> {
+    let distance_meters = item.attributes.get("distance_meters")?.as_f64()?;
+    let speed_knots = item.attributes.get("sog_knots")?.as_f64()?;
+    if !distance_meters.is_finite() || !speed_knots.is_finite() || distance_meters <= 50.0 {
+        return None;
+    }
+
+    let meters_per_second = speed_knots * KNOTS_TO_METERS_PER_SECOND;
+    if meters_per_second <= 0.25 {
+        return None;
+    }
+    let minutes = distance_meters / meters_per_second / 60.0;
+    if !minutes.is_finite() || !(0.25..=75.0).contains(&minutes) {
+        return None;
+    }
+
+    let earliest = (minutes * 0.75).floor().max(1.0) as u16;
+    let latest = (minutes * 1.35).ceil().clamp(f64::from(earliest), 90.0) as u16;
+    Some(EtaRangeMinutes::new(earliest, latest))
 }
 
 #[derive(Clone)]
@@ -2078,8 +2593,7 @@ fn source_label(kind: ChannelKindDto, _channel: &ChannelPreference) -> &'static 
         ChannelKindDto::Weather => "Open-Meteo",
         ChannelKindDto::Official => "National Weather Service",
         ChannelKindDto::Hurricane => "National Hurricane Center",
-        // Kept per-kind. The card's action line now names the publisher that
-        // filed the item, which is the honest per-feed answer; this label
+        // Kept per-kind. The selected signal names its own publisher; this label
         // describes the whole channel's provenance, where a single name would
         // be a lie as soon as a second feed is ticked.
         ChannelKindDto::News => "Configured RSS/Atom",
@@ -2111,7 +2625,6 @@ fn availability_dto(value: AvailabilityStatus) -> AvailabilityDto {
 fn bridge_state_dto(value: brickellstatus_model::BridgeState) -> BridgeStateDto {
     match value {
         brickellstatus_model::BridgeState::Clear => BridgeStateDto::Clear,
-        brickellstatus_model::BridgeState::Watch => BridgeStateDto::Possible,
         brickellstatus_model::BridgeState::Likely => BridgeStateDto::Likely,
         brickellstatus_model::BridgeState::Open => BridgeStateDto::Open,
     }
@@ -2160,17 +2673,6 @@ fn bridge_interval_dto(
 fn decision_copy(state: BridgeStateDto) -> (&'static str, &'static str, &'static str) {
     match state {
         BridgeStateDto::Clear => ("Road open", "No opening expected.", "Traffic is moving."),
-        // Not "Watch". A driver cannot act on a request to watch, and a state
-        // whose own advice was "Nothing to do yet" spent the largest type on
-        // the page saying nothing. For the person deciding whether to drive,
-        // this state and Clear have the same answer — the road is open — so it
-        // says so, and spends its detail on the one thing that differs: there
-        // is traffic on the river that has not yet earned a prediction.
-        BridgeStateDto::Possible => (
-            "Road open",
-            "Vessels on the river, no opening predicted.",
-            "Traffic is moving.",
-        ),
         // Status, not advice. Whether another route exists, and whether it is
         // worth taking, is something the driver knows and this app does not.
         BridgeStateDto::Likely => (

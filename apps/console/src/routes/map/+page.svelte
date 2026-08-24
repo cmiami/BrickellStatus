@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import {
     ArrowLeft,
     Crosshair,
@@ -7,7 +8,6 @@
     Move,
     Network,
     Plus,
-    Save,
     Search,
     Trash2
   } from '@lucide/svelte';
@@ -15,29 +15,33 @@
   import LocationMap from '$lib/components/LocationMap.svelte';
   import PinModal from '$lib/components/PinModal.svelte';
   import SwitchField from '$lib/components/SwitchField.svelte';
-  import { getDeviceLocation, getRadarLayer, searchLocations } from '$lib/api';
+  import VesselDetailPanel from '$lib/components/VesselDetailPanel.svelte';
+  import { getDeviceLocation, getRadarLayer, getVesselDetail, searchLocations } from '$lib/api';
   import { notice, persistPreferences, preferences, saving, snapshot } from '$lib/state';
-  import { formatSpeedKnots } from '$lib/units';
   import type {
     AlertArea,
     AppPreferences,
+    KnownOpener,
     LocationMapPoint,
     LocationSearchResult,
     RadarLayer,
+    VesselDetail,
     VesselTrack
   } from '$lib/types';
 
   let draft = $state<AppPreferences | null>(null);
   let initialized = $state(false);
-  let query = $state('');
-  let results = $state<LocationSearchResult[]>([]);
-  let searching = $state(false);
   let locating = $state(false);
-  let searchError = $state<string | null>(null);
   let candidate = $state<AlertArea | null>(null);
   let candidateEditingId = $state<string | null>(null);
   let selectedAreaId = $state<string | null>(null);
   let selectedVesselId = $state<string | null>(null);
+  let selectedKnownOpenerMmsi = $state<string | null>(null);
+  let vesselRegisterTab = $state<'live' | 'known'>('live');
+  let vesselDetail = $state<VesselDetail | null>(null);
+  let vesselDetailLoading = $state(false);
+  let vesselDetailError = $state<string | null>(null);
+  let vesselSelectionReturnFocus: HTMLElement | null = null;
   let radar = $state<RadarLayer | null>(null);
   let pinSaving = $state(false);
   let pinError = $state<string | null>(null);
@@ -92,7 +96,44 @@
     };
   });
   const vesselTracks = $derived<VesselTrack[]>($snapshot?.vesselTracks ?? []);
+  const knownOpeners = $derived<KnownOpener[]>($snapshot?.knownOpeners ?? []);
+  const selectedVessel = $derived(
+    selectedVesselId?.startsWith('vessel.')
+      ? vesselTracks.find((track) => `vessel.${track.mmsi}` === selectedVesselId) ?? null
+      : null
+  );
+  const selectedKnownOpener = $derived(
+    selectedKnownOpenerMmsi
+      ? knownOpeners.find((vessel) => vessel.mmsi === selectedKnownOpenerMmsi) ?? null
+      : null
+  );
+  const selectedDetailMmsi = $derived(selectedVessel?.mmsi ?? selectedKnownOpener?.mmsi ?? null);
+  const selectedDetailTrack = $derived(
+    selectedVessel ??
+      (selectedKnownOpener
+        ? vesselTracks.find((track) => track.mmsi === selectedKnownOpener.mmsi) ?? null
+        : null)
+  );
+  const selectedKnownRecord = $derived(
+    selectedDetailMmsi
+      ? knownOpeners.find((vessel) => vessel.mmsi === selectedDetailMmsi) ?? null
+      : null
+  );
   const corridor = $derived($snapshot?.riverCorridor ?? null);
+
+  function movementLabel(track: VesselTrack): string {
+    switch (track.movement) {
+      case 'approaching':
+        return 'Toward Brickell';
+      case 'diverging':
+        return 'Away from Brickell';
+      case 'stationary':
+        return 'Holding position';
+      default:
+        return 'Direction not clear';
+    }
+  }
+
   const mapPoints = $derived<LocationMapPoint[]>([
     ...(draft?.areas.map((area) => ({
       id: area.id,
@@ -112,10 +153,12 @@
         label: track.vesselName ?? `Vessel ${track.mmsi}`,
         latitude: latest.latitude,
         longitude: latest.longitude,
-        detail: `${track.movement} · ${formatSpeedKnots(track.speedKnots, draft?.unitSystem ?? 'imperial')} · ${track.points.length} course points`,
+        detail: `${movementLabel(track)} · ${track.speedKnots.toFixed(1)} kn · ${track.points.length} course points`,
         kind: 'vessel' as const,
         enabled: true,
-        courseDegrees: track.courseDegrees
+        courseDegrees: track.courseDegrees,
+        knownOpener: track.knownOpener === true,
+        likelyToOpenBrickell: track.likelyToOpenBrickell === true
       }];
     })
   ]);
@@ -179,11 +222,13 @@
     candidate = resultToArea(result, source);
     candidateEditingId = null;
     selectedAreaId = null;
-    results = [];
-    searchError = null;
+    selectedVesselId = null;
+    selectedKnownOpenerMmsi = null;
   }
 
   function stagePinnedLocation(latitude: number, longitude: number) {
+    selectedVesselId = null;
+    selectedKnownOpenerMmsi = null;
     if (candidate) {
       candidate.latitude = Number(latitude.toFixed(5));
       candidate.longitude = Number(longitude.toFixed(5));
@@ -208,8 +253,81 @@
     candidate = { ...$state.snapshot(area), id: `candidate.${area.id}` };
     candidateEditingId = area.id;
     selectedAreaId = null;
-    searchError = null;
+    selectedVesselId = null;
+    selectedKnownOpenerMmsi = null;
   }
+
+  function selectVessel(mmsi: string) {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && !active.closest('.vessel-detail-slot')) {
+      vesselSelectionReturnFocus = active;
+    }
+    selectedVesselId = `vessel.${mmsi}`;
+    selectedKnownOpenerMmsi = null;
+    selectedAreaId = null;
+    candidate = null;
+    candidateEditingId = null;
+  }
+
+  function selectKnownOpener(mmsi: string) {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && !active.closest('.vessel-detail-slot')) {
+      vesselSelectionReturnFocus = active;
+    }
+    selectedKnownOpenerMmsi = mmsi;
+    selectedVesselId = null;
+    selectedAreaId = null;
+    candidate = null;
+    candidateEditingId = null;
+  }
+
+  function closeVesselDetails() {
+    selectedVesselId = null;
+    selectedKnownOpenerMmsi = null;
+    const returnFocus = vesselSelectionReturnFocus;
+    vesselSelectionReturnFocus = null;
+    queueMicrotask(() => {
+      if (returnFocus?.isConnected) returnFocus.focus();
+    });
+  }
+
+  let vesselDetailRequest = 0;
+  let requestedVesselMmsi = '';
+
+  async function loadSelectedVesselDetail(mmsi: string) {
+    const request = ++vesselDetailRequest;
+    vesselDetail = null;
+    vesselDetailError = null;
+    vesselDetailLoading = true;
+    try {
+      const next = await getVesselDetail(mmsi);
+      if (request === vesselDetailRequest) vesselDetail = next;
+    } catch {
+      if (request === vesselDetailRequest) {
+        vesselDetailError = 'Brickell passage history is unavailable.';
+      }
+    } finally {
+      if (request === vesselDetailRequest) vesselDetailLoading = false;
+    }
+  }
+
+  $effect(() => {
+    const mmsi = selectedDetailMmsi;
+    if (!mmsi) {
+      requestedVesselMmsi = '';
+      vesselDetailRequest += 1;
+      vesselDetail = null;
+      vesselDetailError = null;
+      vesselDetailLoading = false;
+      return;
+    }
+    // The live snapshot refreshes every cycle. A new `VesselTrack` object for
+    // the same selected hull should update its current reading without making
+    // the slower passage-history section flash back to Loading every time.
+    if (mmsi === requestedVesselMmsi) return;
+    requestedVesselMmsi = mmsi;
+    void loadSelectedVesselDetail(mmsi);
+  });
 
   function discardCandidate() {
     candidate = null;
@@ -251,30 +369,11 @@
     }
     candidate = null;
     candidateEditingId = null;
-    searchError = null;
   }
 
-  async function search() {
-    const value = query.trim();
-    if (value.length < 2) {
-      searchError = 'Enter at least two characters or a postal code.';
-      return;
-    }
-    searching = true;
-    searchError = null;
-    try {
-      results = await searchLocations(value);
-      if (!results.length) searchError = `No locations matched “${value}”. Try a city plus state or country.`;
-    } catch (error) {
-      searchError = error instanceof Error ? error.message : 'Location search failed.';
-    } finally {
-      searching = false;
-    }
-  }
 
   async function useDeviceLocation() {
     locating = true;
-    searchError = null;
     try {
       const position = await getDeviceLocation();
       stageResult(
@@ -296,7 +395,7 @@
           : error instanceof Error
             ? error.message
             : 'This computer could not provide a location.';
-      searchError = message;
+      notice.set({ ok: false, message });
     } finally {
       locating = false;
     }
@@ -315,103 +414,67 @@
     }
     if (selectedAreaId === area.id) selectedAreaId = draft.areas[0]?.id ?? null;
     draft.profile.preset = 'custom';
-    notice.set({ ok: true, message: `${area.label} removed from the draft. Save to apply; reload to undo.` });
+    notice.set({ ok: true, message: `${area.label} removed. Changes save automatically.` });
   }
 
   async function save() {
     if (!draft) return;
     await persistPreferences($state.snapshot(draft));
   }
+
+  // Edits apply as they are made, matching the outputs desk. A Save button asks
+  // the reader to remember they have unfinished business, then rewards pressing
+  // it with a banner to dismiss -- two chores in exchange for nothing they had
+  // not already told the app.
+  //
+  // Long enough that a number being typed is one write rather than twenty.
+  const SETTLE_MS = 700;
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function scheduleSave() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = undefined;
+      void save();
+    }, SETTLE_MS);
+  }
+
+  // Whatever is in flight goes with the reader; an edit must not die with the
+  // page just because the debounce had not fired yet.
+  onMount(() => () => {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      void save();
+    }
+  });
+
+  const unsaved = $derived(
+    !!draft && !!$preferences && JSON.stringify($state.snapshot(draft)) !== JSON.stringify($preferences)
+  );
+
+  $effect(() => {
+    if (unsaved) scheduleSave();
+  });
 </script>
 
 <svelte:head>
   <title>Map · BrickellStatus</title>
-  <meta name="description" content="Inspect saved coverage, the bridge target, and live AIS vessel courses on one map." />
+  <meta name="description" content="See saved places, Brickell Avenue Bridge, and recent vessel positions on one map." />
 </svelte:head>
 
 <section class="page-sheet map-page">
   <header class="page-heading-row">
     <div>
       <a class="back-link" href="/channels"><ArrowLeft size={16} aria-hidden="true" /> Back to channels</a>
-      <h1 class="sheet-heading">Place what you watch</h1>
-      <p class="sheet-intro">Saved coverage, the Brickell target, and the last hour of vessel courses.</p>
+      <h1 class="sheet-heading">Map</h1>
+      <p class="sheet-intro">Saved places, Brickell Avenue Bridge, and vessel positions from the last hour.</p>
     </div>
-    <button class="primary-action save-action" onclick={save} disabled={!draft || $saving}>
-      <Save size={17} aria-hidden="true" /> {$saving ? 'Saving map' : 'Save map settings'}
-    </button>
+    <!-- Says what is true right now, and asks for nothing. It is a status
+         line, not a banner: nothing to dismiss and nothing to press. -->
   </header>
 
   {#if draft}
     <div class="map-workbench">
-      <aside class="area-finder" aria-labelledby="finder-heading">
-        <header>
-          <p>Area finder</p>
-          <h2 id="finder-heading">Find your horizon</h2>
-          <span>{activeAreaCount} active {activeAreaCount === 1 ? 'area' : 'areas'} · local profile</span>
-        </header>
-
-        <form onsubmit={(event) => { event.preventDefault(); void search(); }}>
-          <label for="area-search">City, region, or postal code</label>
-          <div class="search-control">
-            <Search size={18} strokeWidth={1.5} aria-hidden="true" />
-            <input
-              id="area-search"
-              bind:value={query}
-              maxlength="160"
-              autocomplete="postal-code"
-              placeholder="Miami, FL or Tokyo"
-            />
-            <button type="submit" disabled={searching}>{searching ? 'Finding' : 'Search'}</button>
-          </div>
-        </form>
-
-        {#if results.length}
-          <div class="search-results" aria-label="Location search results">
-            <p>Select a result, then tune its pin</p>
-            {#each results as result (result.id)}
-              <button onclick={() => stageResult(result)}>
-                <MapPinned size={18} strokeWidth={1.5} aria-hidden="true" />
-                <span>
-                  <strong>{result.label}</strong>
-                  <small>{result.adminArea ?? result.countryCode ?? result.timeZone}</small>
-                </span>
-                <Crosshair size={17} aria-hidden="true" />
-              </button>
-            {/each}
-          </div>
-        {/if}
-
-        <button class="location-action" onclick={useDeviceLocation} disabled={locating}>
-          <LocateFixed size={20} strokeWidth={1.5} aria-hidden="true" />
-          <span>
-            <strong>{locating ? 'Asking this computer' : 'Locate this computer once'}</strong>
-            <small>Uses the OS permission prompt. No passive or background tracking.</small>
-          </span>
-        </button>
-
-        <div class="finder-note">
-          <Crosshair size={19} strokeWidth={1.5} aria-hidden="true" />
-          <p><strong>Freehand works too.</strong> Click anywhere on the map to drop a pin and name it.</p>
-        </div>
-
-        {#if searchError}
-          <p class="finder-error" role="alert">{searchError}</p>
-        {/if}
-
-        <p class="attribution">Search by Open-Meteo geocoding. Interactive map by MapLibre and OpenFreeMap.</p>
-        <aside class="network-disclosure" aria-label="Location network disclosure">
-          <Network size={17} strokeWidth={1.5} aria-hidden="true" />
-          <div>
-            <strong>What leaves this computer</strong>
-            <p>
-              Search text goes to Open-Meteo geocoding; the visible map requests OpenFreeMap tiles. After you save,
-              enabled weather sends this point to Open-Meteo and enabled U.S. official alerts send it to NWS.
-              Turning either area gate off stops that collector. There is no passive location tracking.
-            </p>
-          </div>
-        </aside>
-      </aside>
-
       {#if candidate}
         <PinModal
           area={candidate}
@@ -435,57 +498,103 @@
         onselect={(point) => {
           if (point.id === candidate?.id) return;
           if (point.kind === 'vessel') {
-            selectedVesselId = point.id;
-            selectedAreaId = null;
+            selectVessel(point.id.slice('vessel.'.length));
           } else {
             selectedAreaId = point.id;
             selectedVesselId = null;
+            selectedKnownOpenerMmsi = null;
           }
           candidate = null;
           candidateEditingId = null;
         }}
         onpick={stagePinnedLocation}
       />
+
+      {#if selectedDetailMmsi}
+        <div class="vessel-detail-slot">
+          <VesselDetailPanel
+            track={selectedDetailTrack}
+            knownOpener={selectedKnownRecord}
+            detail={vesselDetail}
+            loading={vesselDetailLoading}
+            error={vesselDetailError}
+            localTimeZone={$snapshot?.localTimeZone}
+            onclose={closeVesselDetails}
+            onretry={() => void loadSelectedVesselDetail(selectedDetailMmsi)}
+          />
+        </div>
+      {/if}
     </div>
 
     <section class="ais-map-register" aria-labelledby="ais-map-heading">
       <header>
         <div>
-          <p class="registration-label">AISStream course history</p>
-          <h2 id="ais-map-heading">Vessels received in the last hour</h2>
+          <p class="registration-label">Vessel intelligence</p>
+          <h2 id="ais-map-heading">{vesselRegisterTab === 'live' ? 'Vessels seen in the last hour' : 'Known Brickell openers'}</h2>
         </div>
-        <strong>{vesselTracks.length.toString().padStart(2, '0')}</strong>
+        <strong>{(vesselRegisterTab === 'live' ? vesselTracks.length : knownOpeners.length).toString().padStart(2, '0')}</strong>
       </header>
-      {#if vesselTracks.length}
-        <div class="vessel-ledger">
-          {#each vesselTracks as track (track.mmsi)}
-            <button class:selected={selectedVesselId === `vessel.${track.mmsi}`} onclick={() => {
-              selectedVesselId = `vessel.${track.mmsi}`;
-              selectedAreaId = null;
-            }}>
-              <span><strong>{track.vesselName ?? `Vessel ${track.mmsi}`}</strong><small>MMSI {track.mmsi}</small></span>
-              <span><strong>{track.movement}</strong><small>{track.routeIntersects ? 'Course intersects bridge approach' : 'No bridge-course intersection'}</small></span>
-              <span><strong>{formatSpeedKnots(track.speedKnots, draft.unitSystem)}</strong><small>{track.courseDegrees.toFixed(0)}° course · {track.points.length} points</small></span>
-              <time datetime={track.observedAt}>{new Date(track.observedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
-            </button>
-          {/each}
+      <div class="vessel-register-tabs" role="tablist" aria-label="Map vessel lists">
+        <button role="tab" aria-selected={vesselRegisterTab === 'live'} aria-controls="live-vessel-register" class:active={vesselRegisterTab === 'live'} onclick={() => (vesselRegisterTab = 'live')}>Live vessels <span>{vesselTracks.length}</span></button>
+        <button role="tab" aria-selected={vesselRegisterTab === 'known'} aria-controls="known-opener-register" class:active={vesselRegisterTab === 'known'} onclick={() => (vesselRegisterTab = 'known')}>Known openers <span>{knownOpeners.length}</span></button>
+      </div>
+
+      {#if vesselRegisterTab === 'live'}
+        <div id="live-vessel-register" role="tabpanel" class="vessel-register-panel">
+          {#if vesselTracks.length}
+            <div class="vessel-ledger">
+              {#each vesselTracks as track (track.mmsi)}
+                <button
+                  class:selected={selectedVesselId === `vessel.${track.mmsi}`}
+                  class:is-known-opener={track.knownOpener}
+                  class:is-likely-opener={track.likelyToOpenBrickell}
+                  onclick={() => selectVessel(track.mmsi)}
+                >
+                  <span><strong>{track.vesselName ?? `Vessel ${track.mmsi}`}</strong><small>MMSI {track.mmsi}{track.knownOpener ? ' · Known opener' : ''}</small></span>
+                  <span><strong>{track.likelyToOpenBrickell ? 'Likely to open Brickell' : movementLabel(track)}</strong><small>{track.routeIntersects ? 'Path crosses the Brickell approach' : 'No expected Brickell passage'}</small></span>
+                  <span><strong>{track.speedKnots.toFixed(1)} kn</strong><small>{track.courseDegrees.toFixed(0)}° course · {track.points.length} points</small></span>
+                  <time datetime={track.observedAt}>{new Date(track.observedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+                </button>
+              {/each}
+            </div>
+          {:else}
+            {@const aisSource = $snapshot?.system.sources.find((source) => source.sourceId.startsWith('aisstream.'))}
+            <p class="empty-vessels">
+              {aisSource?.detail ?? 'AISStream has not reported a vessel position yet.'}
+            </p>
+          {/if}
         </div>
       {:else}
-        {@const aisSource = $snapshot?.system.sources.find((source) => source.sourceId.startsWith('aisstream.'))}
-        <p class="empty-vessels">
-          {aisSource?.detail ?? 'AISStream has not reported a vessel position yet.'}
-        </p>
+        <div id="known-opener-register" role="tabpanel" class="vessel-register-panel">
+          {#if knownOpeners.length}
+            <div class="vessel-ledger known-opener-ledger">
+              {#each knownOpeners as vessel (vessel.mmsi)}
+                {@const confirmedPassages = vessel.transitsOpened + vessel.transitsFitsUnder}
+                <button class:selected={selectedKnownOpenerMmsi === vessel.mmsi} onclick={() => selectKnownOpener(vessel.mmsi)}>
+                  <span><strong>{vessel.vesselName ?? `Vessel ${vessel.mmsi}`}</strong><small>MMSI {vessel.mmsi}</small></span>
+                  <span><strong>Known opener</strong><small>{vessel.vesselClass ?? 'Vessel type not reported'}</small></span>
+                  <span><strong>Bridge up {vessel.transitsOpened} of {confirmedPassages}</strong><small>{vessel.openingPropensity != null ? `${Math.round(vessel.openingPropensity / 100)}% estimated opening chance` : 'Opening chance not calculated'}</small></span>
+                  <time datetime={vessel.lastOpenedAt ?? vessel.lastSeenAt}>{vessel.lastOpenedAt ? `Opened ${new Date(vessel.lastOpenedAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}` : `Seen ${new Date(vessel.lastSeenAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}`}</time>
+                </button>
+              {/each}
+            </div>
+          {:else}
+            <p class="empty-vessels">No vessel has a confirmed Brickell bridge-up passage yet.</p>
+          {/if}
+        </div>
       {/if}
     </section>
 
     <section class="area-roster" aria-labelledby="roster-heading">
       <header class="roster-heading">
         <div>
-          <p class="registration-label">Saved geography</p>
-          <h2 id="roster-heading">Area roster</h2>
-          <span>Each row decides which location-aware modules may run.</span>
+          <h2 id="roster-heading">Saved places</h2>
+          <span>Click the map to add a place and choose which updates it receives.</span>
         </div>
-        <strong>{draft.areas.length.toString().padStart(2, '0')}</strong>
+        <button class="location-action" onclick={useDeviceLocation} disabled={locating}>
+          <LocateFixed size={18} strokeWidth={1.5} aria-hidden="true" />
+          {locating ? 'Getting location' : 'Use my location'}
+        </button>
       </header>
 
       {#if draft.areas.length}
@@ -503,8 +612,8 @@
               <div class="area-switches">
                 <SwitchField
                   checked={area.enabled}
-                  label="Area active"
-                  description="Master switch; stops all area collectors when off."
+                  label="Watch this place"
+                  description="Off means nothing is collected for this place."
                   onchange={(enabled) => { area.enabled = enabled; updateArea(area); }}
                 />
                 <SwitchField
@@ -546,7 +655,7 @@
                   </div>
                 </details>
                 <div class="row-actions">
-                  <button onclick={() => editOnMap(area)}><Move size={16} aria-hidden="true" /> Tune pin</button>
+                  <button onclick={() => editOnMap(area)}><Move size={16} aria-hidden="true" /> Move pin</button>
                   <button class="remove-action" onclick={() => removeArea(area)}><Trash2 size={16} aria-hidden="true" /> Remove</button>
                 </div>
               </footer>
@@ -556,8 +665,8 @@
       {:else}
         <div class="empty-roster">
           <MapPinned size={30} strokeWidth={1.35} aria-hidden="true" />
-          <h3>The atlas is clean</h3>
-          <p>Search, locate once, or click the map. Weather and point alerts remain explicitly unconfigured until an area is saved.</p>
+          <h3>No saved places</h3>
+          <p>Search for a place, use your current location, or click the map to add one.</p>
         </div>
       {/if}
     </section>
@@ -591,13 +700,6 @@
     margin-bottom: 18px;
   }
 
-  .back-link,
-  .save-action,
-  .row-actions button {
-    display: inline-flex;
-    align-items: center;
-  }
-
   .back-link {
     gap: 6px;
     margin-bottom: 18px;
@@ -616,106 +718,20 @@
     text-underline-offset: 4px;
   }
 
-  .save-action {
-    gap: 9px;
-  }
-
   .map-workbench {
+    position: relative;
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
     border-block: 1px solid var(--marine);
   }
 
-  .area-finder {
-    position: relative;
-    z-index: 3;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-content: start;
-    gap: 20px;
-    padding: clamp(23px, 2.6vw, 38px);
-    color: var(--white);
-    background: var(--marine);
-    border-bottom: 1px solid var(--marine);
-  }
-
-  .area-finder > header,
-  .area-finder > .search-results,
-  .area-finder > .finder-note,
-  .area-finder > .finder-error,
-  .area-finder > .attribution,
-  .area-finder > .network-disclosure {
-    grid-column: 1 / -1;
-  }
-
-  .area-finder > header {
-    padding-bottom: 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.28);
-  }
-
-  .area-finder header > p,
-  .area-finder form > label {
-    margin: 0;
-    color: var(--nav-muted);
-    font-family: var(--font-instrument);
-    font-size: var(--type-label);
-    font-weight: 600;
-    letter-spacing: 0.07em;
-    text-transform: uppercase;
-  }
-
-  .area-finder h2 {
-    margin: 5px 0 7px;
-    font-size: var(--type-section);
-    line-height: 0.95;
-    text-transform: uppercase;
-  }
-
-  .area-finder header > span,
-  .attribution {
-    color: var(--nav-muted);
-    font-size: var(--type-caption);
-  }
-
-  .area-finder form {
-    display: grid;
-    gap: 8px;
-  }
-
-  .search-control {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    align-items: center;
-    gap: 8px;
-    min-height: 48px;
-    color: var(--graphite);
-    background: var(--frost);
-    border: 1px solid var(--nav-muted);
-    padding-left: 12px;
-  }
-
-  .search-control input {
-    min-width: 0;
-    min-height: 46px;
-    color: var(--graphite);
-    background: transparent;
-    border: 0;
-    outline: 0;
-  }
-
-  .search-control button {
-    align-self: stretch;
-    color: var(--graphite);
-    background: var(--amber);
-    border-left: 1px solid var(--amber-ink);
-    padding: 0 14px;
-    font-family: var(--font-instrument);
-    font-size: var(--type-label);
-    font-weight: 700;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    cursor: pointer;
+  .vessel-detail-slot {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    z-index: 12;
+    width: min(470px, calc(100% - 32px));
   }
 
   .location-action {
@@ -730,132 +746,6 @@
     padding: 14px 4px;
     text-align: left;
     cursor: pointer;
-  }
-
-  .location-action > span {
-    display: grid;
-    gap: 4px;
-  }
-
-  .location-action strong {
-    font-family: var(--font-instrument);
-    font-size: var(--type-title);
-    font-weight: 600;
-    text-transform: uppercase;
-  }
-
-  .location-action small {
-    color: var(--nav-muted);
-    font-size: var(--type-caption);
-    line-height: 1.4;
-  }
-
-  .search-results {
-    max-height: 255px;
-    overflow-y: auto;
-    border-top: 1px solid rgba(255, 255, 255, 0.28);
-  }
-
-  .search-results > p {
-    margin: 9px 0 3px;
-    color: var(--nav-muted);
-    font-size: var(--type-micro);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-  }
-
-  .search-results button {
-    display: grid;
-    width: 100%;
-    grid-template-columns: auto 1fr auto;
-    align-items: center;
-    gap: 10px;
-    color: var(--white);
-    background: transparent;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.23);
-    padding: 11px 3px;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .search-results button:hover {
-    color: var(--graphite);
-    background: var(--amber);
-  }
-
-  .search-results button > span {
-    display: grid;
-    min-width: 0;
-    gap: 2px;
-  }
-
-  .search-results strong {
-    overflow-wrap: anywhere;
-    font-family: var(--font-instrument);
-    font-size: var(--type-label);
-    text-transform: uppercase;
-  }
-
-  .search-results small {
-    color: inherit;
-    font-size: var(--type-micro);
-    opacity: 0.76;
-  }
-
-  .finder-note {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 10px;
-    color: var(--nav-muted);
-  }
-
-  .finder-note p,
-  .attribution {
-    margin: 0;
-    line-height: 1.45;
-  }
-
-  .finder-note strong {
-    color: var(--white);
-  }
-
-  .finder-note p {
-    font-size: var(--type-caption);
-  }
-
-  .finder-error {
-    margin: 0;
-    padding: 11px 12px;
-    color: var(--graphite);
-    background: var(--amber-sheet);
-    border: 1px solid var(--amber-ink);
-    font-size: var(--type-caption);
-    line-height: 1.4;
-  }
-
-  .network-disclosure {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 10px;
-    padding: 13px 0 0;
-    color: var(--nav-muted);
-    border-top: 1px solid rgba(255, 255, 255, 0.22);
-  }
-
-  .network-disclosure strong {
-    display: block;
-    margin-bottom: 4px;
-    color: var(--white);
-    font-family: var(--font-instrument);
-    font-size: var(--type-label);
-    letter-spacing: 0.055em;
-    text-transform: uppercase;
-  }
-
-  .network-disclosure p {
-    margin: 0;
-    font-size: var(--type-micro);
-    line-height: 1.5;
   }
 
   .area-roster {
@@ -890,6 +780,61 @@
     font-size: var(--type-section);
   }
 
+  .vessel-register-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    border-top: 1px solid var(--rule);
+    border-inline: 1px solid var(--rule);
+  }
+
+  .vessel-register-tabs button {
+    display: flex;
+    min-height: 44px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    color: var(--muted);
+    background: var(--frost);
+    border: 0;
+    border-right: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule-strong);
+    padding: 10px 14px;
+    font-family: var(--font-instrument);
+    font-size: var(--type-label);
+    font-weight: 700;
+    letter-spacing: 0.055em;
+    text-align: left;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+
+  .vessel-register-tabs button:last-child {
+    border-right: 0;
+  }
+
+  .vessel-register-tabs button:hover {
+    color: var(--marine);
+    background: var(--paper);
+  }
+
+  .vessel-register-tabs button.active {
+    color: var(--white);
+    background: var(--marine);
+    border-bottom-color: var(--marine);
+  }
+
+  .vessel-register-tabs button:focus-visible,
+  .vessel-ledger button:focus-visible {
+    position: relative;
+    z-index: 1;
+    outline: 3px solid var(--amber);
+    outline-offset: -3px;
+  }
+
+  .vessel-register-tabs span {
+    font-variant-numeric: tabular-nums;
+  }
+
   .vessel-ledger {
     border-top: 1px solid var(--rule);
   }
@@ -912,6 +857,19 @@
   .vessel-ledger button:hover,
   .vessel-ledger button.selected {
     background: var(--amber-sheet);
+  }
+
+  .vessel-ledger button.is-known-opener:not(.is-likely-opener) {
+    box-shadow: inset 5px 0 0 var(--corridor);
+  }
+
+  .vessel-ledger button.is-likely-opener {
+    background: var(--amber-sheet);
+    box-shadow: inset 5px 0 0 var(--amber);
+  }
+
+  .known-opener-ledger button {
+    box-shadow: inset 5px 0 0 var(--corridor);
   }
 
   .vessel-ledger span {
@@ -961,16 +919,7 @@
   .roster-heading div > span {
     color: var(--muted);
     font-size: var(--type-body-small);
-  }
-
-  .roster-heading > strong {
-    color: var(--marine);
-    font-family: var(--font-instrument);
-    font-size: var(--type-display-compact);
-    line-height: 0.72;
-  }
-
-  .area-row {
+  }  .area-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     border-bottom: 1px solid var(--rule-strong);
@@ -1122,23 +1071,12 @@
     line-height: 1.5;
   }
 
-  @media (max-width: 1180px) {
-    .area-finder {
-      grid-template-columns: minmax(0, 1fr);
-    }
-
-    .area-finder > * {
-      grid-column: 1;
-    }
-  }
+  @media (max-width: 1180px) {  }
 
   @media (max-width: 1050px) {
     .map-workbench {
       grid-template-columns: 1fr;
-    }
-
-    .area-finder { border-right: 0; }
-  }
+    }  }
 
   @media (max-width: 860px) {
 
@@ -1156,6 +1094,17 @@
   }
 
   @media (max-width: 680px) {
+    .vessel-detail-slot {
+      position: static;
+      width: auto;
+      margin: 12px 0 0;
+    }
+
+    .vessel-detail-slot :global(.vessel-detail) {
+      max-height: none;
+      box-shadow: none;
+    }
+
     .area-switches,
     .advanced-grid {
       grid-template-columns: 1fr;
@@ -1182,5 +1131,4 @@
       grid-template-columns: 1fr;
       gap: 8px;
     }
-  }
-</style>
+  }</style>

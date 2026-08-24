@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 license.workspace = true
 description = "BrickellStatus monochrome renderer and E213/E290 USB/BLE transport"
+# Internal to this application: never published, and the path dependencies
+# between these crates could not be published anyway.
+publish = false
 
 [features]
 # Talking to a physical panel. On by default so every existing consumer is

@@ -1,7 +1,10 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#include <esp_mac.h>
+#include <esp_task_wdt.h>
 #include <heltec-eink-modules.h>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 
@@ -62,11 +65,40 @@ constexpr size_t kHeaderSize = 18;
 constexpr size_t kPacketSize = kHeaderSize + kPayloadSize;
 constexpr uint8_t kFlagFullRefresh = 0x01;
 constexpr uint32_t kFrameAssemblyTimeoutMs = 1000;
+constexpr uint32_t kBleAdvertisingHealthCheckMs = 2000;
+constexpr uint32_t kLoopWatchdogTimeoutSeconds = 30;
 
-// GATT identifiers intentionally remain compatible with the proven sibling
-// InkDock firmware and existing desktop senders. Only the advertised name
-// carries the panel, so a host scanning for a board learns which one it found
-// before it connects.
+// Both Vision Master boards use this same gated battery divider. These values
+// come from their schematics and the board definitions used by Meshtastic.
+constexpr uint8_t kBatteryAdcControlPin = 46;
+constexpr uint8_t kBatteryAdcPin = 7;
+constexpr uint16_t kBatteryMultiplierMilli = 5047;  // 4.9 * 1.03
+constexpr size_t kBatterySampleCount = 9;
+constexpr uint32_t kBatterySampleIntervalMs = 30000;
+// A single-cell LiPo below this level needs attention. The wider clear point
+// keeps a battery resting near the boundary from repeatedly changing state.
+constexpr uint16_t kLowBatteryEnterMillivolts = 3400;
+constexpr uint16_t kLowBatteryExitMillivolts = 3550;
+constexpr uint16_t kPlausibleBatteryMinimumMillivolts = 2500;
+constexpr uint16_t kPlausibleBatteryMaximumMillivolts = 5000;
+constexpr size_t kLowBatteryAckLength = sizeof("ACK INK1 BAT0000 LOW") - 1;
+
+// Keep the enriched low-battery ACK inside the default 20-byte ATT payload.
+static_assert(kLowBatteryAckLength <= 20);
+
+constexpr bool shouldRestoreBleAdvertising(uint8_t connectedCount,
+                                           bool advertising) {
+  return connectedCount == 0 && !advertising;
+}
+
+static_assert(shouldRestoreBleAdvertising(0, false));
+static_assert(!shouldRestoreBleAdvertising(1, false));
+static_assert(!shouldRestoreBleAdvertising(0, true));
+
+// GATT identifiers intentionally remain compatible with deployed INK1 firmware
+// and existing desktop senders. Only the advertised name carries the board
+// code, so a host scanning for a panel learns which one it found before it
+// connects.
 constexpr char kServiceUuid[] = "8b7a0000-4f4b-4a9b-9d6e-1d0c1a2b3c4d";
 constexpr char kRxUuid[] = "8b7a0001-4f4b-4a9b-9d6e-1d0c1a2b3c4d";
 constexpr char kTxUuid[] = "8b7a0002-4f4b-4a9b-9d6e-1d0c1a2b3c4d";
@@ -86,7 +118,30 @@ const PanelWiring *attached = nullptr;
 /// Whether this build can drive what is attached.
 bool driving = false;
 
-char bannerLine[96] = "READY";
+char bannerLine[112] = "READY";
+
+/// Four hex characters naming this particular board, and nothing else.
+///
+/// Every board running this firmware used to advertise the same Bluetooth name,
+/// because the name was built from the panel model alone. Two boards on one
+/// desk were then indistinguishable in a picker, and pinning a connection to a
+/// name could not pick between them.
+///
+/// The last two octets of the factory MAC settle it. They are unique per board,
+/// they survive a reflash -- which a random suffix would not, and reflashing is
+/// exactly what someone does while working out which panel revision they have
+/// -- and the host already reads this MAC while flashing, so it can work out
+/// the same four characters without asking the board for them.
+char boardId[5] = "0000";
+
+void composeBoardId() {
+  uint8_t mac[6] = {0};
+  // The factory MAC, read straight from efuse. This starts no radio: the board
+  // brings up neither Wi-Fi nor LoRa, and reading the address does not change
+  // that.
+  if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) return;
+  snprintf(boardId, sizeof(boardId), "%02X%02X", mac[4], mac[5]);
+}
 
 BaseDisplay *makeDisplay() {
 #if defined(Vision_Master_E290)
@@ -103,6 +158,78 @@ volatile bool framePending = false;
 volatile bool pendingFullRefresh = true;
 portMUX_TYPE frameMux = portMUX_INITIALIZER_UNLOCKED;
 NimBLECharacteristic *txCharacteristic = nullptr;
+NimBLEServer *bleServer = nullptr;
+NimBLEAdvertising *bleAdvertising = nullptr;
+uint32_t lastBleAdvertisingHealthAt = 0;
+bool loopWatchdogArmed = false;
+bool batterySampled = false;
+bool batteryKnown = false;
+bool batteryLow = false;
+uint16_t batteryMillivolts = 0;
+uint32_t lastBatterySampleAt = 0;
+
+void composeBanner();
+
+void setupBatteryTelemetry() {
+  pinMode(kBatteryAdcControlPin, OUTPUT);
+  digitalWrite(kBatteryAdcControlPin, LOW);
+  pinMode(kBatteryAdcPin, INPUT);
+  analogReadResolution(12);
+  analogSetPinAttenuation(kBatteryAdcPin, ADC_2_5db);
+}
+
+/// Takes one bounded, median-filtered reading when the prior one is stale.
+///
+/// The voltage divider is powered only around the nine ADC conversions. A
+/// calibrated ADC millivolt reading is then scaled by the board's divider. A
+/// disconnected battery on these boards can produce a low phantom voltage, so
+/// anything outside the plausible single-cell range is reported as unknown.
+bool refreshBatteryTelemetry() {
+  const uint32_t now = millis();
+  if (batterySampled && now - lastBatterySampleAt < kBatterySampleIntervalMs) {
+    return false;
+  }
+  batterySampled = true;
+  lastBatterySampleAt = now;
+
+  digitalWrite(kBatteryAdcControlPin, HIGH);
+  delay(10);
+  std::array<uint32_t, kBatterySampleCount> samples{};
+  for (uint32_t &sample : samples) {
+    sample = analogReadMilliVolts(kBatteryAdcPin);
+    delay(1);
+  }
+  digitalWrite(kBatteryAdcControlPin, LOW);
+
+  std::sort(samples.begin(), samples.end());
+  const uint32_t pinMillivolts = samples[samples.size() / 2];
+  const uint32_t scaled =
+      (pinMillivolts * kBatteryMultiplierMilli + 500) / 1000;
+  if (scaled < kPlausibleBatteryMinimumMillivolts ||
+      scaled > kPlausibleBatteryMaximumMillivolts) {
+    batteryKnown = false;
+    batteryMillivolts = 0;
+    return true;
+  }
+
+  batteryKnown = true;
+  batteryMillivolts = static_cast<uint16_t>(scaled);
+  if (batteryLow) {
+    if (batteryMillivolts >= kLowBatteryExitMillivolts) batteryLow = false;
+  } else if (batteryMillivolts <= kLowBatteryEnterMillivolts) {
+    batteryLow = true;
+  }
+  return true;
+}
+
+void appendBatteryTelemetry(char *line, size_t capacity,
+                            bool compactLowMarker = false) {
+  if (!batteryKnown) return;
+  const size_t used = std::strlen(line);
+  if (used >= capacity) return;
+  snprintf(line + used, capacity - used, " BAT%u%s", batteryMillivolts,
+           batteryLow ? (compactLowMarker ? " LOW" : " LOWBAT") : "");
+}
 
 uint16_t readLe16(const uint8_t *value) {
   return static_cast<uint16_t>(value[0]) |
@@ -129,10 +256,32 @@ uint32_t crc32(const uint8_t *data, size_t length) {
 }
 
 void acknowledge(const char *message) {
-  Serial.println(message);
+  const bool ready = std::strncmp(message, "READY INK1", 10) == 0;
+  const bool ack = std::strcmp(message, "ACK INK1") == 0;
+  if (ready || ack) refreshBatteryTelemetry();
+  // ACK/NACK is transient. The characteristic's idle value must always be the
+  // current full READY banner so reconnecting clients can recover geometry,
+  // version, board identity, and battery state without waiting for a notify.
+  composeBanner();
+
+  char enriched[48];
+  const char *reply = message;
+  if (ready) {
+    reply = bannerLine;
+  } else if (ack) {
+    snprintf(enriched, sizeof(enriched), "ACK INK1");
+    appendBatteryTelemetry(enriched, sizeof(enriched), true);
+    reply = enriched;
+  }
+
+  Serial.println(reply);
   if (txCharacteristic != nullptr) {
-    txCharacteristic->setValue(message);
-    txCharacteristic->notify();
+    txCharacteristic->setValue(reply);
+    // Pass the response bytes explicitly so restoring the readable value below
+    // cannot race an asynchronously queued notification.
+    txCharacteristic->notify(reinterpret_cast<const uint8_t *>(reply),
+                             std::strlen(reply));
+    txCharacteristic->setValue(bannerLine);
   }
 }
 
@@ -235,6 +384,15 @@ class PacketDecoder {
 
   void pushByte(uint8_t value) {
     lastByteAt_ = millis();
+    // A host may have missed the one-time boot line while USB re-enumerated.
+    // `?` asks for the same identity again, but only between packets: a byte in
+    // an INK1 header or payload can never turn into an out-of-band reply. A
+    // wrong E213 controller build is blocked before `loop()` and stays silent,
+    // which gives the flasher an objective signal to try the other image once.
+    if (used_ == 0 && value == '?') {
+      acknowledge(bannerLine);
+      return;
+    }
     if (used_ < 4) {
       static constexpr uint8_t magic[4] = {'I', 'N', 'K', '1'};
       if (value == magic[used_]) {
@@ -276,16 +434,48 @@ class ServerCallbacks final : public NimBLEServerCallbacks {
   }
 };
 
+/// Keeps a disconnected board discoverable even if the BLE host reports a
+/// transient advertising failure. The waiting image is e-ink and therefore
+/// cannot prove the radio is still live; this check asks the radio itself.
+void maintainBleAdvertising() {
+#if BRICKELLSTATUS_ENABLE_BLE
+  const uint32_t now = millis();
+  if (now - lastBleAdvertisingHealthAt < kBleAdvertisingHealthCheckMs) return;
+  lastBleAdvertisingHealthAt = now;
+
+  if (bleServer == nullptr || bleAdvertising == nullptr) return;
+  if (!shouldRestoreBleAdvertising(bleServer->getConnectedCount(),
+                                   bleAdvertising->isAdvertising())) {
+    return;
+  }
+
+  if (bleAdvertising->start()) {
+    Serial.println("BLE advertising restored");
+  } else {
+    Serial.println("BLE advertising retry failed");
+  }
+#endif
+}
+
 void setupBle() {
 #if BRICKELLSTATUS_ENABLE_BLE
+  // The name a person will actually look for, which is this project's name and
+  // the four characters that separate one board from another.
+  //
+  // It does not fit in the advertisement. That packet holds 31 bytes, and the
+  // flags plus this service's 128-bit UUID spend 21 of them, leaving room for
+  // about eight characters -- which is why putting any useful panel name there
+  // came back as "Data length exceeded" and left the board advertising no
+  // name. The scan response is a second 31-byte packet for exactly this, and
+  // every scanner asks for it, so the name goes there and the UUID stays where
+  // a filtering scanner can see it without asking twice.
   char name[32];
-  snprintf(name, sizeof(name), "InkDock %s",
-           attached != nullptr ? attached->name : kBuiltFor.name);
+  snprintf(name, sizeof(name), "BrickellStatus %s", boardId);
   NimBLEDevice::init(name);
   NimBLEDevice::setPower(ESP_PWR_LVL_P3);
-  NimBLEServer *server = NimBLEDevice::createServer();
-  server->setCallbacks(new ServerCallbacks());
-  NimBLEService *service = server->createService(kServiceUuid);
+  bleServer = NimBLEDevice::createServer();
+  bleServer->setCallbacks(new ServerCallbacks());
+  NimBLEService *service = bleServer->createService(kServiceUuid);
   NimBLECharacteristic *rx = service->createCharacteristic(
       kRxUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   txCharacteristic = service->createCharacteristic(
@@ -297,12 +487,37 @@ void setupBle() {
   txCharacteristic->setValue(bannerLine);
   service->start();
 
-  NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
-  advertising->addServiceUUID(kServiceUuid);
-  advertising->setName(name);
-  advertising->enableScanResponse(true);
-  advertising->start();
+  bleAdvertising = NimBLEDevice::getAdvertising();
+  bleAdvertising->addServiceUUID(kServiceUuid);
+  bleAdvertising->enableScanResponse(true);
+  NimBLEAdvertisementData scanResponse;
+  scanResponse.setName(name);
+  bleAdvertising->setScanResponseData(scanResponse);
+  if (!bleAdvertising->start()) {
+    Serial.println("BLE initial advertising failed; retrying in background");
+  }
+  lastBleAdvertisingHealthAt = millis();
 #endif
+}
+
+/// Reboots a board whose main loop stops making progress.
+///
+/// The e-paper glass keeps its last pixels without power, so a board stalled
+/// in the display driver looks exactly like a healthy board waiting for a
+/// connection. The BLE host runs beside the Arduino loop, but its advertising
+/// repair above cannot run if that loop is wedged. A generous timeout covers a
+/// full e-paper refresh and turns that otherwise permanent state into a clean
+/// reboot.
+void armLoopWatchdog() {
+  if (esp_task_wdt_init(kLoopWatchdogTimeoutSeconds, true) != ESP_OK) {
+    Serial.println("Main-loop watchdog initialization failed");
+    return;
+  }
+  if (esp_task_wdt_add(nullptr) != ESP_OK) {
+    Serial.println("Main-loop watchdog subscription failed");
+    return;
+  }
+  loopWatchdogArmed = true;
 }
 
 void drawWaitingScreen() {
@@ -313,20 +528,37 @@ void drawWaitingScreen() {
   display->setCursor(14, 18);
   display->print("BrickellStatus");
   display->setTextSize(1);
-  display->setCursor(15, 53);
+  display->setCursor(15, 50);
   display->print("READY / USB + BLE");
-  display->setCursor(15, 72);
-  char geometry[32];
-  snprintf(geometry, sizeof(geometry), "INK1 / %u x %u", kWidth, kHeight);
-  display->print(geometry);
-  display->setCursor(15, 91);
-  display->print("NO WI-FI / NO LORA");
+  display->setCursor(15, 68);
+  display->print("BLUETOOTH NAME");
+  // The exact string this board advertises, printed at the size of something
+  // meant to be read across a desk. Matching a board to its entry in a list is
+  // the whole job of this screen, so the name is shown verbatim rather than
+  // described -- what is on the glass is what appears in the picker.
+  //
+  // Reading it at all is also the proof that this build drives this panel
+  // revision: the wrong build hangs before it can draw anything.
+  // The exact string this board advertises, at the size of something meant to
+  // be read across a desk. Matching a board to an entry in a list is the whole
+  // job of this screen, so it is printed verbatim rather than described.
+  //
+  // Nothing else earns the space. "NO WI-FI / NO LORA" named two things the
+  // board never does, and the panel model and pixel count are facts a reader
+  // cannot act on -- the app already knows both, and neither helps anyone
+  // choose between two boards on a desk.
+  display->setTextSize(2);
+  display->setCursor(8, 86);
+  char advertised[32];
+  snprintf(advertised, sizeof(advertised), "BrickellStatus %s", boardId);
+  display->print(advertised);
   display->update();
 }
 
 /// The line the host identifies this board by.
 ///
-/// `READY INK1 <w>x<h> <payload> <build> <board> [MISMATCH]`
+/// `READY INK1 <w>x<h> <payload> <build> <board> <id> FW<version> [MISMATCH]
+/// [BAT<mV> [LOWBAT]]`
 ///
 /// The geometry is what this firmware can draw right now, so a build sitting on
 /// the wrong board reports none: there is nothing it can correctly accept. The
@@ -337,13 +569,26 @@ void composeBanner() {
   // what the firmware is about to drive, and what the app should keep writing.
   const char *board = attached != nullptr ? attached->name : kBuiltFor.name;
   if (driving) {
-    snprintf(bannerLine, sizeof(bannerLine), "READY INK1 %ux%u %u %s %s",
+    snprintf(bannerLine, sizeof(bannerLine),
+             "READY INK1 %ux%u %u %s %s %s FW%u",
              kWidth, kHeight, static_cast<unsigned>(kPayloadSize),
-             BRICKELLSTATUS_BUILD_ID, board);
+             BRICKELLSTATUS_BUILD_ID, board, boardId,
+             BRICKELLSTATUS_FIRMWARE_VERSION);
   } else {
-    snprintf(bannerLine, sizeof(bannerLine), "READY INK1 0x0 0 %s %s MISMATCH",
-             BRICKELLSTATUS_BUILD_ID, board);
+    snprintf(bannerLine, sizeof(bannerLine),
+             "READY INK1 0x0 0 %s %s %s FW%u MISMATCH",
+             BRICKELLSTATUS_BUILD_ID, board, boardId,
+             BRICKELLSTATUS_FIRMWARE_VERSION);
   }
+  appendBatteryTelemetry(bannerLine, sizeof(bannerLine));
+}
+
+/// Keeps the value read by a future BLE connection reasonably fresh without
+/// waking the ADC divider continuously or sending unsolicited notifications.
+void maintainBatteryTelemetry() {
+  if (!refreshBatteryTelemetry()) return;
+  composeBanner();
+  if (txCharacteristic != nullptr) txCharacteristic->setValue(bannerLine);
 }
 
 void renderPendingFrame() {
@@ -380,7 +625,11 @@ void setup() {
   Serial.setRxBufferSize(kPacketSize + 64);
   Serial.begin(115200);
   Serial.setTimeout(50);
+  armLoopWatchdog();
 
+  composeBoardId();
+  setupBatteryTelemetry();
+  refreshBatteryTelemetry();
   attached = probePanel();
   // Only a positive identification of the *other* board stops this build from
   // driving. A probe that could not tell falls back to the board this image was
@@ -389,13 +638,18 @@ void setup() {
   // of service because it read an unfamiliar line.
   driving = attached == nullptr || attached == &kBuiltFor;
   composeBanner();
+
+  // Bring up the radio before touching the e-paper driver. If a damaged panel
+  // or BUSY line ever stalls an update, the board remains discoverable until
+  // the watchdog gives it a clean restart instead of becoming a permanent
+  // image with no reachable firmware behind it.
+  setupBle();
   if (driving) {
     // Only now: the panel this build knows how to talk to is the one attached.
     display = makeDisplay();
     drawWaitingScreen();
   }
 
-  setupBle();
   // The build id lets the host tell whether the device is running the firmware
   // the app ships. Without it a working board can only be reported as "unknown
   // build", never as up to date, so the app would have no basis for offering a
@@ -404,6 +658,7 @@ void setup() {
 }
 
 void loop() {
+  if (loopWatchdogArmed) esp_task_wdt_reset();
   serialDecoder.poll();
   bleDecoder.poll();
   uint8_t chunk[256];
@@ -414,5 +669,7 @@ void loop() {
   }
 
   renderPendingFrame();
+  maintainBatteryTelemetry();
+  maintainBleAdvertising();
   delay(5);
 }

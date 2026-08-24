@@ -7,7 +7,6 @@ use serde_json::Value;
 #[serde(rename_all = "snake_case")]
 pub enum BridgeStateDto {
     Clear,
-    Possible,
     Likely,
     Open,
 }
@@ -250,6 +249,21 @@ pub struct ChannelSignalDto {
     pub previous_close: Option<f64>,
 }
 
+/// One independently current item within a channel.
+///
+/// A channel is a subscription and a notice is one slide. Keeping that
+/// distinction in the snapshot means two earthquakes or two headlines do not
+/// collapse into a count while only the first one reaches the screen.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelNoticeDto {
+    /// Stable identity from the collector item and channel subscription.
+    pub key: String,
+    pub signal: ChannelSignalDto,
+    /// Item-level ranking used when notices from different channels interleave.
+    pub priority: ChannelPriorityDto,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelSnapshot {
@@ -272,6 +286,10 @@ pub struct ChannelSnapshot {
     pub material_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signal: Option<ChannelSignalDto>,
+    /// Every current item, highest priority first. `signal` remains the first
+    /// notice as a compatibility view for existing consumers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<ChannelNoticeDto>,
     /// Cross-channel ranking. See [`ChannelPriorityDto`].
     #[serde(default)]
     pub priority: ChannelPriorityDto,
@@ -369,6 +387,19 @@ pub struct VesselTrackPoint {
     pub latitude: f64,
     pub longitude: f64,
     pub observed_at: String,
+    /// Motion and corridor projection at this fix. Older persisted cursors did
+    /// not carry these fields, so history ingestion falls back to the track's
+    /// latest values only when they are absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_knots: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub course_degrees: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s_meters: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_meters: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -422,6 +453,16 @@ pub struct VesselTrackSnapshot {
     /// same as "fits under" and must not be displayed as one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opening_propensity: Option<u16>,
+    /// Durable fact: this MMSI has at least one resolved Brickell passage
+    /// during which the bridge went up. This is history, not a claim about the
+    /// vessel's current course.
+    #[serde(default)]
+    pub known_opener: bool,
+    /// Current-track judgement that this vessel is both committed to Brickell
+    /// and likely to need the span raised. A known opener moving away is false;
+    /// an unrecorded sailing rig approaching the bridge can be true.
+    #[serde(default)]
+    pub likely_to_open_brickell: bool,
     /// Minutes until this vessel reaches the span, as a range. Absent when it
     /// is not closing on the span at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -466,6 +507,60 @@ pub struct BridgeCrossingDto {
     /// `opened`, `fits_under`, `unknown`, or absent while still unresolved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    /// When the crossing was matched to a bridge state. Absent while pending.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<String>,
+}
+
+/// Durable Brickell impact for one selected vessel.
+///
+/// Live position and AIS identity stay on [`VesselTrackSnapshot`]; this is the
+/// slower learned record loaded only when a map vessel is selected.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VesselDetailDto {
+    pub mmsi: String,
+    pub transits_opened: u64,
+    pub transits_fits_under: u64,
+    pub transits_unknown: u64,
+    pub transits_pending: u64,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_crossing_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_opened_at: Option<String>,
+    /// Beta(1,1)-smoothed likelihood, in basis points. Absent until at least
+    /// one crossing has a bridge-impact outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opening_propensity: Option<u16>,
+    pub recent_crossings: Vec<BridgeCrossingDto>,
+}
+
+/// One vessel in the durable catalog of hulls observed raising Brickell.
+///
+/// Unlike [`VesselTrackSnapshot`], this record remains available when the
+/// vessel has no position in the one-hour Map window.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnownOpenerDto {
+    pub mmsi: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vessel_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vessel_class: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_sign: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imo_number: Option<u32>,
+    pub transits_opened: u64,
+    pub transits_fits_under: u64,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_opened_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opening_propensity: Option<u16>,
 }
 
 /// The AIS corridor as drawable geometry, published so a surface highlights
@@ -557,6 +652,10 @@ pub struct AppSnapshot {
     pub dispatches: Vec<DispatchRecord>,
     pub bridge_intervals: Vec<BridgeStateIntervalDto>,
     pub vessel_tracks: Vec<VesselTrackSnapshot>,
+    /// Every locally learned Brickell opener, including vessels that have no
+    /// current AIS position and therefore cannot appear on the live map.
+    #[serde(default)]
+    pub known_openers: Vec<KnownOpenerDto>,
     /// The river this app reasons about. Always present; see `ais_live` for
     /// whether anything is currently being received on it.
     pub river_corridor: RiverCorridorDto,
@@ -574,6 +673,8 @@ pub struct ChannelPreference {
     pub kind: ChannelKindDto,
     pub title: String,
     pub enabled: bool,
+    /// Retained for stored-profile compatibility. The runtime normalizes these
+    /// former alert/carousel controls to one automatic policy on load and save.
     pub presence: SurfacePresence,
     pub interrupt_preset: InterruptPreset,
     pub destinations: Vec<DestinationIdDto>,
@@ -680,7 +781,6 @@ pub struct DisplaySettings {
     pub serial_port: String,
     pub ble_name: String,
     pub dwell_seconds: u32,
-    pub return_home_after: u32,
     pub full_refresh_every: u32,
     /// Which way up the board is mounted.
     ///

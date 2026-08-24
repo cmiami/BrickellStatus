@@ -1,4 +1,4 @@
-"""Injects BRICKELLSTATUS_BUILD_ID so the device banner identifies its firmware.
+"""Injects the firmware version and source build into the device banner.
 
 The id is derived from the tracked firmware sources rather than from HEAD, so a
 commit that touches nothing under firmware/ does not invalidate a device that is
@@ -19,7 +19,9 @@ SCons inside the build, where several ordinary assumptions -- `__file__` among
 them -- do not hold.
 """
 
+import hashlib
 import subprocess
+from pathlib import Path
 
 Import("env")  # noqa: F821  (PlatformIO injects this)
 
@@ -28,11 +30,42 @@ Import("env")  # noqa: F821  (PlatformIO injects this)
 # project directory is what PlatformIO does hand us, and git itself resolves the
 # rest, which also means no assumption about how deeply the firmware is nested.
 PROJECT_DIR = env.subst("$PROJECT_DIR")  # noqa: F821
-FIRMWARE_PATHS = ["firmware/panel/src", "firmware/panel/platformio.ini"]
+FIRMWARE_PATHS = [
+    "firmware/panel/src",
+    "firmware/panel/platformio.ini",
+    "firmware/panel/scripts/build_id.py",
+    "firmware/panel/version.txt",
+]
+VERSION_PATH = Path(PROJECT_DIR) / "version.txt"
 
 
 def _git(*args: str, cwd: str) -> str:
     return subprocess.check_output(["git", *args], text=True, cwd=cwd).strip()
+
+
+def _content_digest(root: Path) -> str:
+    """Deterministic identity for dirty firmware inputs.
+
+    A suffix such as ``abc1234-dirty`` collapses every uncommitted source state
+    into one value and lets stale packaged binaries masquerade as current. The
+    digest keeps dirty developer builds exact enough to verify without treating
+    it as an ordered release number.
+    """
+    digest = hashlib.sha256()
+    files: list[Path] = []
+    for relative in FIRMWARE_PATHS:
+        candidate = root / relative
+        files.extend(
+            path for path in (candidate.rglob("*") if candidate.is_dir() else [candidate])
+            if path.is_file()
+        )
+    for path in sorted(files):
+        relative = path.relative_to(root).as_posix().encode()
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()[:12]
 
 
 def build_id() -> str:
@@ -49,7 +82,7 @@ def build_id() -> str:
         if not revision:
             return "unknown"
         dirty = _git("status", "--porcelain", "--", *FIRMWARE_PATHS, cwd=root)
-        return f"{revision}-dirty" if dirty else revision
+        return f"{revision}-dirty-{_content_digest(Path(root))}" if dirty else revision
     except (subprocess.CalledProcessError, OSError):
         # A source tarball without git history still builds; it just cannot
         # claim an identity, and "unknown" is the honest answer. The app reads
@@ -58,4 +91,22 @@ def build_id() -> str:
         return "unknown"
 
 
-env.Append(CPPDEFINES=[("BRICKELLSTATUS_BUILD_ID", env.StringifyMacro(build_id()))])  # noqa: F821
+def firmware_version() -> int:
+    """Orderable release number shared by E213 and E290.
+
+    Unlike a Git hash, this is deliberately monotonic. Refuse to build when it
+    is absent or malformed: silently stamping an invented version would make a
+    downgrade look like an upgrade.
+    """
+    value = int(VERSION_PATH.read_text(encoding="utf-8").strip())
+    if value <= 0:
+        raise ValueError("firmware version must be a positive integer")
+    return value
+
+
+env.Append(  # noqa: F821
+    CPPDEFINES=[
+        ("BRICKELLSTATUS_BUILD_ID", env.StringifyMacro(build_id())),
+        ("BRICKELLSTATUS_FIRMWARE_VERSION", firmware_version()),
+    ]
+)

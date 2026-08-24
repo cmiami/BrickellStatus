@@ -3,11 +3,11 @@
 //! The firmware speaks one line on the wire:
 //!
 //! ```text
-//! READY INK1 296x128 4736 9f3c2ab E290
+//! READY INK1 296x128 4736 9f3c2ab E290 26B4 FW4 BAT4012
 //! ```
 //!
-//! Geometry, payload size, the build it was compiled from, and the board its
-//! boot-time probe found. That line is the whole of the host's device
+//! Geometry, payload size, exact source build, board identity, and an orderable
+//! firmware version. That line is the whole of the host's device
 //! identification: nobody is asked which board is plugged in, and no preference
 //! records it, because the board is the only thing that actually knows.
 //!
@@ -16,7 +16,7 @@
 //! which one it is. That case is spoken plainly:
 //!
 //! ```text
-//! READY INK1 0x0 0 9f3c2ab E290 MISMATCH
+//! READY INK1 0x0 0 9f3c2ab E290 26B4 FW2 MISMATCH
 //! ```
 //!
 //! No geometry, because there is nothing this image can correctly draw; the
@@ -45,6 +45,29 @@ pub struct DeviceBanner {
     pub mismatch: bool,
     /// Build identity, when the firmware is new enough to report one.
     pub build: Option<String>,
+    /// Monotonic firmware release, independent of the exact source build.
+    ///
+    /// Git hashes identify bytes but have no ordering. This number is what the
+    /// app uses to call a bundled image newer or a device image newer.
+    pub firmware_version: Option<u32>,
+    /// A version token was present but could not be interpreted.
+    ///
+    /// Kept distinct from legacy firmware that predates version reporting: a
+    /// malformed current identity is incompatible, not merely old.
+    pub version_malformed: bool,
+    /// Four hex characters naming this individual board, when the firmware is
+    /// new enough to report them. Older firmware omits it, which is an absence
+    /// rather than a disagreement: the board is still usable, it just cannot be
+    /// told apart from another one of the same model.
+    pub board_id: Option<String>,
+    /// Measured battery voltage in millivolts, when current firmware reported
+    /// a plausible reading. No token, a malformed token, or an out-of-range
+    /// reading is unknown rather than zero.
+    pub battery_millivolts: Option<u16>,
+    /// Firmware's hysteretic low-voltage state. Present only alongside a valid
+    /// battery voltage, so legacy firmware and invalid measurements remain
+    /// unknown rather than silently becoming "battery okay."
+    pub low_battery: Option<bool>,
 }
 
 /// What the firmware stamps into its banner when it cannot name its own source
@@ -59,9 +82,10 @@ impl DeviceBanner {
             return Self::default();
         }
         let tokens: Vec<&str> = trimmed.split_whitespace().collect();
-        // `READY INK1 <w>x<h> <payload> <build> <board> [MISMATCH]`. What the
-        // firmware can draw is read from the geometry rather than from the
-        // name, because the geometry is what every frame must match.
+        // `READY INK1 <w>x<h> <payload> <build> <board> <id> FW<n>
+        // [MISMATCH] [BAT<mV> [LOWBAT]]`. What the firmware can draw is read
+        // from the geometry rather than from the name, because the geometry is
+        // what every frame must match.
         let panel = tokens.get(2).and_then(|token| parse_dimensions(token));
         let build = tokens
             .get(4)
@@ -75,17 +99,74 @@ impl DeviceBanner {
             // Firmware old enough to omit the board name is firmware from
             // before there was a second board, so what it draws is what it is.
             .or(panel);
+        // Scanned rather than read at a fixed index. Firmware that reports a
+        // board id pushes MISMATCH one place to the right, and firmware that
+        // predates the id does not; a positional read would silently stop
+        // seeing the mismatch on exactly the boards that report it.
         let mismatch = tokens
+            .iter()
+            .skip(5)
+            .any(|token| token.eq_ignore_ascii_case("MISMATCH"));
+        let board_id = tokens
             .get(6)
-            .is_some_and(|token| token.eq_ignore_ascii_case("MISMATCH"));
+            .map(|value| value.trim())
+            .filter(|value| !value.eq_ignore_ascii_case("MISMATCH"))
+            .and_then(valid_board_id);
+        let version_token = tokens
+            .iter()
+            .skip(6)
+            .find(|token| token.to_ascii_uppercase().starts_with("FW"));
+        let firmware_version = version_token
+            .and_then(|token| token.get(2..))
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|version| *version > 0);
+        let version_malformed = version_token.is_some() && firmware_version.is_none();
+        let (battery_millivolts, low_battery) = parse_battery_telemetry(trimmed);
         Self {
             saw_ready: true,
             panel,
             board,
             mismatch,
             build,
+            firmware_version,
+            version_malformed,
+            board_id,
+            battery_millivolts,
+            low_battery,
         }
     }
+}
+
+/// Battery tokens shared by READY banners and ACK receipts.
+///
+/// The range rejects the phantom low divider reading produced when no battery
+/// is attached, along with corrupt values. `LOWBAT` (READY) or `LOW` (compact
+/// ACK) without a valid voltage is not actionable and therefore remains
+/// unknown.
+pub(crate) fn parse_battery_telemetry(line: &str) -> (Option<u16>, Option<bool>) {
+    let tokens = line.split_whitespace().collect::<Vec<_>>();
+    let battery_millivolts = tokens
+        .iter()
+        .find(|token| {
+            token
+                .get(..3)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("BAT"))
+        })
+        .and_then(|token| token.get(3..))
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|millivolts| (2500..=5000).contains(millivolts));
+    let low_battery = battery_millivolts.map(|_| {
+        tokens
+            .iter()
+            .any(|token| token.eq_ignore_ascii_case("LOWBAT") || token.eq_ignore_ascii_case("LOW"))
+    });
+    (battery_millivolts, low_battery)
+}
+
+/// Stable suffix printed by current firmware: exactly two MAC octets.
+fn valid_board_id(value: &str) -> Option<String> {
+    (value.len() == 4 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| value.to_ascii_uppercase())
 }
 
 /// Reads a `250x122` geometry token into the panel it describes.
@@ -110,6 +191,75 @@ mod tests {
 
     /// A build on the wrong board draws nothing and says which board it is on,
     /// which is the whole of what the app needs to put that right.
+    #[test]
+    fn a_banner_names_the_individual_board() {
+        let banner =
+            DeviceBanner::parse("READY INK1 296x128 4736 9f3c2ab E290 26B4 FW3 BAT3375 LOWBAT");
+        assert_eq!(banner.board_id.as_deref(), Some("26B4"));
+        assert_eq!(banner.firmware_version, Some(3));
+        assert!(!banner.version_malformed);
+        assert!(!banner.mismatch);
+        assert_eq!(banner.battery_millivolts, Some(3375));
+        assert_eq!(banner.low_battery, Some(true));
+    }
+
+    #[test]
+    fn missing_or_invalid_battery_data_stays_unknown() {
+        let legacy = DeviceBanner::parse("READY INK1 250x122 3904 abc1234 E213 26B4 FW2");
+        assert_eq!(legacy.battery_millivolts, None);
+        assert_eq!(legacy.low_battery, None);
+
+        for line in [
+            "READY INK1 250x122 3904 abc1234 E213 26B4 FW3 BATnone LOWBAT",
+            "READY INK1 250x122 3904 abc1234 E213 26B4 FW3 BAT2204 LOWBAT",
+            "READY INK1 250x122 3904 abc1234 E213 26B4 FW3 LOWBAT",
+        ] {
+            let banner = DeviceBanner::parse(line);
+            assert_eq!(banner.battery_millivolts, None, "accepted {line:?}");
+            assert_eq!(banner.low_battery, None, "accepted {line:?}");
+        }
+    }
+
+    #[test]
+    fn malformed_and_legacy_versions_remain_distinct() {
+        let malformed = DeviceBanner::parse("READY INK1 296x128 4736 9f3c2ab E290 26B4 FWnext");
+        assert_eq!(malformed.firmware_version, None);
+        assert!(malformed.version_malformed);
+
+        let legacy = DeviceBanner::parse("READY INK1 296x128 4736 9f3c2ab E290 26B4");
+        assert_eq!(legacy.firmware_version, None);
+        assert!(!legacy.version_malformed);
+    }
+
+    #[test]
+    fn a_mismatch_is_still_seen_when_an_id_precedes_it() {
+        let banner = DeviceBanner::parse("READY INK1 0x0 0 9f3c2ab E290 26B4 MISMATCH");
+        assert!(banner.mismatch);
+        assert_eq!(banner.board_id.as_deref(), Some("26B4"));
+    }
+
+    #[test]
+    fn firmware_without_an_id_reports_none_rather_than_mismatch_text() {
+        let banner = DeviceBanner::parse("READY INK1 0x0 0 9f3c2ab E290 MISMATCH");
+        assert!(banner.mismatch);
+        assert_eq!(banner.board_id, None);
+    }
+
+    #[test]
+    fn malformed_board_ids_are_never_used_as_device_identity() {
+        for value in ["26B", "26B4FF", "26-Z", "panel"] {
+            let banner =
+                DeviceBanner::parse(&format!("READY INK1 250x122 3904 abc1234 E213 {value}"));
+            assert_eq!(banner.board_id, None, "accepted malformed id {value:?}");
+        }
+        assert_eq!(
+            DeviceBanner::parse("READY INK1 250x122 3904 abc1234 E213 26b4")
+                .board_id
+                .as_deref(),
+            Some("26B4")
+        );
+    }
+
     #[test]
     fn a_mismatched_build_names_the_board_it_landed_on() {
         let banner = DeviceBanner::parse("READY INK1 0x0 0 9f3c2ab E290 MISMATCH");

@@ -444,11 +444,14 @@ jobs:
           key: gradle-${{ runner.os }}-${{ hashFiles('apps/desktop/src-tauri/gen/android/**/*.gradle*', 'apps/desktop/src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: gradle-${{ runner.os }}-
 
-      # The keystore never exists in the repository. Without these secrets the
-      # Gradle config falls through to an unsigned release build rather than
-      # failing, which is what forks get.
+      # The keystore never exists in the repository. A fork holds no secrets and
+      # still gets an unsigned release APK, which is deliberate; this repository
+      # publishes what it builds, so a missing secret here is a release-stopping
+      # error rather than a warning. v0.1.27 through v0.1.32 shipped unsigned and
+      # uninstallable APKs because this step only warned and the job stayed green.
       - name: Materialise the release keystore
         env:
+          IS_FORK: ${{ github.event.repository.fork }}
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
@@ -457,9 +460,21 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${ANDROID_KEYSTORE_BASE64:-}" ]]; then
-            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret; building an unsigned release APK."
-            exit 0
+            if [[ "${IS_FORK:-false}" == "true" ]]; then
+              echo "::warning::No ANDROID_KEYSTORE_BASE64 secret on a fork; building an unsigned release APK."
+              exit 0
+            fi
+            echo "No ANDROID_KEYSTORE_BASE64 secret. Android release artifacts must be signed;" >&2
+            echo "an unsigned APK cannot be installed at all. Set the signing secrets or" >&2
+            echo "remove the Android leg from this release." >&2
+            exit 1
           fi
+          for required in ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [[ -z "${!required:-}" ]]; then
+              echo "ANDROID_KEYSTORE_BASE64 is set but $required is missing." >&2
+              exit 1
+            fi
+          done
           keystore="$RUNNER_TEMP/release.jks"
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$keystore"
           cat > apps/desktop/src-tauri/gen/android/keystore.properties <<EOF
@@ -501,6 +516,52 @@ jobs:
           done
           node apps/console/scripts/check-android-artifact-size.mjs "$outputs" \
             | tee "dist/BrickellStatus_${VERSION}_android.sizes.txt"
+
+      # Both release-only failures this gate exists for shipped in v0.1.32, and
+      # neither was visible to any earlier check: the compile gate in ci.yml never
+      # runs Gradle, and the Pixel verification behind the Android port was a debug
+      # build -- unminified and debug-signed. So assert against the artifact that is
+      # about to be published rather than against the inputs that produced it.
+      - name: Verify the release APKs
+        if: ${{ github.event.repository.fork != true }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          apksigner="$(find "$ANDROID_SDK_ROOT/build-tools" -type f -name apksigner | sort -V | tail -1)"
+          if [[ -z "$apksigner" ]]; then
+            echo "No apksigner under $ANDROID_SDK_ROOT/build-tools" >&2
+            exit 1
+          fi
+          dexdump="$(find "$ANDROID_SDK_ROOT/build-tools" -type f -name dexdump | sort -V | tail -1)"
+          if [[ -z "$dexdump" ]]; then
+            echo "No dexdump under $ANDROID_SDK_ROOT/build-tools" >&2
+            exit 1
+          fi
+          work="$(mktemp -d)"
+          for apk in dist/*.apk; do
+            echo "== $apk"
+
+            # An unsigned APK installs nowhere, so this is fatal rather than cosmetic.
+            "$apksigner" verify --print-certs "$apk"
+
+            # R8 renames or strips anything it sees no caller for, and a JNI lookup
+            # by name is not a caller it can see. Every method Rust resolves that way
+            # needs a keep rule in proguard-rules.pro; assert each one survived
+            # minification, because the failure is a runtime crash on a build that
+            # otherwise looks healthy.
+            rm -rf "$work/dex" && mkdir -p "$work/dex"
+            unzip -q -o "$apk" 'classes*.dex' -d "$work/dex"
+            methods="$("$dexdump" "$work"/dex/classes*.dex 2>/dev/null | grep -F "name          : '" || true)"
+            for symbol in publishStatus initBluetooth initStatusBridge; do
+              if ! grep -qF "'$symbol'" <<<"$methods"; then
+                echo "R8 removed $symbol from $apk; it is reached only by JNI name lookup." >&2
+                echo "Add a keep rule for it in gen/android/app/proguard-rules.pro." >&2
+                exit 1
+              fi
+            done
+            echo "   JNI entry points intact"
+          done
+          rm -rf "$work"
 
       # Belt and braces: the file is gitignored and lives on an ephemeral
       # runner, but a signing credential should not outlive the step that needs it.

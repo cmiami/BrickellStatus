@@ -371,7 +371,7 @@ impl CollectorFactory for CredentialFreeCollectorFactory {
                         continue;
                     };
                     let mut config = SyndicationConfig::new(url);
-                    config.max_items = channel.max_items;
+                    config.max_items = crate::preferences::AUTOMATIC_ITEM_LIMIT;
                     config.user_agent = self.user_agent.clone();
                     let collector = match SyndicationCollector::new(config) {
                         Ok(collector) => collector,
@@ -711,6 +711,7 @@ fn window_from_text(value: &str) -> Result<UsgsWindow, RuntimeError> {
     match value {
         "significant_hour" => Ok(UsgsWindow::Hour),
         "significant_day" => Ok(UsgsWindow::Day),
+        "4.5_day" => Ok(UsgsWindow::Magnitude45Day),
         _ => Err(RuntimeError::Configuration(format!(
             "unsupported USGS feed {value:?}"
         ))),
@@ -769,6 +770,15 @@ mod tests {
             .into_iter()
             .map(|registration| registration.id)
             .collect()
+    }
+
+    #[test]
+    fn magnitude_45_day_feed_maps_to_the_usgs_window() {
+        assert_eq!(
+            window_from_text("4.5_day").unwrap(),
+            UsgsWindow::Magnitude45Day
+        );
+        assert!(window_from_text("4.5_week").is_err());
     }
 
     /// The engine tick is 15s so FL511 can be polled at 15s. A collector with a
@@ -905,9 +915,9 @@ mod tests {
     #[test]
     fn defaults_build_only_the_enabled_credential_free_sources() {
         let ids = collector_ids(&AppPreferences::default());
-        // Five seeded news feeds rather than three, and the sports channel
-        // ships disabled so it registers nothing at all.
-        assert_eq!(ids.len(), 11);
+        // Five seeded news feeds, one current-day earthquake feed, and the
+        // sports channel ships disabled so it registers nothing at all.
+        assert_eq!(ids.len(), 12);
         assert!(ids.iter().any(|id| id == "fl511.bridge.brickell"));
         assert!(ids.iter().any(|id| id == "bbpilots.bridge.brickell"));
         assert!(
@@ -924,7 +934,7 @@ mod tests {
                 .any(|id| id == "nhc.atlantic_rss.hurricane.atlantic")
         );
         assert_eq!(ids.iter().filter(|id| id.starts_with("rss.")).count(), 5);
-        assert!(!ids.iter().any(|id| id.starts_with("usgs.")));
+        assert!(ids.iter().any(|id| id.starts_with("usgs.")));
         assert!(!ids.iter().any(|id| id.starts_with("aisstream.")));
     }
 

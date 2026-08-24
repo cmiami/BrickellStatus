@@ -6,7 +6,7 @@ pub mod firmware;
 mod secret_store;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     future::Future,
     sync::{
@@ -40,16 +40,20 @@ use brickellstatus_eink::{
     transport::{
         BleConfig, BleDeviceInfo, BleTransport, TransportError, TransportKind, TransportReceipt,
         UsbConfig, UsbTransport, discover_ble_devices, discover_espressif_devices,
+        is_durable_ble_device_name,
     },
 };
 pub use brickellstatus_projection::render_live_bridge_frame;
 use brickellstatus_runtime::{
-    AisConnectionStateDto, AppPreferences, AppSnapshot, AvailabilityDto, BridgeStateDto,
-    ChannelKindDto, ChannelSnapshot, CredentialFreeCollectorFactory, DeliveryStateDto,
-    DestinationIdDto, DispatchRecord, DisplayOrientation, DisplayTransport, InterruptPreset,
-    LocationSearchResult, MutationResult, OutputStateDto, RuntimeConfig, RuntimeEngine,
-    SchedulerHandle, SurfacePresence, UrgencyDto, whatsapp_consent_is_current,
+    AUTOMATIC_FRAME_DWELL_SECONDS, AisConnectionStateDto, AppPreferences, AppSnapshot,
+    AvailabilityDto, BridgeStateDto, ChannelKindDto, ChannelSnapshot,
+    CredentialFreeCollectorFactory, DeliveryStateDto, DestinationIdDto, DispatchRecord,
+    DisplayOrientation, DisplayTransport, LocationSearchResult, MutationResult, OutputStateDto,
+    RuntimeConfig, RuntimeEngine, SchedulerHandle, UrgencyDto, VesselDetailDto,
+    whatsapp_consent_is_current,
 };
+#[cfg(test)]
+use brickellstatus_runtime::{InterruptPreset, SurfacePresence};
 use brickellstatus_storage::{IncidentRecord, OutboxLease, OutboxRecord, Store};
 use jiff::{Timestamp, tz::TimeZone};
 use serde::{Deserialize, Serialize};
@@ -262,6 +266,8 @@ enum ActiveDisplay {
     Ble {
         name: String,
         transport: Arc<BleTransport>,
+        /// Full READY line read from TX while this exact GATT session opened.
+        banner: Option<String>,
     },
 }
 
@@ -307,6 +313,19 @@ impl ActiveDisplay {
                 .map_err(|error| error.to_string()),
         }
     }
+
+    async fn read_banner(&self) -> Result<Option<String>, String> {
+        match self {
+            Self::Usb { transport, .. } => transport
+                .read_banner()
+                .await
+                .map_err(|error| error.to_string()),
+            Self::Ble { transport, .. } => transport
+                .read_banner()
+                .await
+                .map_err(|error| error.to_string()),
+        }
+    }
 }
 
 /// How many refused frames in a row it takes before the app is willing to say
@@ -324,6 +343,14 @@ const PORT_HANDOFF_DELAY: Duration = Duration::from_millis(600);
 /// device disappears and re-enumerates; opening into that gap fails for a reason
 /// that has nothing to do with the board.
 const BOOT_SETTLE_AFTER_FLASH: Duration = Duration::from_millis(1_800);
+/// Maximum time for the native USB interface to return after espflash resets it.
+const FIRMWARE_REENUMERATION_TIMEOUT: Duration = Duration::from_secs(6);
+/// A full e-paper initialization happens before the decoder loop starts. Give
+/// that bounded work enough time to finish and answer the repeatable `?` query.
+const FIRMWARE_READY_TIMEOUT: Duration = Duration::from_secs(20);
+/// A status read does not redraw the glass. Five minutes catches a weak battery
+/// promptly without turning the panel connection into constant radio traffic.
+const PANEL_BATTERY_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 struct DisplayController {
     operation: AsyncMutex<()>,
@@ -333,6 +360,10 @@ struct DisplayController {
     rotation_index: AtomicU64,
     automatic_reconnect: std::sync::atomic::AtomicBool,
     delivery_armed: std::sync::atomic::AtomicBool,
+    /// Suppresses repeated native alerts while the same low-voltage condition
+    /// is present. A valid non-low reading clears it for the next transition;
+    /// legacy firmware with no battery reading leaves it unchanged.
+    battery_low_notified: std::sync::atomic::AtomicBool,
     /// Frames sent to a connected board that went unacknowledged in a row.
     ///
     /// A board that will not take a frame is the only reliable sign of a board
@@ -370,18 +401,25 @@ impl DisplayController {
         .then_some(saved_usb)
         .filter(|port| !port.is_empty() && !port.eq_ignore_ascii_case("auto"))
         .map(ToOwned::to_owned);
+        let saved_ble = matches!(
+            preferences.display.transport,
+            DisplayTransport::Ble | DisplayTransport::Auto
+        ) && is_durable_ble_device_name(&preferences.display.ble_name);
         Self {
             operation: AsyncMutex::new(()),
             active: RwLock::new(None),
             last_frame: AsyncMutex::new(None),
             frames_sent: AtomicU64::new(0),
             rotation_index: AtomicU64::new(0),
-            // An exact saved USB route was explicitly selected in an earlier
-            // session and is revalidated against attached Espressif hardware
-            // before it opens. BLE remains session-selected because its ID is
-            // intentionally not persisted.
-            automatic_reconnect: std::sync::atomic::AtomicBool::new(saved_usb.is_some()),
+            // A remembered route is always one the user selected earlier.
+            // USB keeps its exact port; BLE keeps the board's unique advertised
+            // name, which survives host Bluetooth cache churn without storing
+            // a platform hardware identifier in ordinary preferences.
+            automatic_reconnect: std::sync::atomic::AtomicBool::new(
+                saved_usb.is_some() || saved_ble,
+            ),
             delivery_armed: std::sync::atomic::AtomicBool::new(false),
+            battery_low_notified: std::sync::atomic::AtomicBool::new(false),
             unanswered_frames: AtomicU32::new(0),
             attached_panel: std::sync::RwLock::new(PanelModel::default()),
             preferred_usb_port: AsyncMutex::new(saved_usb),
@@ -391,6 +429,18 @@ impl DisplayController {
 
     async fn has_active(&self) -> bool {
         self.active.read().await.is_some()
+    }
+
+    /// Reads current device status without sending a frame or refreshing the
+    /// e-paper glass. This still works when an unchanged image is deduplicated.
+    async fn read_banner(&self) -> Result<Option<DeviceBanner>, String> {
+        let Some(active) = self.active.read().await.clone() else {
+            return Ok(None);
+        };
+        active
+            .read_banner()
+            .await
+            .map(|line| line.as_deref().map(DeviceBanner::parse))
     }
 
     /// Current slot without consuming it. An alert reads the rotation position
@@ -422,6 +472,19 @@ impl DisplayController {
     /// is not a board running the wrong firmware.
     fn note_frame_unanswered(&self) {
         self.unanswered_frames.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records the firmware's measured low-battery state and returns whether
+    /// this is a new low transition that deserves a native notification.
+    fn note_battery_state(&self, low_battery: Option<bool>) -> bool {
+        match low_battery {
+            Some(true) => !self.battery_low_notified.swap(true, Ordering::Relaxed),
+            Some(false) => {
+                self.battery_low_notified.store(false, Ordering::Relaxed);
+                false
+            }
+            None => false,
+        }
     }
 
     /// What the live route says about the board, for the firmware decision.
@@ -458,7 +521,11 @@ impl DisplayController {
     ) -> (Vec<DisplayDeviceCandidate>, Vec<String>) {
         let _operation = self.operation.lock().await;
         let ble_config = BleConfig {
-            device_name: preferences.display.ble_name.clone(),
+            device_name: if is_durable_ble_device_name(&preferences.display.ble_name) {
+                preferences.display.ble_name.clone()
+            } else {
+                String::new()
+            },
             ..BleConfig::default()
         };
         let (usb, ble) = tokio::join!(discover_espressif_devices(), discover_ble(&ble_config));
@@ -519,12 +586,17 @@ impl DisplayController {
                     .strip_prefix("ble:")
                     .filter(|value| !value.trim().is_empty())
                     .ok_or_else(|| "Selected Bluetooth device identifier is invalid.".to_owned())?;
-                let active = self
-                    .connect_ble(Some(id.to_owned()), &preferences.display.ble_name)
-                    .await?;
-                *self.preferred_ble_id.lock().await = Some(id.to_owned());
-                *self.preferred_usb_port.lock().await = None;
-                active
+                // A platform ID is exact for this app session. Arm it before
+                // the OS connection attempt so one transient failure starts the
+                // reconnect ladder without requiring an app restart.
+                self.arm_selected_ble_route(id).await;
+                let configured_name = if is_durable_ble_device_name(&preferences.display.ble_name) {
+                    preferences.display.ble_name.as_str()
+                } else {
+                    ""
+                };
+                self.connect_ble(Some(id.to_owned()), configured_name)
+                    .await?
             }
         };
         let detail = match &active {
@@ -545,6 +617,12 @@ impl DisplayController {
         self.unanswered_frames.store(0, Ordering::Relaxed);
         *self.last_frame.lock().await = None;
         Ok(status)
+    }
+
+    async fn arm_selected_ble_route(&self, id: &str) {
+        *self.preferred_ble_id.lock().await = Some(id.to_owned());
+        *self.preferred_usb_port.lock().await = None;
+        self.automatic_reconnect.store(true, Ordering::Relaxed);
     }
 
     async fn disconnect(&self, suppress_reconnect: bool) -> Result<(), String> {
@@ -661,6 +739,17 @@ impl DisplayController {
         transport.ensure_connected().await.ok()?.banner
     }
 
+    /// The READY banner cached when the active BLE session was verified.
+    ///
+    /// This is application memory only: status probes may inspect firmware
+    /// identity without issuing another GATT read or disturbing the live link.
+    async fn ble_banner(&self) -> Option<String> {
+        match self.active.read().await.as_ref() {
+            Some(ActiveDisplay::Ble { banner, .. }) => banner.clone(),
+            _ => None,
+        }
+    }
+
     async fn usb_ready_observed(&self) -> Option<bool> {
         match self.active.read().await.as_ref() {
             Some(ActiveDisplay::Usb { ready_observed, .. }) => Some(*ready_observed),
@@ -765,6 +854,7 @@ impl DisplayController {
         Ok(ActiveDisplay::Ble {
             name: connected.name,
             transport,
+            banner: connected.banner,
         })
     }
 
@@ -786,18 +876,24 @@ impl DisplayController {
                         .then(|| serial.to_owned())
                 })
                     .ok_or_else(|| {
-                        "No USB device has been explicitly selected. Scan and choose the E213 before any bytes are written."
+                        "No USB panel has been selected. Scan and choose the panel before any bytes are written."
                             .to_owned()
                     })?;
                 self.connect_usb(port).await
             }
             DisplayTransport::Ble => {
-                let device_id = selected_ble.ok_or_else(|| {
-                    "No Bluetooth device has been explicitly selected. Scan and choose the E213 before connecting."
-                        .to_owned()
-                })?;
-                self.connect_ble(Some(device_id), &preferences.display.ble_name)
-                    .await
+                let saved_name = if is_durable_ble_device_name(&preferences.display.ble_name) {
+                    preferences.display.ble_name.as_str()
+                } else {
+                    ""
+                };
+                if selected_ble.is_none() && saved_name.is_empty() {
+                    return Err(
+                        "No Bluetooth panel has been selected. Scan and choose the panel before connecting."
+                            .to_owned(),
+                    );
+                }
+                self.connect_ble(selected_ble, saved_name).await
             }
             DisplayTransport::Auto => {
                 let pinned_port = selected_usb.or_else(|| {
@@ -811,12 +907,17 @@ impl DisplayController {
                     },
                     None => "no explicitly selected USB device".into(),
                 };
-                let Some(ble_id) = selected_ble else {
+                let saved_name = if is_durable_ble_device_name(&preferences.display.ble_name) {
+                    preferences.display.ble_name.as_str()
+                } else {
+                    ""
+                };
+                if selected_ble.is_none() && saved_name.is_empty() {
                     return Err(format!(
                         "Automatic reconnect is parked until a device is explicitly selected. USB: {usb_attempt}."
                     ));
-                };
-                self.connect_ble(Some(ble_id), &preferences.display.ble_name)
+                }
+                self.connect_ble(selected_ble, saved_name)
                     .await
                     .map_err(|ble| {
                         format!("Automatic connection failed. USB: {usb_attempt}. Bluetooth: {ble}")
@@ -878,6 +979,19 @@ impl DisplayController {
             Ok(receipt) => receipt,
             Err(error) => {
                 self.note_frame_unanswered();
+                self.delivery_armed.store(false, Ordering::Relaxed);
+                // A failed BLE frame can leave CoreBluetooth holding a live
+                // GATT link even though the UI correctly reports an error. A
+                // connected peripheral does not advertise, so keeping that
+                // stale route here makes the panel disappear from the app's
+                // own scanner. Release it and let the ordinary reconnect
+                // ladder establish a fresh session.
+                let failed = self.active.write().await.take();
+                if let Some(failed) = failed
+                    && let Err(disconnect_error) = failed.disconnect().await
+                {
+                    warn!(%disconnect_error, "failed display route did not disconnect cleanly");
+                }
                 return Err(error);
             }
         };
@@ -990,6 +1104,9 @@ pub struct FirmwareStatus {
     pub port: Option<String>,
     /// Build this app ships, when it ships one.
     pub bundled_build: Option<String>,
+    /// Monotonic firmware release this app ships. Unlike `bundled_build`, this
+    /// is orderable and is the only basis for an update/downgrade decision.
+    pub bundled_version: Option<u32>,
     /// Which board is attached, as the board itself reported it.
     pub board: Option<PanelModel>,
     /// The build to write to it, worked out from that report and from whatever
@@ -1030,16 +1147,22 @@ fn firmware_root(app: &AppHandle) -> Option<std::path::PathBuf> {
 /// Reports whether an attached board needs the bundled firmware.
 ///
 /// Which board it is comes from the board: its boot probe reports the panel it
-/// found, and the build to write follows from that. The one thing hardware
-/// cannot settle is the E213's panel revision — two controllers behind
-/// identical wiring — which is why the app remembers which build produced a
-/// readable screen instead of asking anyone to identify their display.
+/// found, and the build to write follows from that. E213's two internal
+/// controller images remain an implementation detail. The flash transaction
+/// requires a repeatable READY response, tries the alternate controller once
+/// on silence, and records only the image that objectively answers.
 #[tauri::command]
 async fn get_firmware_status(
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<FirmwareStatus, String> {
     let connected_ready = state.display.usb_ready_observed().await;
+    let connected_ble_banner = state.display.ble_banner().await;
+    let preferences = state.engine.get_preferences().await;
+    let legacy_saved_ble_route = needs_panel_identity_migration(
+        preferences.display.transport,
+        &preferences.display.ble_name,
+    );
     let devices = brickellstatus_eink::transport::discover_espressif_devices()
         .await
         .unwrap_or_default();
@@ -1052,6 +1175,7 @@ async fn get_firmware_status(
         return Ok(FirmwareStatus {
             port,
             bundled_build: None,
+            bundled_version: None,
             board: None,
             recommended_variant_id: None,
             variants: Vec::new(),
@@ -1066,6 +1190,7 @@ async fn get_firmware_status(
             return Ok(FirmwareStatus {
                 port,
                 bundled_build: None,
+                bundled_version: None,
                 board: None,
                 recommended_variant_id: None,
                 variants: Vec::new(),
@@ -1085,6 +1210,9 @@ async fn get_firmware_status(
     // against what the app remembers writing and what the display route is
     // actually managing to deliver.
     let probe = match port.as_deref() {
+        None if connected_ble_banner.is_some() => firmware::DeviceProbe::Answered(
+            firmware::DeviceBanner::parse(connected_ble_banner.as_deref().unwrap_or_default()),
+        ),
         None => firmware::DeviceProbe::NoPort,
         // A connected display already answered this question when it connected,
         // so reuse that rather than opening the port a second time and
@@ -1139,12 +1267,22 @@ async fn get_firmware_status(
                 .as_deref()
                 .is_some_and(|serial| serial == record.serial_number)
         });
-    let requirement = firmware::evaluate_flash_requirement(
+    let mut requirement = firmware::evaluate_versioned_flash_requirement(
         &probe,
+        bundle.firmware_version,
         bundle.source_revision.as_deref(),
         remembered.as_ref(),
         state.display.usb_route_evidence().await,
     );
+    if matches!(
+        requirement,
+        firmware::FlashRequirement::NoDevice | firmware::FlashRequirement::UnknownBuild
+    ) && legacy_saved_ble_route
+    {
+        requirement = firmware::FlashRequirement::Required {
+            reason: firmware::FlashReason::LegacyConnection,
+        };
+    }
 
     // What the board said it is. A board that has not spoken this session is
     // not guessed at here; the last build written to it is the better answer,
@@ -1179,6 +1317,7 @@ async fn get_firmware_status(
     Ok(FirmwareStatus {
         port,
         bundled_build: bundle.source_revision.clone(),
+        bundled_version: Some(bundle.firmware_version),
         board,
         recommended_variant_id,
         variants: bundle
@@ -1207,27 +1346,45 @@ async fn flash_firmware(
 ) -> Result<(), String> {
     let root = firmware_root(&app).ok_or("this build ships no firmware")?;
     let bundle = firmware::FirmwareBundle::load(&root).map_err(|error| error.to_string())?;
-    let variant = bundle
+    let initial_variant = bundle
         .variant(&variant_id)
         .ok_or_else(|| format!("unknown firmware variant {variant_id:?}"))?
         .clone();
     let bundled_build = bundle.source_revision.clone();
-    let mut variant_id_for_record = variant_id.clone();
+    let bundled_version = bundle.firmware_version;
+    if let Some(banner) = panel_banner_before_flash(&state.display, &port).await {
+        refuse_firmware_downgrade(&banner, bundled_version)?;
+    }
     // Read the board's identity now, while it is still enumerated and holding
     // still. Afterwards it is in a hard reset and re-enumerating, and a lookup
     // that comes back empty in that gap loses the record — which is the record
     // that stops the next launch asking to flash the board it just flashed.
     let identity_before_write = attached_board_serial(&port).await;
+    let trusted_rollback = match identity_before_write.as_deref() {
+        Some(serial) => state
+            .store
+            .get_json::<firmware::FlashRecord>(FLASH_RECORD_KEY)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|record| bundle.trusted_rollback(&record, serial).cloned()),
+        None => None,
+    };
     let port_for_status = port.clone();
 
-    // espflash drives the serial bootloader synchronously and a flash takes
-    // tens of seconds, so it must not run on the async runtime.
-    let emitter = app.clone();
     let preferences = state.engine.get_preferences().await;
-    let write = async |variant: firmware::FirmwareVariant, app: AppHandle, port: String| {
-        let outcome = state
-            .display
-            .holding_the_port_for_flash(&preferences, async move {
+    // Keep automatic reconnect parked for the complete write / verify /
+    // recovery transaction. Restoring the display route between controller
+    // images can seize the serial port before the READY query gets to ask what
+    // actually booted.
+    let (variant_id_for_record, verified_banner) = state
+        .display
+        .holding_the_port_for_flash(&preferences, async {
+            // espflash drives the serial bootloader synchronously and a flash
+            // takes tens of seconds, so each write runs off the async runtime.
+            let write = async |variant: firmware::FirmwareVariant,
+                               app: AppHandle,
+                               port: String| {
                 tauri::async_runtime::spawn_blocking(move || {
                     let mut progress = EmitProgress {
                         app,
@@ -1238,48 +1395,164 @@ async fn flash_firmware(
                     firmware::flash_variant(&port, &variant, &mut progress)
                 })
                 .await
+                .map_err(|error| error.to_string())?
                 .map_err(|error| error.to_string())
-            })
-            .await;
-        outcome?.map_err(|error| error.to_string())
-    };
+            };
 
-    write(variant, emitter, port.clone()).await?;
+            let mut attempted = BTreeSet::new();
+            let mut current = initial_variant;
+            loop {
+                attempted.insert(current.id.clone());
+                write(current.clone(), app.clone(), port.clone()).await?;
+                let total = current.total_bytes();
+                let _ = app.emit(
+                    "firmware://progress",
+                    serde_json::json!({
+                        "stage": "checking",
+                        "written": total,
+                        "total": total,
+                    }),
+                );
 
-    // Ask the board what it just became. A virgin panel could not be asked
-    // before the write, so the variant that went on was a guess, and a wrong
-    // guess leaves the screen showing whatever the factory left there — the
-    // firmware correctly declines to drive a panel it was not built for, and
-    // e-paper keeps its last image, so a successful flash looks like a no-op.
-    if let Some(banner) = banner_after_flash(&port).await
-        && let Some(board) = correction_for(&banner, &variant_id)
-        && let Some(correct) = bundle.for_board(board, None).cloned()
+                // The glass is deliberately ignored here. E-paper can retain
+                // a readable image from a previous build while the image just
+                // written is deadlocked on the opposite E213 BUSY polarity.
+                // Only a repeatable READY response proves this build booted.
+                let banner = banner_after_flash(&port, identity_before_write.as_deref()).await?;
+                if let Some(answer) = banner.as_ref() {
+                    match firmware::validate_current_banner(
+                        answer,
+                        &current,
+                        bundled_version,
+                        bundled_build.as_deref(),
+                    ) {
+                        Ok(None) => {
+                            break Ok::<(String, DeviceBanner), String>((
+                                current.id.clone(),
+                                answer.clone(),
+                            ));
+                        }
+                        Ok(Some(_reported_board)) => {
+                            // The complete current banner explicitly requests
+                            // the board redirect selected below.
+                        }
+                        Err(error) => {
+                            break Err(format!(
+                                "{} answered after flashing, but its identity was invalid: {error}. Controller recovery was not attempted.",
+                                current.label
+                            ));
+                        }
+                    }
+                }
+
+                let Some(recovery) = bundle
+                    .recovery_after_boot(&current, banner.as_ref(), &attempted)
+                    .cloned()
+                else {
+                    let observation = match banner.as_ref() {
+                        Some(banner) if banner.mismatch => format!(
+                            "it reported a {} board mismatch",
+                            banner
+                                .board
+                                .map(|board| board.label())
+                                .unwrap_or("panel")
+                        ),
+                        _ => "it never reported READY INK1".to_owned(),
+                    };
+                    let failure = format!(
+                        "{} was written, but {observation}. No untried recovery image remains, so no working firmware was recorded.",
+                        current.label
+                    );
+                    // Only an earlier objective READY may nominate rollback.
+                    // Legacy records from the visual-confirm flow deserialize
+                    // unverified, including the currently stranded v1.1
+                    // record, and must never overwrite the last candidate.
+                    if let Some(rollback) = trusted_rollback.as_ref() {
+                        if rollback.id == current.id {
+                            break Err(format!(
+                                "{failure} The previously verified {} image remains installed.",
+                                rollback.label
+                            ));
+                        }
+                        tokio::time::sleep(PORT_HANDOFF_DELAY).await;
+                        match write(rollback.clone(), app.clone(), port.clone()).await {
+                            Ok(()) => {
+                                break Err(format!(
+                                    "{failure} Restored the previously verified {} image without recording this attempt.",
+                                    rollback.label
+                                ));
+                            }
+                            Err(rollback_error) => {
+                                break Err(format!(
+                                    "{failure} Restoring the previously verified {} image also failed: {rollback_error}",
+                                    rollback.label
+                                ));
+                            }
+                        }
+                    }
+                    break Err(format!(
+                        "{failure} No previously verified rollback image exists; the last candidate remains installed."
+                    ));
+                };
+
+                if let Some(board) = banner.as_ref().and_then(|banner| banner.board) {
+                    info!(
+                        wrote = %current.id,
+                        board = %board.label(),
+                        correcting_to = %recovery.id,
+                        "the board rejected the written panel image; flashing the image it named",
+                    );
+                } else {
+                    warn!(
+                        wrote = %current.id,
+                        recovering_to = %recovery.id,
+                        "E213 image never answered READY; trying the other controller image once",
+                    );
+                }
+                // `banner_after_flash` closed its verification handle, but
+                // macOS may retain the descriptor briefly. Give the kernel the
+                // same handoff interval used before the first espflash write.
+                tokio::time::sleep(PORT_HANDOFF_DELAY).await;
+                current = recovery;
+            }
+        })
+        .await?;
+
+    // A verified flash also gives us the exact post-rename BLE identity. Keep
+    // that device-derived name when Bluetooth participates in the selected
+    // route; otherwise a board recovered over USB comes back advertising
+    // `BrickellStatus 26B4` while automatic reconnect keeps searching for the
+    // stale legacy `InkDock E213` name.
+    let mut preferences = state.engine.get_preferences().await;
+    let mut preferences_changed = false;
+    if matches!(
+        preferences.display.transport,
+        DisplayTransport::Ble | DisplayTransport::Auto
+    ) && let Some(ble_name) = verified_ble_name(&verified_banner)
+        && preferences.display.ble_name != ble_name
     {
-        info!(
-            wrote = %variant_id,
-            board = %board.label(),
-            correcting_to = %correct.id,
-            "the board is not the panel the written build drives; flashing the one it is",
-        );
-        variant_id_for_record = correct.id.clone();
-        // Once. The board has now been told by its own probe, so a second
-        // mismatch would mean the bundle disagrees with the hardware and
-        // rewriting again would only loop.
-        write(correct, app.clone(), port.clone()).await?;
+        preferences.display.ble_name = ble_name;
+        preferences_changed = true;
     }
 
     // A board that was just flashed through this app is a board the reader
     // wants driven. Fresh installs default to the preview transport so nothing
-    // reaches for a serial port unasked, which is right until the moment
-    // someone deliberately writes firmware to a panel — after that the default
-    // just means a successful flash appears to do nothing, because the display
-    // worker is still drawing to a preview and the panel holds its boot screen.
-    let mut preferences = state.engine.get_preferences().await;
+    // reaches for a serial port unasked; a deliberate flash settles that.
     if preferences.display.transport == DisplayTransport::Preview {
         preferences.display.transport = DisplayTransport::Usb;
         preferences.display.serial_port = port_for_status.clone();
+        preferences_changed = true;
+    }
+    if preferences_changed {
+        let saved_ble_name = preferences.display.ble_name.clone();
+        let saved_transport = preferences.display.transport;
         if let Err(error) = state.engine.save_preferences(preferences).await {
-            warn!(%error, "could not point the display at the board that was just flashed");
+            warn!(%error, "could not save the verified panel route");
+        } else if matches!(
+            saved_transport,
+            DisplayTransport::Ble | DisplayTransport::Auto
+        ) {
+            info!(ble_name = %saved_ble_name, "saved the verified panel BLE identity");
         } else {
             info!(port = %port_for_status, "driving the panel that was just flashed");
         }
@@ -1302,7 +1575,9 @@ async fn flash_firmware(
             let record = firmware::FlashRecord {
                 serial_number: serial,
                 build: bundled_build.clone().unwrap_or_default(),
+                firmware_version: Some(bundled_version),
                 variant_id: variant_id_for_record,
+                verified: true,
                 flashed_at: Timestamp::now().to_string(),
             };
             if let Err(error) = state
@@ -1323,32 +1598,19 @@ async fn flash_firmware(
     Ok(())
 }
 
-/// The port of an attached board that answered with our firmware's banner.
-///
-/// `None` covers every reason not to touch it: no board, a board that does not
-/// speak, or a port somebody else already holds. Each of those is a reason to
-/// leave the reader's transport choice alone rather than guess.
-async fn adoptable_panel_port() -> Option<String> {
-    let port = brickellstatus_eink::transport::discover_espressif_port()
-        .await
-        .ok()
-        .flatten()?;
-    let banner = banner_after_flash(&port).await?;
-    banner.saw_ready.then_some(port)
-}
-
-/// Reads the banner a freshly flashed board speaks at boot.
-///
-/// Opening the port is what resets the board, so this is also what makes it
-/// talk. `None` means it never said anything, which is not the same as it
-/// saying something unwelcome.
-async fn banner_after_flash(port: &str) -> Option<DeviceBanner> {
-    let transport = brickellstatus_eink::transport::UsbTransport::new(
-        brickellstatus_eink::transport::UsbConfig {
-            port: Some(port.to_owned()),
-            ..Default::default()
-        },
-    );
+/// Reads the device identity before any destructive write. Prefer the active
+/// USB session's cached banner; otherwise ask the exact selected port once.
+async fn panel_banner_before_flash(
+    display: &DisplayController,
+    port: &str,
+) -> Option<DeviceBanner> {
+    if let Some(line) = display.usb_banner().await {
+        return Some(DeviceBanner::parse(&line));
+    }
+    let transport = UsbTransport::new(UsbConfig {
+        port: Some(port.to_owned()),
+        ..Default::default()
+    });
     let banner = transport
         .ensure_connected()
         .await
@@ -1359,25 +1621,115 @@ async fn banner_after_flash(port: &str) -> Option<DeviceBanner> {
     banner
 }
 
-/// The variant this board says it needs, when the one just written is not it.
+fn refuse_firmware_downgrade(banner: &DeviceBanner, bundled_version: u32) -> Result<(), String> {
+    if let Some(device) = banner
+        .firmware_version
+        .filter(|device| *device > bundled_version)
+    {
+        return Err(format!(
+            "This panel runs firmware version {device}, newer than version {bundled_version} bundled with this app. Update BrickellStatus; no firmware was written."
+        ));
+    }
+    Ok(())
+}
+
+/// The port of an attached board that answered with our firmware's banner.
 ///
-/// A board that has never run our firmware speaks no banner, so nothing knows
-/// which panel it carries and the first variant in the bundle gets written on
-/// spec. Land that on the other board and the firmware does the right thing —
-/// it refuses to drive a panel it was not built for — but e-paper holds its
-/// last image, so the screen keeps showing whatever was on it and the flash
-/// looks like it did nothing at all.
+/// `None` covers every reason not to touch it: no board, a board that does not
+/// speak, or a port somebody else already holds. Each of those is a reason to
+/// leave the reader's transport choice alone rather than guess.
+async fn adoptable_panel_port() -> Option<String> {
+    let port = brickellstatus_eink::transport::discover_espressif_port()
+        .await
+        .ok()
+        .flatten()?;
+    let banner = banner_after_flash(&port, None).await.ok()??;
+    banner.saw_ready.then_some(port)
+}
+
+/// Reads the banner a freshly flashed board speaks at boot.
 ///
-/// The board settles it the moment it boots. This is the one question the
-/// reader is never asked, per the product's own rule, so the app has to act on
-/// the answer rather than report it.
-fn correction_for(banner: &DeviceBanner, written: &str) -> Option<PanelModel> {
-    if !banner.mismatch {
+/// The native USB device disappears while espflash resets it, so discovery is
+/// retried for a bounded interval. Once open, `UsbTransport` sends the
+/// non-destructive `?` identity query; verification therefore does not depend
+/// on catching a one-time boot line. `None` means the image never answered.
+async fn banner_after_flash(
+    port: &str,
+    expected_serial: Option<&str>,
+) -> Result<Option<DeviceBanner>, String> {
+    let deadline = tokio::time::Instant::now() + FIRMWARE_REENUMERATION_TIMEOUT;
+    let attached = loop {
+        match discover_espressif_devices().await {
+            Ok(devices) => {
+                if let Some(device) = devices.into_iter().find(|device| device.port == port) {
+                    break device;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "the flashed panel did not return at {port}; controller recovery was not attempted"
+                    ));
+                }
+            }
+            Err(error) if tokio::time::Instant::now() >= deadline => {
+                return Err(format!(
+                    "could not verify the flashed panel on USB: {error}"
+                ));
+            }
+            Err(error) => {
+                debug!(%error, %port, "waiting for USB panel discovery after flash");
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+
+    if !flash_serial_matches(expected_serial, attached.serial_number.as_deref()) {
+        return Err(format!(
+            "the device now at {port} is not the panel that started this flash; controller recovery was not attempted"
+        ));
+    }
+
+    let transport = brickellstatus_eink::transport::UsbTransport::new(
+        brickellstatus_eink::transport::UsbConfig {
+            port: Some(port.to_owned()),
+            ready_timeout: FIRMWARE_READY_TIMEOUT,
+            ..Default::default()
+        },
+    );
+    let info = transport
+        .ensure_connected()
+        .await
+        .map_err(|error| format!("could not query the flashed panel identity: {error}"))?;
+    let banner = info.banner.map(|line| DeviceBanner::parse(&line));
+    transport.disconnect().await;
+    Ok(banner)
+}
+
+/// Recovery can continue only while the exact physical USB board remains.
+fn flash_serial_matches(expected: Option<&str>, actual: Option<&str>) -> bool {
+    expected.is_none() || expected == actual
+}
+
+/// A pre-board-id BLE preference cannot safely identify one panel after an app
+/// restart. Keep it as migration evidence only; never auto-attach by the old
+/// generic name or quote that stale product label back to the reader.
+fn needs_panel_identity_migration(transport: DisplayTransport, ble_name: &str) -> bool {
+    matches!(transport, DisplayTransport::Ble | DisplayTransport::Auto)
+        && !ble_name.trim().is_empty()
+        && !is_durable_ble_device_name(ble_name)
+}
+
+/// Exact BLE identity learned from firmware that objectively answered READY.
+///
+/// Kept defensive even though the banner parser validates current ids: this is
+/// the boundary that turns device text into a persisted reconnect key, so a
+/// future parser relaxation must not save an arbitrary token as a panel name.
+fn verified_ble_name(banner: &DeviceBanner) -> Option<String> {
+    if !banner.saw_ready || banner.mismatch {
         return None;
     }
-    let board = banner.board?;
-    // Only when the board names a panel the written variant is not for.
-    (!written.contains(board.label().to_lowercase().as_str())).then_some(board)
+    let board_id = banner.board_id.as_deref()?;
+    let name = format!("BrickellStatus {}", board_id.to_ascii_uppercase());
+    is_durable_ble_device_name(&name).then_some(name)
 }
 
 /// Key for the last-flashed record in the settings table.
@@ -1472,11 +1824,21 @@ struct PlatformCapabilities {
 
 #[tauri::command]
 fn get_platform_capabilities(app: AppHandle) -> PlatformCapabilities {
+    // Neither phone platform can drive a panel over the cable, for different
+    // reasons, and both end in the same place: BLE is the only transport, and
+    // flashing is impossible because it needs a serial bootloader.
+    //
     // Android links the serial stack but cannot open a port from an
     // unprivileged app: available_ports() answers "Not implemented for this
-    // OS". Reporting that up front is kinder than a scan that always finds
-    // nothing, and flashing needs both a port and a bundled image.
-    let usb_display = cfg!(not(target_os = "android"));
+    // OS". iOS does not link it at all -- espflash and serialport are excluded
+    // from the build for both phone targets in Cargo.toml -- because iOS
+    // exposes no USB serial interface to a sandboxed app in the first place.
+    //
+    // Written as `mobile` rather than as a list of triples so a future phone
+    // target inherits the honest answer instead of claiming a cable it has no
+    // way to open. Reporting this up front is kinder than a scan that always
+    // finds nothing, and flashing needs both a port and a bundled image.
+    let usb_display = cfg!(not(mobile));
     PlatformCapabilities {
         usb_display,
         firmware_flashing: usb_display && firmware_root(&app).is_some(),
@@ -1607,7 +1969,6 @@ const fn notice_state_key(state: NoticeState) -> &'static str {
         NoticeState::Alert => "alert",
         NoticeState::Resolved => "resolved",
         NoticeState::Clear => "clear",
-        NoticeState::Watch => "watch",
         NoticeState::Likely => "likely",
         NoticeState::Open => "open",
         NoticeState::AllClear => "all_clear",
@@ -1686,6 +2047,25 @@ async fn get_aisstream_status(state: State<'_, DesktopState>) -> Result<AisStrea
         last_position_at: runtime.last_position_at,
         vessels_in_range,
     })
+}
+
+fn validated_mmsi_argument(mmsi: &str) -> Result<&str, String> {
+    (mmsi.len() == 9 && mmsi.bytes().all(|byte| byte.is_ascii_digit()))
+        .then_some(mmsi)
+        .ok_or_else(|| "MMSI must contain exactly 9 digits.".to_owned())
+}
+
+#[tauri::command]
+async fn get_vessel_detail(
+    state: State<'_, DesktopState>,
+    mmsi: String,
+) -> Result<Option<VesselDetailDto>, String> {
+    let mmsi = validated_mmsi_argument(&mmsi)?;
+    state
+        .engine
+        .get_vessel_detail(mmsi)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1828,7 +2208,7 @@ async fn scan_display_devices(
                 transport: None,
                 device_name: None,
                 detail: if errors.is_empty() {
-                    "No compatible E213 display found. Check USB power or Bluetooth advertising."
+                    "No powered e-paper panel found. E-ink can keep this screen visible after the battery dies; connect USB power, then look again."
                         .into()
                 } else {
                     format!("No compatible display found. {}", errors.join(" "))
@@ -2167,12 +2547,18 @@ async fn send_rotating_snapshot_to_display(
     selection: &PanelSelection,
     radar: Option<&RadarFigure>,
 ) -> (MutationResult, Option<String>) {
-    let channel_id = match selection {
-        PanelSelection::Alert { channel_id, .. } | PanelSelection::Rotation { channel_id } => {
-            channel_id
+    let (channel_id, notice_key) = match selection {
+        PanelSelection::Alert {
+            channel_id,
+            notice_key,
+            ..
         }
+        | PanelSelection::Rotation {
+            channel_id,
+            notice_key,
+        } => (channel_id, notice_key.as_deref()),
     };
-    let Some(channel) = snapshot
+    let Some(base_channel) = snapshot
         .channels
         .iter()
         .find(|channel| &channel.id == channel_id)
@@ -2182,6 +2568,21 @@ async fn send_rotating_snapshot_to_display(
             None,
         );
     };
+    // A channel is a subscription; each current item is its own slide. Clone
+    // the compatibility view for projection so existing renderers can draw the
+    // selected notice without learning carousel state.
+    let mut selected_channel = base_channel.clone();
+    if let Some(notice_key) = notice_key
+        && let Some(notice) = base_channel
+            .notices
+            .iter()
+            .find(|notice| notice.key == notice_key)
+    {
+        selected_channel.signal = Some(notice.signal.clone());
+        selected_channel.priority = notice.priority;
+        selected_channel.material_key.clone_from(&notice.key);
+    }
+    let channel = &selected_channel;
     let panel = display.panel();
     let frame = if channel.kind == ChannelKindDto::Bridge {
         match render_snapshot(
@@ -2250,7 +2651,7 @@ async fn send_rendered_frame_to_display(
                 state: DisplayConnectionState::Connecting,
                 transport: preferred_transport(preferences.display.transport),
                 device_name: None,
-                detail: "Connecting to the configured E213 display…".into(),
+                detail: "Connecting to the configured e-paper panel…".into(),
                 last_frame_at: None,
                 last_ack_at: None,
                 panel: None,
@@ -2261,15 +2662,13 @@ async fn send_rendered_frame_to_display(
         Ok(Some((receipt, name))) => {
             let at = Timestamp::now().to_string();
             let transport = receipt_transport(receipt.transport);
-            let detail = format!(
-                "{}{}",
-                receipt.acknowledgement,
-                if receipt.ready_observed {
-                    " · READY observed"
-                } else {
-                    ""
-                }
-            );
+            let detail = observe_panel_battery(
+                app,
+                display,
+                receipt.battery_millivolts(),
+                receipt.low_battery(),
+            )
+            .unwrap_or_else(|| "Panel connected".into());
             let status = DisplayConnectionStatus {
                 state: DisplayConnectionState::Connected,
                 transport: Some(transport),
@@ -2300,6 +2699,61 @@ async fn send_rendered_frame_to_display(
             mutation_error(format!("Display did not acknowledge the frame: {error}"))
         }
     }
+}
+
+fn observe_panel_battery(
+    app: &AppHandle,
+    display: &DisplayController,
+    battery_millivolts: Option<u16>,
+    low_battery: Option<bool>,
+) -> Option<String> {
+    if display.note_battery_state(low_battery)
+        && let Err(error) = app
+            .notification()
+            .builder()
+            .title("Panel battery low")
+            .body("Connect the BrickellStatus panel to USB power.")
+            .show()
+    {
+        warn!(%error, "low-battery notification could not be shown");
+    }
+    match (battery_millivolts, low_battery) {
+        (Some(millivolts), Some(true)) => format!(
+            "Panel connected · Battery low — connect USB ({})",
+            battery_voltage_label(millivolts)
+        )
+        .into(),
+        (Some(millivolts), Some(false)) => format!(
+            "Panel connected · Battery {}",
+            battery_voltage_label(millivolts)
+        )
+        .into(),
+        _ => None,
+    }
+}
+
+fn publish_banner_battery_status(
+    app: &AppHandle,
+    display: &DisplayController,
+    banner: &DeviceBanner,
+) {
+    let Some(detail) =
+        observe_panel_battery(app, display, banner.battery_millivolts, banner.low_battery)
+    else {
+        return;
+    };
+    let mut status = get_current_status(app);
+    if status.state != DisplayConnectionState::Connected {
+        return;
+    }
+    status.detail = detail;
+    status.panel = banner.panel.or(status.panel);
+    set_e213_transport_status(app, status);
+}
+
+fn battery_voltage_label(millivolts: u16) -> String {
+    let centivolts = (u32::from(millivolts) + 5) / 10;
+    format!("{}.{:02} V", centivolts / 100, centivolts % 100)
 }
 
 fn connected_status(
@@ -2520,7 +2974,7 @@ fn install_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .icon(tray_icon)
         .icon_as_template(cfg!(target_os = "macos"))
         .title(initial.tray_badge())
-        .tooltip("BrickellStatus · E213 disconnected")
+        .tooltip("BrickellStatus · panel disconnected")
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_tray_icon_event(|tray, event| {
@@ -2552,9 +3006,35 @@ fn install_runtime(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error
     let data_dir = app.path().app_data_dir()?;
     fs::create_dir_all(&data_dir)?;
     let database_path = data_dir.join("brickellstatus.sqlite3");
+    // The bundle identifier changed before the AIS learning loop was complete.
+    // Preserve the useful vessel/crossing/track observations from that local
+    // database, but never import its bridge intervals: those rows predate
+    // successful-poll continuity and cannot prove the app was watching.
+    let legacy_database_path = data_dir.parent().map(|parent| {
+        parent
+            .join("com.cmiami.puentegonorrea")
+            .join("tenders-log.sqlite3")
+    });
     let secret_store = LocalSecretStore::new(data_dir.join("credentials.json"));
     let engine = tauri::async_runtime::block_on(async {
         let store = Store::open(database_path).await?;
+        if let Some(path) = legacy_database_path.as_deref()
+            && path.is_file()
+        {
+            match store.import_legacy_learning(path).await {
+                Ok(report) => info!(
+                    vessels = report.vessels_added,
+                    crossings = report.transits_added,
+                    track_fixes = report.track_fixes_added,
+                    river_transits = report.river_transits_added,
+                    "older local AIS learning merged"
+                ),
+                // Import is intentionally opportunistic and idempotent. A
+                // locked or damaged old database must not strand the live app;
+                // the next launch gets another chance.
+                Err(error) => warn!(%error, "older local AIS learning could not be merged"),
+            }
+        }
         let config = RuntimeConfig::default();
         let factory = Arc::new(CredentialFreeCollectorFactory::new(
             config.user_agent.clone(),
@@ -2653,7 +3133,24 @@ async fn run_display_worker(
     engine: Arc<RuntimeEngine>,
     display: Arc<DisplayController>,
 ) {
-    let broker = PanelBroker::default();
+    let broker = Arc::new(PanelBroker::default());
+    // Snapshot ingestion must keep running while the display task is dwelling.
+    // When both jobs lived in this loop, `wait_or_preempt` had nobody capable
+    // of enqueueing the new alert that was supposed to wake it.
+    let ingest_broker = Arc::clone(&broker);
+    let ingest_engine = Arc::clone(&engine);
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let Ok(snapshot) = ingest_engine.get_snapshot().await else {
+                continue;
+            };
+            let preferences = ingest_engine.get_preferences().await;
+            ingest_broker.ingest(&snapshot, &preferences);
+        }
+    });
     let mut next_prove_at = tokio::time::Instant::now();
     let mut prove_failures = 0_u32;
     let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -2662,6 +3159,7 @@ async fn run_display_worker(
     let mut next_display_at = tokio::time::Instant::now();
     let mut next_reconnect_at = tokio::time::Instant::now();
     let mut reconnect_failures = 0_u32;
+    let mut next_battery_poll_at = tokio::time::Instant::now();
     // Opening the port resets the board, so looking for one to adopt is done
     // sparingly rather than on every pass of a five-second loop.
     let mut next_adopt_at = tokio::time::Instant::now();
@@ -2768,6 +3266,16 @@ async fn run_display_worker(
             next_prove_at = tokio::time::Instant::now() + prove_backoff(prove_failures);
         }
 
+        if display.has_active().await && tokio::time::Instant::now() >= next_battery_poll_at {
+            next_battery_poll_at = tokio::time::Instant::now() + PANEL_BATTERY_POLL_INTERVAL;
+            match tokio::time::timeout(Duration::from_secs(3), display.read_banner()).await {
+                Ok(Ok(Some(banner))) => publish_banner_battery_status(&app, &display, &banner),
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => debug!(%error, "panel battery status read failed"),
+                Err(_) => debug!("panel battery status read timed out"),
+            }
+        }
+
         if display.has_active().await && tokio::time::Instant::now() >= next_display_at {
             // The rotation index is read without advancing it. Only serving the
             // rotation lane consumes a slot; an alert must not, or a burst of
@@ -2785,7 +3293,7 @@ async fn run_display_worker(
             // does not re-fetch a composite that changes every ten.
             let radar = match &selection {
                 PanelSelection::Alert { channel_id, .. }
-                | PanelSelection::Rotation { channel_id } => {
+                | PanelSelection::Rotation { channel_id, .. } => {
                     // Bounded hard. Radar is decoration and the panel is the
                     // product: a tile host that hangs must cost the frame its
                     // figure, never its repaint.
@@ -2797,7 +3305,7 @@ async fn run_display_worker(
                     .unwrap_or_default()
                 }
             };
-            let (result, channel_id) = match tokio::time::timeout(
+            let (result, _) = match tokio::time::timeout(
                 Duration::from_secs(30),
                 send_rotating_snapshot_to_display(
                     &app,
@@ -2811,31 +3319,29 @@ async fn run_display_worker(
             .await
             {
                 Ok(result) => result,
-                Err(_) => (
-                    mutation_error("Display frame exceeded its 30 second deadline"),
-                    None,
-                ),
+                Err(_) => {
+                    // Cancellation happens outside `send_frame`, so its normal
+                    // error cleanup cannot run. Explicitly release any GATT
+                    // link: otherwise the panel remains connected, stops
+                    // advertising, and cannot be found by the next scan.
+                    if let Err(error) = display.disconnect(false).await {
+                        warn!(%error, "timed-out display route did not disconnect cleanly");
+                    }
+                    (
+                        mutation_error("Display frame exceeded its 30 second deadline"),
+                        None,
+                    )
+                }
             };
-            // An alert holds for a fixed, bounded time; a rotation frame keeps
-            // its channel's configured dwell.
+            // An alert holds for a fixed, bounded time. Every ordinary frame
+            // uses the same readable cadence; channel order and timing are no
+            // longer configuration concerns.
             let (dwell, holding_score) = match &selection {
                 PanelSelection::Alert { score, .. } => (PanelBroker::alert_hold(), *score),
-                PanelSelection::Rotation { .. } => {
-                    let seconds = channel_id
-                        .as_deref()
-                        .and_then(|id| {
-                            preferences
-                                .profile
-                                .channels
-                                .iter()
-                                .find(|channel| channel.id == id)
-                        })
-                        .map(|channel| channel.rotation_seconds)
-                        .unwrap_or(preferences.display.dwell_seconds)
-                        .max(5);
-                    // Score zero: anything queued may preempt an ordinary frame.
-                    (Duration::from_secs(u64::from(seconds)), 0)
-                }
+                PanelSelection::Rotation { .. } => (
+                    Duration::from_secs(u64::from(AUTOMATIC_FRAME_DWELL_SECONDS)),
+                    0,
+                ),
             };
             // The dwell and the interrupt wait are one primitive, so a new alert
             // lands within milliseconds instead of at the end of this frame.
@@ -2966,22 +3472,34 @@ async fn run_dispatch_worker(
         if tokio::time::Instant::now() >= next_maintenance_at {
             let now_ms = Timestamp::now().as_millisecond();
             let delivery_cutoff = iso_at(now_ms.saturating_sub(90 * 24 * 60 * 60 * 1_000));
-            // A week of observed track is what the charted centreline is
-            // calibrated against; past that it is weight without evidence.
-            let track_cutoff_ms = now_ms.saturating_sub(7 * 24 * 60 * 60 * 1_000);
+            // Keep a full seasonal cycle for every observed hull. Storage
+            // exempts confirmed bridge-openers from this cutoff, preserving
+            // their movement catalog indefinitely.
+            let track_cutoff_ms = Store::default_ais_track_cutoff_ms(now_ms);
+            let forecast_cutoff_ms = Store::default_forecast_cutoff_ms(now_ms);
             match delivery_cutoff {
                 Ok(delivery_cutoff) => {
                     match store.prune_history(&delivery_cutoff, track_cutoff_ms).await {
                         Ok(report) => {
-                            debug!(
-                                scrubbed_destinations = report.scrubbed_destinations,
-                                outbox_rows = report.outbox_rows,
-                                incidents = report.incidents,
-                                track_fixes = report.track_fixes,
-                                "local history retention completed"
-                            );
-                            next_maintenance_at =
-                                tokio::time::Instant::now() + Duration::from_secs(24 * 60 * 60);
+                            match store.prune_forecast_samples(forecast_cutoff_ms).await {
+                                Ok(forecast_samples) => {
+                                    debug!(
+                                        scrubbed_destinations = report.scrubbed_destinations,
+                                        outbox_rows = report.outbox_rows,
+                                        incidents = report.incidents,
+                                        track_fixes = report.track_fixes,
+                                        forecast_samples,
+                                        "local history retention completed"
+                                    );
+                                    next_maintenance_at = tokio::time::Instant::now()
+                                        + Duration::from_secs(24 * 60 * 60);
+                                }
+                                Err(error) => {
+                                    warn!(%error, "forecast history retention failed");
+                                    next_maintenance_at =
+                                        tokio::time::Instant::now() + Duration::from_secs(60 * 60);
+                                }
+                            }
                         }
                         Err(error) => {
                             warn!(%error, "local history retention failed");
@@ -3052,6 +3570,7 @@ pub fn run() {
             get_app_snapshot,
             get_preferences,
             get_aisstream_status,
+            get_vessel_detail,
             save_preferences,
             refresh_sources,
             search_locations,

@@ -2,35 +2,67 @@ use brickellstatus_eink::ChannelUrgency;
 
 use super::*;
 
-/// A board that has never run our firmware speaks no banner, so the variant
-/// written to it is a guess — the first in the bundle, which is an E213 build.
-/// Guess wrong and the firmware refuses to drive the panel, e-paper keeps the
-/// factory image, and a flash that genuinely succeeded looks like it did
-/// nothing. The board settles it at boot, and the app has to act on that.
 #[test]
-fn a_board_that_is_not_the_panel_we_wrote_asks_for_the_right_build() {
-    let mismatched = DeviceBanner::parse("READY INK1 250x122 3904 abc1234 E290 MISMATCH");
+fn verified_banner_becomes_the_exact_post_flash_ble_name() {
+    let banner = DeviceBanner::parse("READY INK1 250x122 3904 abc1234 E213 26b4");
     assert_eq!(
-        correction_for(&mismatched, "vision-master-e213-v11"),
-        Some(PanelModel::E290),
-        "an E290 told to run an E213 build must ask for the E290 one"
+        verified_ble_name(&banner).as_deref(),
+        Some("BrickellStatus 26B4")
     );
 }
 
 #[test]
-fn a_board_running_the_build_it_should_is_left_alone() {
-    // No mismatch: nothing to correct, whatever the banner names.
-    let happy = DeviceBanner::parse("READY INK1 296x128 4736 abc1234 E290");
-    assert_eq!(correction_for(&happy, "vision-master-e290"), None);
+fn missing_or_malformed_board_id_never_becomes_a_reconnect_key() {
+    for line in [
+        "READY INK1 250x122 3904 abc1234 E213",
+        "READY INK1 250x122 3904 abc1234 E213 panel",
+        "READY INK1 250x122 3904 abc1234 E213 0000",
+        "READY INK1 250x122 3904 abc1234 E213 26B4 MISMATCH",
+    ] {
+        assert_eq!(
+            verified_ble_name(&DeviceBanner::parse(line)),
+            None,
+            "{line}"
+        );
+    }
+}
 
-    // Mismatch naming the board we already wrote for would mean rewriting the
-    // same image forever, so it is not a correction.
-    let same = DeviceBanner::parse("READY INK1 296x128 4736 abc1234 E290 MISMATCH");
-    assert_eq!(correction_for(&same, "vision-master-e290"), None);
+#[test]
+fn flash_recovery_never_moves_to_a_different_or_anonymous_usb_board() {
+    assert!(flash_serial_matches(None, None));
+    assert!(flash_serial_matches(None, Some("newly-observed")));
+    assert!(flash_serial_matches(Some("panel-a"), Some("panel-a")));
+    assert!(!flash_serial_matches(Some("panel-a"), Some("panel-b")));
+    assert!(!flash_serial_matches(Some("panel-a"), None));
+}
 
-    // A banner with no board named settles nothing.
-    let nameless = DeviceBanner::parse("READY INK1 250x122 3904 abc1234 NONE MISMATCH");
-    assert_eq!(correction_for(&nameless, "vision-master-e213"), None);
+#[test]
+fn every_flash_entry_point_refuses_a_detected_firmware_downgrade() {
+    let newer = DeviceBanner::parse("READY INK1 250x122 3904 future E213 26B4 FW3");
+    assert!(refuse_firmware_downgrade(&newer, 2).is_err());
+    let current = DeviceBanner::parse("READY INK1 296x128 4736 current E290 26B4 FW2");
+    assert!(refuse_firmware_downgrade(&current, 2).is_ok());
+}
+
+#[test]
+fn only_saved_legacy_wireless_routes_raise_identity_migration_attention() {
+    assert!(needs_panel_identity_migration(
+        DisplayTransport::Ble,
+        "InkDock E213"
+    ));
+    assert!(needs_panel_identity_migration(
+        DisplayTransport::Auto,
+        "INK1 panel"
+    ));
+    assert!(!needs_panel_identity_migration(
+        DisplayTransport::Ble,
+        "BrickellStatus 26B4"
+    ));
+    assert!(!needs_panel_identity_migration(
+        DisplayTransport::Usb,
+        "InkDock E213"
+    ));
+    assert!(!needs_panel_identity_migration(DisplayTransport::Ble, ""));
 }
 
 #[test]
@@ -38,7 +70,7 @@ fn display_status_contract_matches_frontend() {
     let status = DisplayConnectionStatus {
         state: DisplayConnectionState::Connected,
         transport: Some(DisplayConnectionTransport::Ble),
-        device_name: Some("InkDock E213".into()),
+        device_name: Some("BrickellStatus 26B4".into()),
         detail: "ACK INK1".into(),
         last_frame_at: Some("2026-08-14T15:04:05Z".into()),
         last_ack_at: Some("2026-08-14T15:04:05Z".into()),
@@ -47,7 +79,7 @@ fn display_status_contract_matches_frontend() {
     let value = serde_json::to_value(status).unwrap();
     assert_eq!(value["state"], "connected");
     assert_eq!(value["transport"], "ble");
-    assert_eq!(value["deviceName"], "InkDock E213");
+    assert_eq!(value["deviceName"], "BrickellStatus 26B4");
     assert_eq!(value["lastAckAt"], "2026-08-14T15:04:05Z");
     // The panel travels with the status so the interface can name what was
     // detected instead of naming the board this project started with.
@@ -72,6 +104,36 @@ fn aisstream_status_contract_matches_frontend_without_secret_material() {
 }
 
 #[test]
+fn vessel_detail_contract_and_mmsi_boundary_match_the_map() {
+    for valid in ["367705810", "000000000"] {
+        assert_eq!(validated_mmsi_argument(valid).unwrap(), valid);
+    }
+    for invalid in ["", "36770581", "3677058100", "367 705810", "36770581A"] {
+        assert!(validated_mmsi_argument(invalid).is_err(), "{invalid:?}");
+    }
+
+    let detail = VesselDetailDto {
+        mmsi: "367705810".into(),
+        transits_opened: 3,
+        transits_fits_under: 1,
+        transits_unknown: 2,
+        transits_pending: 0,
+        first_seen_at: "2026-08-14T15:04:05Z".into(),
+        last_seen_at: "2026-08-23T16:02:04Z".into(),
+        last_crossing_at: Some("2026-08-18T21:23:21Z".into()),
+        last_opened_at: Some("2026-08-18T21:23:21Z".into()),
+        opening_propensity: Some(6_667),
+        recent_crossings: Vec::new(),
+    };
+    let value = serde_json::to_value(detail).unwrap();
+    assert_eq!(value["mmsi"], "367705810");
+    assert_eq!(value["transitsFitsUnder"], 1);
+    assert_eq!(value["transitsUnknown"], 2);
+    assert_eq!(value["openingPropensity"], 6_667);
+    assert_eq!(value["recentCrossings"], serde_json::json!([]));
+}
+
+#[test]
 fn fresh_display_controller_never_auto_connects_to_an_espressif_candidate() {
     let display = DisplayController::new(&AppPreferences::default());
     assert!(!display.automatic_reconnect_enabled());
@@ -86,6 +148,74 @@ fn exact_saved_usb_route_is_armed_for_restart_reconnect() {
     let display = DisplayController::new(&preferences);
     assert!(display.automatic_reconnect_enabled());
     assert!(!display.delivery_armed());
+}
+
+#[test]
+fn exact_saved_ble_name_is_armed_for_restart_reconnect() {
+    let mut preferences = AppPreferences::default();
+    preferences.display.transport = DisplayTransport::Ble;
+    preferences.display.ble_name = "BrickellStatus 26B4".into();
+    let display = DisplayController::new(&preferences);
+
+    assert!(display.automatic_reconnect_enabled());
+    assert!(!display.delivery_armed());
+}
+
+#[test]
+fn automatic_transport_arms_when_only_a_ble_name_is_saved() {
+    let mut preferences = AppPreferences::default();
+    preferences.display.transport = DisplayTransport::Auto;
+    preferences.display.ble_name = "BrickellStatus 26B4".into();
+    let display = DisplayController::new(&preferences);
+
+    assert!(display.automatic_reconnect_enabled());
+}
+
+#[test]
+fn bluetooth_without_a_saved_panel_stays_parked() {
+    let mut preferences = AppPreferences::default();
+    preferences.display.transport = DisplayTransport::Ble;
+    preferences.display.ble_name.clear();
+    let display = DisplayController::new(&preferences);
+
+    assert!(!display.automatic_reconnect_enabled());
+}
+
+#[test]
+fn non_unique_ble_names_never_arm_restart_reconnect() {
+    for name in [
+        "INK1 panel",
+        "InkDock E213",
+        "BrickellStatus 26b4",
+        "BrickellStatus 26B40",
+        "BrickellStatus 0000",
+    ] {
+        let mut preferences = AppPreferences::default();
+        preferences.display.transport = DisplayTransport::Ble;
+        preferences.display.ble_name = name.into();
+
+        assert!(
+            !DisplayController::new(&preferences).automatic_reconnect_enabled(),
+            "{name:?} is not a durable board identity"
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicit_ble_id_is_armed_before_the_connection_result() {
+    let display = DisplayController::new(&AppPreferences::default());
+    *display.preferred_usb_port.lock().await = Some("/dev/cu.old-panel".into());
+
+    display
+        .arm_selected_ble_route("platform-peripheral-id")
+        .await;
+
+    assert!(display.automatic_reconnect_enabled());
+    assert_eq!(
+        display.preferred_ble_id.lock().await.as_deref(),
+        Some("platform-peripheral-id")
+    );
+    assert!(display.preferred_usb_port.lock().await.is_none());
 }
 
 /// A USB display that has been opened but has not carried a frame yet, which is
@@ -200,11 +330,14 @@ async fn a_board_that_dies_after_answering_stops_counting_as_proven() {
 #[tokio::test]
 async fn a_bluetooth_display_says_nothing_about_the_board_on_usb() {
     let display = DisplayController::new(&AppPreferences::default());
+    let banner = "READY INK1 250x122 3904 abc1234 E213 26B4 FW2";
     *display.active.write().await = Some(ActiveDisplay::Ble {
-        name: "InkDock E213".into(),
+        name: "BrickellStatus 26B4".into(),
         transport: Arc::new(BleTransport::new(BleConfig::default())),
+        banner: Some(banner.into()),
     });
     display.note_frame_acknowledged();
+    assert_eq!(display.ble_banner().await.as_deref(), Some(banner));
     assert_eq!(
         display.usb_route_evidence().await,
         firmware::RouteEvidence::Absent,
@@ -339,6 +472,43 @@ async fn local_secret_store_round_trips_without_os_vault_access() {
     assert_eq!(
         store.whatsapp_token().await.unwrap().as_deref(),
         Some("local-test-token")
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    // The directory, not only the file. create_dir_all leaves 0755, which lets
+    // anyone list the credential file and read its size and mtime.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    // A write publishes by rename, so no half-written file is ever visible at
+    // the real path and no temporary is left behind on success.
+    assert!(
+        !path.with_extension("tmp").exists(),
+        "a temporary credential file survived a successful write"
+    );
+
+    // Replacing a token must not widen the file: the second write goes through
+    // a fresh temporary, and its mode has to survive the rename.
+    store
+        .store_whatsapp_token("replacement-token".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.whatsapp_token().await.unwrap().as_deref(),
+        Some("replacement-token")
     );
     #[cfg(unix)]
     {
@@ -712,6 +882,226 @@ async fn midnight_wrapping_quiet_hours_use_the_snapshot_clock() {
     assert!(!quiet_hours_block(&preferences, &channel, &snapshot).unwrap());
 }
 
+fn mark_bridge_likely(snapshot: &mut AppSnapshot) {
+    snapshot.decision.state = BridgeStateDto::Likely;
+    let bridge = snapshot
+        .channels
+        .iter_mut()
+        .find(|channel| channel.id == "bridge.brickell")
+        .expect("bridge channel");
+    // Runtime snapshots carry the computed urgency. Delivery tests that
+    // construct a likely decision by hand must keep that invariant intact.
+    bridge.priority.urgency = UrgencyDto::HeadsUp;
+    bridge.priority.score = 305;
+    bridge.priority.confirmed = false;
+}
+
+fn earthquake_notice(
+    key: &str,
+    headline: &str,
+    score: u16,
+    urgency: UrgencyDto,
+) -> brickellstatus_runtime::ChannelNoticeDto {
+    brickellstatus_runtime::ChannelNoticeDto {
+        key: key.into(),
+        signal: brickellstatus_runtime::ChannelSignalDto {
+            headline: headline.into(),
+            detail: format!("Details for {headline}."),
+            action: "Check the sourced event details.".into(),
+            severity: Some("M 4.8".into()),
+            expires_at: Some("2026-08-24T12:00:00Z".into()),
+            band: None,
+            imminence_minutes: None,
+            series: Vec::new(),
+            previous_close: None,
+        },
+        priority: brickellstatus_runtime::ChannelPriorityDto {
+            score,
+            urgency,
+            imminence_minutes: None,
+            confirmed: true,
+        },
+    }
+}
+
+fn configure_earthquake_notices(
+    snapshot: &mut AppSnapshot,
+    notices: Vec<brickellstatus_runtime::ChannelNoticeDto>,
+) -> usize {
+    let index = snapshot
+        .channels
+        .iter()
+        .position(|channel| channel.kind == ChannelKindDto::Earthquake)
+        .expect("earthquake channel");
+    let channel = &mut snapshot.channels[index];
+    channel.enabled = true;
+    channel.active = true;
+    channel.availability = AvailabilityDto::Fresh;
+    channel.coverage_complete = true;
+    channel.signal = notices.first().map(|notice| notice.signal.clone());
+    channel.priority = notices
+        .first()
+        .map_or_else(Default::default, |notice| notice.priority);
+    channel.notices = notices;
+    index
+}
+
+#[tokio::test]
+async fn lower_ranked_earthquake_gets_its_own_whatsapp_notice_without_replaying_top() {
+    let store = Store::in_memory().await.unwrap();
+    let engine = RuntimeEngine::new(store.clone(), RuntimeConfig::default())
+        .await
+        .unwrap();
+    let mut preferences = engine.get_preferences().await;
+    preferences.profile.quiet_hours.enabled = false;
+    preferences.whatsapp.enabled = true;
+    preferences.whatsapp.token_configured = true;
+    preferences.whatsapp.recipient = "+13055550123".into();
+    preferences.whatsapp.consent = brickellstatus_runtime::WhatsAppRecipientConsent::OptedIn;
+    preferences.whatsapp.consent_recipient = Some("+13055550123".into());
+    preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
+
+    let top = earthquake_notice(
+        "quake-top",
+        "M 5.8 · First earthquake",
+        760,
+        UrgencyDto::Action,
+    );
+    let lower = earthquake_notice(
+        "quake-lower",
+        "M 4.8 · Later earthquake",
+        430,
+        UrgencyDto::HeadsUp,
+    );
+    let routine = earthquake_notice(
+        "quake-routine",
+        "Routine earthquake",
+        90,
+        UrgencyDto::Routine,
+    );
+    let mut snapshot = engine.get_snapshot().await.unwrap();
+    let earthquake_index = configure_earthquake_notices(&mut snapshot, vec![top.clone()]);
+    snapshot.channels[earthquake_index].summary = "1 current earthquake".into();
+    enqueue_material_whatsapp_updates(&store, &preferences, &snapshot)
+        .await
+        .unwrap();
+    let first_lease = store
+        .lease_next("9999-01-01T00:00:00Z", "9999-01-01T00:01:00Z")
+        .await
+        .unwrap()
+        .expect("top earthquake should be queued");
+    let first_request: DeliveryRequest = serde_json::from_str(&first_lease.request_json).unwrap();
+
+    configure_earthquake_notices(&mut snapshot, vec![top.clone(), lower.clone(), routine]);
+    snapshot.channels[earthquake_index].summary = "3 current earthquakes".into();
+    enqueue_material_whatsapp_updates(&store, &preferences, &snapshot)
+        .await
+        .unwrap();
+
+    let tracker = store
+        .get_json::<WhatsAppDispatchTracker>(DISPATCH_TRACKER_KEY)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        validate_current_outbox(
+            &first_lease,
+            &first_request,
+            &tracker,
+            &snapshot.channels[earthquake_index],
+            &preferences,
+            &snapshot,
+            first_request.created_at_millis,
+        )
+        .is_ok(),
+        "a sibling item and aggregate count change must not supersede the top notice"
+    );
+
+    let rows = store.list_outbox_history(10).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    let subjects = rows
+        .iter()
+        .map(|row| {
+            serde_json::from_str::<DeliveryRequest>(&row.request_json)
+                .unwrap()
+                .notice
+                .subject
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        subjects,
+        BTreeSet::from([top.signal.headline.clone(), lower.signal.headline.clone()])
+    );
+
+    enqueue_material_whatsapp_updates(&store, &preferences, &snapshot)
+        .await
+        .unwrap();
+    assert_eq!(store.list_outbox_history(10).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn legacy_desktop_tracker_migrates_to_top_and_only_new_item_is_due() {
+    let engine = RuntimeEngine::new(Store::in_memory().await.unwrap(), RuntimeConfig::default())
+        .await
+        .unwrap();
+    let preferences = engine.get_preferences().await;
+    let mut snapshot = engine.get_snapshot().await.unwrap();
+    let top = earthquake_notice(
+        "quake-top",
+        "M 5.8 · First earthquake",
+        760,
+        UrgencyDto::Action,
+    );
+    let lower = earthquake_notice(
+        "quake-lower",
+        "M 4.8 · Later earthquake",
+        430,
+        UrgencyDto::HeadsUp,
+    );
+    let earthquake_index =
+        configure_earthquake_notices(&mut snapshot, vec![top.clone(), lower.clone()]);
+    let channel = &snapshot.channels[earthquake_index];
+    let mut legacy_channels = serde_json::Map::new();
+    legacy_channels.insert(
+        channel.id.clone(),
+        serde_json::json!({
+            "incidentId": null,
+            "revision": 1,
+            "lastMaterial": "active:legacy-channel-hash",
+            "active": true,
+            "announced": false
+        }),
+    );
+    let legacy_json = serde_json::json!({
+        "routeFingerprint": null,
+        "channels": legacy_channels
+    });
+    let mut tracker: WhatsAppDispatchTracker = serde_json::from_value(legacy_json).unwrap();
+    assert!(tracker.channels[&channel.id].signal.is_none());
+
+    let targets = current_channel_dispatch_targets(channel, &preferences, &snapshot);
+    assert_eq!(targets.len(), 2);
+    assert!(migrate_legacy_channel_tracker(
+        &mut tracker,
+        channel,
+        &snapshot,
+        &targets
+    ));
+    assert!(!tracker.channels.contains_key(&channel.id));
+    assert!(
+        desktop_notification_material_if_due(&tracker, channel, &snapshot, &targets[0]).is_none(),
+        "the legacy top must not be replayed during migration"
+    );
+    assert!(
+        desktop_notification_material_if_due(&tracker, channel, &snapshot, &targets[1]).is_some(),
+        "the newly observed lower-ranked item still needs its own native notice"
+    );
+    let (title, body) =
+        desktop_notification_copy_for_signal(channel, targets[1].signal.as_ref(), true, true);
+    assert!(title.contains("Later earthquake"));
+    assert!(body.contains("Details for M 4.8"));
+}
+
 #[tokio::test]
 async fn partial_coverage_never_resolves_an_announced_incident() {
     let store = Store::in_memory().await.unwrap();
@@ -727,7 +1117,7 @@ async fn partial_coverage_never_resolves_an_announced_incident() {
     preferences.whatsapp.consent_recipient = Some("+13055550123".into());
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     let mut snapshot = engine.get_snapshot().await.unwrap();
-    snapshot.decision.state = BridgeStateDto::Likely;
+    mark_bridge_likely(&mut snapshot);
     let bridge_index = snapshot
         .channels
         .iter()
@@ -830,7 +1220,7 @@ async fn material_channel_is_persisted_and_leased_from_outbox() {
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     preferences.whatsapp.recipient = "+13055550123".into();
     let mut snapshot = engine.get_snapshot().await.unwrap();
-    snapshot.decision.state = BridgeStateDto::Likely;
+    mark_bridge_likely(&mut snapshot);
     let bridge = snapshot
         .channels
         .iter_mut()
@@ -921,7 +1311,7 @@ async fn stale_or_changed_outbox_notice_fails_closed_before_delivery() {
     preferences.whatsapp.consent_recipient = Some("+13055550123".into());
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     let mut snapshot = engine.get_snapshot().await.unwrap();
-    snapshot.decision.state = BridgeStateDto::Likely;
+    mark_bridge_likely(&mut snapshot);
     let bridge_index = snapshot
         .channels
         .iter()
@@ -982,7 +1372,7 @@ async fn stale_or_changed_outbox_notice_fails_closed_before_delivery() {
     );
 
     snapshot.channels[bridge_index].active = true;
-    snapshot.decision.state = BridgeStateDto::Likely;
+    mark_bridge_likely(&mut snapshot);
     let max_age = i64::from(
         preferences
             .profile
@@ -1022,7 +1412,7 @@ async fn all_clear_requires_a_prior_provider_accepted_active_notice() {
     preferences.whatsapp.consent_recipient = Some("+13055550123".into());
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     let mut snapshot = engine.get_snapshot().await.unwrap();
-    snapshot.decision.state = BridgeStateDto::Likely;
+    mark_bridge_likely(&mut snapshot);
     let bridge_index = snapshot
         .channels
         .iter()
@@ -1077,7 +1467,7 @@ async fn accepted_outbox_revision_recovers_announced_state_before_all_clear() {
     preferences.whatsapp.consent_recipient = Some("+13055550123".into());
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     let mut snapshot = engine.get_snapshot().await.unwrap();
-    snapshot.decision.state = BridgeStateDto::Likely;
+    mark_bridge_likely(&mut snapshot);
     let bridge_index = snapshot
         .channels
         .iter()
@@ -1149,7 +1539,7 @@ async fn expired_current_notice_rearms_one_fresh_representation() {
     preferences.whatsapp.consent_recipient = Some("+13055550123".into());
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     let mut snapshot = engine.get_snapshot().await.unwrap();
-    snapshot.decision.state = BridgeStateDto::Likely;
+    mark_bridge_likely(&mut snapshot);
     let bridge = snapshot
         .channels
         .iter_mut()
@@ -1244,7 +1634,7 @@ async fn temporarily_unavailable_active_notice_rearms_after_source_recovers() {
     preferences.whatsapp.consent_recipient = Some("+13055550123".into());
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     let mut snapshot = engine.get_snapshot().await.unwrap();
-    snapshot.decision.state = BridgeStateDto::Likely;
+    mark_bridge_likely(&mut snapshot);
     let bridge_index = snapshot
         .channels
         .iter()
@@ -1333,7 +1723,7 @@ async fn recipient_route_fingerprint_never_inherits_announced_state() {
     preferences.whatsapp.consent_recipient = Some("+13055550123".into());
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     let mut snapshot = engine.get_snapshot().await.unwrap();
-    snapshot.decision.state = BridgeStateDto::Likely;
+    mark_bridge_likely(&mut snapshot);
     let bridge = snapshot
         .channels
         .iter_mut()
@@ -1427,7 +1817,7 @@ async fn credential_replacement_rearms_an_unchanged_active_alert() {
     preferences.whatsapp.consent_recipient = Some("+13055550123".into());
     preferences.whatsapp.consent_recorded_at_millis = Some(1_786_741_200_000);
     let mut snapshot = engine.get_snapshot().await.unwrap();
-    snapshot.decision.state = BridgeStateDto::Likely;
+    mark_bridge_likely(&mut snapshot);
     let bridge = snapshot
         .channels
         .iter_mut()
@@ -1470,34 +1860,13 @@ async fn credential_replacement_rearms_an_unchanged_active_alert() {
 }
 
 #[tokio::test]
-async fn interrupt_presets_have_distinct_fail_closed_semantics() {
+async fn interrupt_eligibility_follows_current_urgency_not_legacy_presets() {
     let store = Store::in_memory().await.unwrap();
     let engine = RuntimeEngine::new(store, RuntimeConfig::default())
         .await
         .unwrap();
-    let mut preferences = engine.get_preferences().await;
+    let preferences = engine.get_preferences().await;
     let mut snapshot = engine.get_snapshot().await.unwrap();
-    let bridge_index = snapshot
-        .channels
-        .iter()
-        .position(|channel| channel.id == "bridge.brickell")
-        .unwrap();
-    snapshot.channels[bridge_index].enabled = true;
-    snapshot.channels[bridge_index].active = true;
-    snapshot.channels[bridge_index].interrupt_preset = InterruptPreset::ConfirmedOnly;
-    snapshot.decision.state = BridgeStateDto::Likely;
-    assert!(!interrupt_allows(
-        &snapshot.channels[bridge_index],
-        &preferences,
-        &snapshot
-    ));
-    snapshot.decision.state = BridgeStateDto::Open;
-    assert!(interrupt_allows(
-        &snapshot.channels[bridge_index],
-        &preferences,
-        &snapshot
-    ));
-
     let weather_index = snapshot
         .channels
         .iter()
@@ -1505,147 +1874,155 @@ async fn interrupt_presets_have_distinct_fail_closed_semantics() {
         .unwrap();
     snapshot.channels[weather_index].enabled = true;
     snapshot.channels[weather_index].active = true;
-    snapshot.channels[weather_index].interrupt_preset = InterruptPreset::ConfirmedOnly;
-    assert!(!interrupt_allows(
-        &snapshot.channels[weather_index],
-        &preferences,
-        &snapshot
-    ));
-    snapshot.channels[weather_index].interrupt_preset = InterruptPreset::Meaningful;
-    assert!(interrupt_allows(
-        &snapshot.channels[weather_index],
-        &preferences,
-        &snapshot
-    ));
-    snapshot.channels[weather_index].interrupt_preset = InterruptPreset::Custom;
-    assert!(!interrupt_allows(
-        &snapshot.channels[weather_index],
-        &preferences,
-        &snapshot
-    ));
+    snapshot.channels[weather_index].priority.urgency = UrgencyDto::HeadsUp;
+    snapshot.channels[weather_index].presence = SurfacePresence::Off;
+    snapshot.channels[weather_index].destinations.clear();
 
-    let news_index = snapshot
-        .channels
-        .iter()
-        .position(|channel| channel.kind == ChannelKindDto::News)
-        .unwrap();
-    snapshot.channels[news_index].enabled = true;
-    snapshot.channels[news_index].active = true;
-    snapshot.channels[news_index].interrupt_preset = InterruptPreset::Recommended;
+    // Stored tuning fields no longer decide whether a current signal deserves
+    // attention. Every legacy value resolves to the same automatic policy.
+    for preset in [
+        InterruptPreset::Recommended,
+        InterruptPreset::ConfirmedOnly,
+        InterruptPreset::Meaningful,
+        InterruptPreset::Off,
+        InterruptPreset::Custom,
+    ] {
+        snapshot.channels[weather_index].interrupt_preset = preset;
+        assert!(
+            interrupt_allows(&snapshot.channels[weather_index], &preferences, &snapshot),
+            "{preset:?} changed automatic interrupt eligibility"
+        );
+    }
+
+    snapshot.channels[weather_index].priority.urgency = UrgencyDto::Routine;
     assert!(!interrupt_allows(
-        &snapshot.channels[news_index],
+        &snapshot.channels[weather_index],
         &preferences,
         &snapshot
     ));
-    preferences
-        .profile
-        .channels
-        .iter_mut()
-        .find(|channel| channel.id == snapshot.channels[news_index].id)
-        .unwrap()
-        .scope
-        .insert("breakingOnly".into(), serde_json::json!(true));
-    assert!(interrupt_allows(
-        &snapshot.channels[news_index],
+    snapshot.channels[weather_index].priority.urgency = UrgencyDto::Emergency;
+    snapshot.channels[weather_index].active = false;
+    assert!(!interrupt_allows(
+        &snapshot.channels[weather_index],
+        &preferences,
+        &snapshot
+    ));
+    snapshot.channels[weather_index].active = true;
+    snapshot.channels[weather_index].enabled = false;
+    assert!(!interrupt_allows(
+        &snapshot.channels[weather_index],
         &preferences,
         &snapshot
     ));
 }
 
 #[tokio::test]
-async fn rotation_honors_home_cadence_and_surface_presence() {
-    let store = Store::in_memory().await.unwrap();
-    let engine = RuntimeEngine::new(store, RuntimeConfig::default())
-        .await
-        .unwrap();
-    let mut preferences = engine.get_preferences().await;
-    preferences.display.return_home_after = 2;
-    let mut snapshot = engine.get_snapshot().await.unwrap();
-    for channel in &mut snapshot.channels {
-        channel.enabled = matches!(
-            channel.id.as_str(),
-            "bridge.brickell" | "weather.miami" | "news.local"
-        );
-        // Something to say. Rotation is no longer a standing reservation: a
-        // channel earns its slot by having material, and only the anchor is
-        // exempt.
-        channel.active = channel.id != "bridge.brickell";
-        channel.destinations = vec![DestinationIdDto::Epaper];
-        channel.presence = if channel.id == "bridge.brickell" {
-            SurfacePresence::Home
-        } else {
-            SurfacePresence::Rotation
-        };
-    }
-    // The anchor every third slot, the rest sharing the gaps. News appears here
-    // where it previously could not: rotation used to drop News, Official,
-    // Hurricane and Earthquake by kind, which made `presence: Rotation`
-    // meaningless for exactly the channels worth rotating.
-    let slot = |snapshot: &AppSnapshot, index: u64| {
-        rotation_channel(snapshot, &preferences, index).map(|channel| channel.id.to_owned())
-    };
-    assert_eq!(slot(&snapshot, 0).as_deref(), Some("bridge.brickell"));
-    assert_eq!(slot(&snapshot, 1).as_deref(), Some("weather.miami"));
-    assert_eq!(slot(&snapshot, 2).as_deref(), Some("news.local"));
-    assert_eq!(slot(&snapshot, 3).as_deref(), Some("bridge.brickell"));
-    assert_eq!(slot(&snapshot, 4).as_deref(), Some("weather.miami"));
-
-    // A channel with nothing to report gives its slot back rather than
-    // spending it on its own empty state.
-    let mut quiet = snapshot.clone();
-    for channel in &mut quiet.channels {
-        if channel.id == "news.local" {
-            channel.active = false;
-        }
-    }
-    for index in 0..6 {
-        assert_ne!(
-            slot(&quiet, index).as_deref(),
-            Some("news.local"),
-            "a quiet channel took slot {index}"
-        );
-    }
-
-    // With nothing else to say, the anchor holds the panel — which is the one
-    // thing always worth reading.
-    let mut silent = quiet.clone();
-    for channel in &mut silent.channels {
-        channel.active = false;
-    }
-    for index in 0..4 {
-        assert_eq!(slot(&silent, index).as_deref(), Some("bridge.brickell"));
-    }
-}
-
-#[tokio::test]
-async fn off_messages_only_and_inactive_active_only_never_reach_epaper() {
+async fn rotation_orders_relevant_channels_by_score_despite_legacy_surface_fields() {
     let store = Store::in_memory().await.unwrap();
     let engine = RuntimeEngine::new(store, RuntimeConfig::default())
         .await
         .unwrap();
     let preferences = engine.get_preferences().await;
     let mut snapshot = engine.get_snapshot().await.unwrap();
-    for (index, channel) in snapshot.channels.iter_mut().enumerate() {
-        channel.enabled = true;
+    for channel in &mut snapshot.channels {
+        channel.enabled = false;
         channel.active = false;
-        channel.destinations = vec![DestinationIdDto::Epaper];
-        channel.presence = match index % 3 {
-            0 => SurfacePresence::Off,
-            1 => SurfacePresence::MessagesOnly,
-            _ => SurfacePresence::ActiveOnly,
-        };
+        channel.priority.score = 0;
     }
-    assert!(rotation_channel(&snapshot, &preferences, 0).is_none());
-    let active_only = snapshot
+    let configure = |snapshot: &mut AppSnapshot,
+                     id: &str,
+                     active: bool,
+                     score: u16,
+                     presence: SurfacePresence,
+                     destinations: Vec<DestinationIdDto>| {
+        let channel = snapshot
+            .channels
+            .iter_mut()
+            .find(|channel| channel.id == id)
+            .unwrap();
+        channel.enabled = true;
+        channel.active = active;
+        channel.priority.score = score;
+        channel.presence = presence;
+        channel.destinations = destinations;
+    };
+    configure(
+        &mut snapshot,
+        "bridge.brickell",
+        false,
+        10,
+        SurfacePresence::Off,
+        vec![],
+    );
+    configure(
+        &mut snapshot,
+        "weather.miami",
+        true,
+        470,
+        SurfacePresence::MessagesOnly,
+        vec![DestinationIdDto::Desktop],
+    );
+    configure(
+        &mut snapshot,
+        "news.local",
+        true,
+        620,
+        SurfacePresence::Off,
+        vec![DestinationIdDto::Whatsapp],
+    );
+
+    // Active relevance supplies membership. Score supplies order. The legacy
+    // presence and destination values above deliberately disagree with both.
+    let slot = |snapshot: &AppSnapshot, index: u64| {
+        rotation_channel(snapshot, &preferences, index).map(|channel| channel.id.to_owned())
+    };
+    assert_eq!(slot(&snapshot, 0).as_deref(), Some("news.local"));
+    assert_eq!(slot(&snapshot, 1).as_deref(), Some("weather.miami"));
+    assert_eq!(slot(&snapshot, 2).as_deref(), Some("bridge.brickell"));
+    assert_eq!(slot(&snapshot, 3).as_deref(), Some("news.local"));
+
+    // Once the authored/current items expire, their old standing reservations
+    // disappear and the home answer remains as the quiet fallback.
+    let mut quiet = snapshot.clone();
+    for channel in &mut quiet.channels {
+        channel.active = false;
+    }
+    for index in 0..4 {
+        assert_eq!(slot(&quiet, index).as_deref(), Some("bridge.brickell"));
+    }
+}
+
+#[tokio::test]
+async fn relevance_not_legacy_presence_or_destination_controls_panel_membership() {
+    let store = Store::in_memory().await.unwrap();
+    let engine = RuntimeEngine::new(store, RuntimeConfig::default())
+        .await
+        .unwrap();
+    let preferences = engine.get_preferences().await;
+    let mut snapshot = engine.get_snapshot().await.unwrap();
+    for channel in &mut snapshot.channels {
+        channel.enabled = false;
+        channel.active = false;
+    }
+    let weather = snapshot
         .channels
         .iter_mut()
-        .find(|channel| channel.presence == SurfacePresence::ActiveOnly)
+        .find(|channel| channel.id == "weather.miami")
         .unwrap();
-    active_only.active = true;
-    let expected = active_only.id.clone();
+    weather.enabled = true;
+    weather.presence = SurfacePresence::Off;
+    weather.destinations = vec![DestinationIdDto::Desktop];
+    assert!(rotation_channel(&snapshot, &preferences, 0).is_none());
+
+    let weather = snapshot
+        .channels
+        .iter_mut()
+        .find(|channel| channel.id == "weather.miami")
+        .unwrap();
+    weather.active = true;
     assert_eq!(
-        rotation_channel(&snapshot, &preferences, 0).map(|channel| &channel.id),
-        Some(&expected)
+        rotation_channel(&snapshot, &preferences, 0).map(|channel| channel.id.clone()),
+        Some("weather.miami".to_owned())
     );
 }
 
@@ -1792,6 +2169,8 @@ mod river_spans {
 }
 
 mod panel {
+    use brickellstatus_runtime::{ChannelNoticeDto, ChannelPriorityDto, ChannelSignalDto};
+
     use super::super::{PanelBroker, PanelSelection, prove_backoff, should_prove_now};
     use super::*;
 
@@ -1805,12 +2184,10 @@ mod panel {
         for channel in &mut snapshot.channels {
             channel.enabled = matches!(channel.id.as_str(), "bridge.brickell" | "weather.miami");
             channel.active = false;
-            channel.destinations = vec![DestinationIdDto::Epaper];
-            channel.presence = if channel.id == "bridge.brickell" {
-                SurfacePresence::Home
-            } else {
-                SurfacePresence::Rotation
-            };
+            // Legacy routing and presence settings deliberately deny panel
+            // access. Automatic relevance must be the only membership rule.
+            channel.destinations = vec![DestinationIdDto::Desktop];
+            channel.presence = SurfacePresence::Off;
         }
         (snapshot, preferences)
     }
@@ -1822,8 +2199,9 @@ mod panel {
             .find(|channel| channel.id == id)
             .expect("channel");
         channel.active = true;
-        channel.interrupt_preset = InterruptPreset::Meaningful;
+        channel.interrupt_preset = InterruptPreset::Off;
         channel.priority.score = score;
+        channel.priority.urgency = UrgencyDto::HeadsUp;
         channel.material_key = key.into();
     }
 
@@ -1838,17 +2216,96 @@ mod panel {
         channel.priority.imminence_minutes = Some(minutes);
     }
 
-    /// The reported failure, and the flagship one: a bridge predicted to open
-    /// in three to eight minutes appeared once, held its forty-five seconds, and
-    /// then handed the panel to the rotation for the rest of the window — so a
-    /// reader with a bridge about to go up in front of them was shown stock
-    /// prices.
-    ///
-    /// It scores 493, not the 900 re-assertion required, and it is not
-    /// `confirmed`, because nothing has been observed yet. That is what
-    /// *predicted* means, and predicting is the product.
+    fn notice(key: &str, headline: &str, band: Option<&str>, score: u16) -> ChannelNoticeDto {
+        ChannelNoticeDto {
+            key: key.into(),
+            signal: ChannelSignalDto {
+                headline: headline.into(),
+                detail: format!("{headline} detail"),
+                action: "Review the current condition.".into(),
+                severity: Some("Heads-up".into()),
+                expires_at: None,
+                band: band.map(str::to_owned),
+                imminence_minutes: None,
+                series: Vec::new(),
+                previous_close: None,
+            },
+            priority: ChannelPriorityDto {
+                score,
+                urgency: UrgencyDto::HeadsUp,
+                imminence_minutes: None,
+                confirmed: true,
+            },
+        }
+    }
+
     #[tokio::test]
-    async fn a_bridge_about_to_open_keeps_taking_the_panel_back() {
+    async fn every_current_notice_gets_its_own_priority_ordered_panel_slot() {
+        let (mut snapshot, preferences) = epaper_snapshot().await;
+        let weather = snapshot
+            .channels
+            .iter_mut()
+            .find(|channel| channel.id == "weather.miami")
+            .unwrap();
+        weather.active = true;
+        let signal = |headline: &str| ChannelSignalDto {
+            headline: headline.into(),
+            detail: "Current weather detail".into(),
+            action: "Plan for the condition.".into(),
+            severity: Some("Forecast".into()),
+            expires_at: None,
+            band: None,
+            imminence_minutes: None,
+            series: Vec::new(),
+            previous_close: None,
+        };
+        weather.notices = vec![
+            ChannelNoticeDto {
+                key: "rain-soon".into(),
+                signal: signal("Rain in 8 minutes"),
+                priority: ChannelPriorityDto {
+                    score: 500,
+                    urgency: UrgencyDto::HeadsUp,
+                    imminence_minutes: Some(8),
+                    confirmed: false,
+                },
+            },
+            ChannelNoticeDto {
+                key: "wind-later".into(),
+                signal: signal("Strong wind later"),
+                priority: ChannelPriorityDto {
+                    score: 300,
+                    urgency: UrgencyDto::HeadsUp,
+                    imminence_minutes: None,
+                    confirmed: false,
+                },
+            },
+        ];
+        weather.signal = Some(weather.notices[0].signal.clone());
+        weather.priority = weather.notices[0].priority;
+
+        let broker = PanelBroker::default();
+        assert_eq!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Rotation {
+                channel_id: "weather.miami".into(),
+                notice_key: Some("rain-soon".into()),
+            })
+        );
+        assert_eq!(
+            broker.next(&snapshot, &preferences, 1),
+            Some(PanelSelection::Rotation {
+                channel_id: "weather.miami".into(),
+                notice_key: Some("wind-later".into()),
+            })
+        );
+    }
+
+    /// An onset interrupts immediately, then remains in the ordinary
+    /// score-ordered live set. Remaining relevant is not a second event and
+    /// therefore never creates a hidden repeat count.
+    #[tokio::test]
+    async fn a_continuing_imminent_event_interrupts_only_once() {
         let (mut snapshot, preferences) = epaper_snapshot().await;
         // Paused only now: the fixture's store needs a real clock to open.
         tokio::time::pause();
@@ -1864,61 +2321,208 @@ mod panel {
             "the warning has to reach the panel at all"
         );
 
-        // The hold expires and nothing about the bridge has changed: it is
-        // still going to open, and still says so.
+        // The hold expires and nothing material changed. It stays first in
+        // rotation because of its score, but does not interrupt again.
         tokio::time::advance(PanelBroker::alert_hold() + Duration::from_secs(1)).await;
         broker.ingest(&snapshot, &preferences);
         assert!(
             matches!(
                 broker.next(&snapshot, &preferences, 0),
-                Some(PanelSelection::Alert { ref channel_id, .. }) if channel_id == "bridge.brickell"
+                Some(PanelSelection::Rotation { ref channel_id, .. }) if channel_id == "bridge.brickell"
             ),
-            "an opening still minutes away must reclaim the panel, not yield it"
+            "a continuing event must rotate without interrupting twice"
         );
     }
 
-    /// ...and the window ends. Once the opening is no longer near, the bridge
-    /// stops taking the panel back and the rotation resumes, so this cannot
-    /// become the old bug where one channel pinned the display forever.
     #[tokio::test]
-    async fn an_event_that_is_no_longer_near_releases_the_panel() {
+    async fn moving_bridge_evidence_does_not_repeat_until_the_state_escalates() {
         let (mut snapshot, preferences) = epaper_snapshot().await;
-        tokio::time::pause();
         let broker = PanelBroker::default();
-        raise_imminent(&mut snapshot, "bridge.brickell", 493, "likely:3-8", 5);
-        broker.ingest(&snapshot, &preferences);
-        let _ = broker.next(&snapshot, &preferences, 0);
+        raise(&mut snapshot, "bridge.brickell", 493, "ais-position:one");
 
-        // The estimate moves out past the warning horizon without otherwise
-        // changing, which is what a vessel slowing down looks like.
-        raise_imminent(&mut snapshot, "bridge.brickell", 493, "likely:3-8", 45);
-        tokio::time::advance(PanelBroker::alert_hold() + Duration::from_secs(1)).await;
         broker.ingest(&snapshot, &preferences);
-        assert!(
-            matches!(
-                broker.next(&snapshot, &preferences, 0),
-                Some(PanelSelection::Rotation { .. })
-            ),
-            "a distant estimate must not keep the panel"
-        );
-    }
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert { .. })
+        ));
 
-    /// A routine card has no imminence at all and must never reclaim the panel
-    /// on this path — it is what the reader was seeing instead of the bridge.
-    #[tokio::test]
-    async fn a_routine_card_never_reclaims_the_panel() {
-        let (mut snapshot, preferences) = epaper_snapshot().await;
-        tokio::time::pause();
-        let broker = PanelBroker::default();
-        raise(&mut snapshot, "weather.miami", 120, "markets:flat");
-        broker.ingest(&snapshot, &preferences);
-        let _ = broker.next(&snapshot, &preferences, 0);
-
-        tokio::time::advance(PanelBroker::alert_hold() + Duration::from_secs(1)).await;
+        // Fresh AIS/FL511 samples change the material hash, not the condition.
+        snapshot
+            .channels
+            .iter_mut()
+            .find(|channel| channel.id == "bridge.brickell")
+            .unwrap()
+            .material_key = "ais-position:two".into();
         broker.ingest(&snapshot, &preferences);
         assert!(matches!(
             broker.next(&snapshot, &preferences, 0),
             Some(PanelSelection::Rotation { .. })
+        ));
+
+        // Likely -> Open changes engine urgency and is a real escalation.
+        let bridge = snapshot
+            .channels
+            .iter_mut()
+            .find(|channel| channel.id == "bridge.brickell")
+            .unwrap();
+        bridge.priority.urgency = UrgencyDto::Emergency;
+        bridge.priority.score = 1_005;
+        broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert { score: 1_005, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_new_weather_bin_does_not_repeat_the_same_semantic_band() {
+        let (mut snapshot, preferences) = epaper_snapshot().await;
+        let broker = PanelBroker::default();
+        let weather = snapshot
+            .channels
+            .iter_mut()
+            .find(|channel| channel.id == "weather.miami")
+            .unwrap();
+        weather.active = true;
+        weather.notices = vec![notice(
+            "forecast-bin-one",
+            "Rain in 8 minutes",
+            Some("rain-amount:6-15:light"),
+            470,
+        )];
+        weather.signal = Some(weather.notices[0].signal.clone());
+        weather.priority = weather.notices[0].priority;
+
+        broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert { .. })
+        ));
+
+        let weather = snapshot
+            .channels
+            .iter_mut()
+            .find(|channel| channel.id == "weather.miami")
+            .unwrap();
+        weather.notices[0].key = "forecast-bin-two".into();
+        weather.notices[0].signal.headline = "Rain in 7 minutes".into();
+        weather.signal = Some(weather.notices[0].signal.clone());
+        broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Rotation { .. })
+        ));
+
+        let weather = snapshot
+            .channels
+            .iter_mut()
+            .find(|channel| channel.id == "weather.miami")
+            .unwrap();
+        weather.notices[0].signal.band = Some("rain-amount:0-5:light".into());
+        weather.signal = Some(weather.notices[0].signal.clone());
+        broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn authored_items_interrupt_independently_and_can_escalate() {
+        let (mut snapshot, preferences) = epaper_snapshot().await;
+        let broker = PanelBroker::default();
+        let earthquakes = snapshot
+            .channels
+            .iter_mut()
+            .find(|channel| channel.id == "earthquake.significant")
+            .unwrap();
+        earthquakes.enabled = true;
+        earthquakes.active = true;
+        earthquakes.notices = vec![
+            notice("quake:m6", "Magnitude 6.1 earthquake", None, 520),
+            notice("quake:m5", "Magnitude 5.0 earthquake", None, 480),
+        ];
+        earthquakes.signal = Some(earthquakes.notices[0].signal.clone());
+        earthquakes.priority = earthquakes.notices[0].priority;
+
+        broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert { ref notice_key, .. }) if notice_key.as_deref() == Some("quake:m6")
+        ));
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert { ref notice_key, .. }) if notice_key.as_deref() == Some("quake:m5")
+        ));
+
+        let earthquakes = snapshot
+            .channels
+            .iter_mut()
+            .find(|channel| channel.id == "earthquake.significant")
+            .unwrap();
+        earthquakes.notices[0].signal.severity = Some("Magnitude 7.0".into());
+        earthquakes.notices[0].priority.urgency = UrgencyDto::Emergency;
+        earthquakes.notices[0].priority.score = 1_000;
+        earthquakes.signal = Some(earthquakes.notices[0].signal.clone());
+        earthquakes.priority = earthquakes.notices[0].priority;
+        broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert {
+                ref notice_key,
+                score: 1_000,
+                ..
+            }) if notice_key.as_deref() == Some("quake:m6")
+        ));
+    }
+
+    /// Clearing ends the incident and forgets its deduplication state, so a
+    /// later recurrence is a genuinely new onset and may interrupt once.
+    #[tokio::test]
+    async fn an_event_that_clears_can_interrupt_again_when_it_recurs() {
+        let (mut snapshot, preferences) = epaper_snapshot().await;
+        let broker = PanelBroker::default();
+        raise(&mut snapshot, "bridge.brickell", 493, "likely:3-8");
+        broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert { .. })
+        ));
+
+        snapshot
+            .channels
+            .iter_mut()
+            .find(|channel| channel.id == "bridge.brickell")
+            .unwrap()
+            .active = false;
+        broker.ingest(&snapshot, &preferences);
+
+        raise(&mut snapshot, "bridge.brickell", 493, "likely:3-8");
+        broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert { .. })
+        ));
+    }
+
+    /// Routine is relevant enough to rotate, but not important enough to wake
+    /// or preempt the display.
+    #[tokio::test]
+    async fn a_routine_signal_rotates_without_interrupting() {
+        let (mut snapshot, preferences) = epaper_snapshot().await;
+        let broker = PanelBroker::default();
+        raise(&mut snapshot, "weather.miami", 120, "markets:flat");
+        snapshot
+            .channels
+            .iter_mut()
+            .find(|channel| channel.id == "weather.miami")
+            .unwrap()
+            .priority
+            .urgency = UrgencyDto::Routine;
+        broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Rotation { channel_id, .. }) if channel_id == "weather.miami"
         ));
     }
 
@@ -1934,19 +2538,20 @@ mod panel {
 
         raise(&mut snapshot, "weather.miami", 470, "rain:6-15");
         broker.ingest(&snapshot, &preferences);
-        assert_eq!(
+        assert!(matches!(
             broker.next(&snapshot, &preferences, 0),
             Some(PanelSelection::Alert {
-                channel_id: "weather.miami".into(),
-                score: 470
-            })
-        );
+                channel_id,
+                score: 470,
+                ..
+            }) if channel_id == "weather.miami"
+        ));
     }
 
-    /// The invariant that protects the anchor. An alert must not eat a rotation
-    /// slot, or a burst of them silently skips the bridge's home cadence.
+    /// An interrupt is outside the carousel and cannot advance its index. When
+    /// rotation resumes, slot zero is still the highest-scored relevant item.
     #[tokio::test]
-    async fn an_alert_does_not_consume_a_rotation_slot() {
+    async fn an_alert_does_not_advance_the_priority_ordered_rotation() {
         let (mut snapshot, preferences) = epaper_snapshot().await;
         let broker = PanelBroker::default();
         raise(&mut snapshot, "weather.miami", 470, "rain:6-15");
@@ -1957,10 +2562,11 @@ mod panel {
             broker.next(&snapshot, &preferences, 0),
             Some(PanelSelection::Alert { .. })
         ));
-        // ...so slot 0 is still the anchor's when rotation resumes.
+        // ...so slot 0 still belongs to the active weather event when rotation
+        // resumes; the lower-scored home fallback follows it.
         assert!(matches!(
             broker.next(&snapshot, &preferences, 0),
-            Some(PanelSelection::Rotation { channel_id }) if channel_id == "bridge.brickell"
+            Some(PanelSelection::Rotation { channel_id, .. }) if channel_id == "weather.miami"
         ));
     }
 
@@ -2016,13 +2622,14 @@ mod panel {
         raise(&mut snapshot, "weather.miami", 470, "rain:6-15");
         raise(&mut snapshot, "bridge.brickell", 1005, "bridge:open");
         broker.ingest(&snapshot, &preferences);
-        assert_eq!(
+        assert!(matches!(
             broker.next(&snapshot, &preferences, 0),
             Some(PanelSelection::Alert {
-                channel_id: "bridge.brickell".into(),
-                score: 1005
-            })
-        );
+                channel_id,
+                score: 1005,
+                ..
+            }) if channel_id == "bridge.brickell"
+        ));
     }
 
     #[tokio::test]

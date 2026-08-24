@@ -367,6 +367,88 @@ fn ledger_propensity_and_sailing_prior_reach_the_ais_observation() {
     );
 }
 
+#[test]
+fn a_known_opener_prearms_only_while_approaching_in_the_corridor() {
+    let mut item = ais_bridge_item();
+    item.attributes
+        .insert("route_intersects".into(), json!(false));
+    item.attributes.insert("posture".into(), json!("underway"));
+    let known = BTreeMap::from([("367719770".to_string(), 7_000_u16)]);
+    let route_intersects = |item: &CollectorItem, propensities: &BTreeMap<String, u16>| {
+        let Some(BridgeObservation::AisTrack {
+            route_intersects, ..
+        }) = bridge_fact(item, propensities)
+        else {
+            panic!("expected an AIS track");
+        };
+        route_intersects
+    };
+
+    assert!(route_intersects(&item, &known));
+    assert!(
+        !route_intersects(
+            &item,
+            &BTreeMap::from([("367719770".to_string(), 6_667_u16)])
+        ),
+        "one Beta-smoothed open crossing may be a hitchhiker and must keep the raw route result"
+    );
+    item.attributes
+        .insert("posture".into(), json!("off_channel"));
+    assert!(
+        !route_intersects(&item, &known),
+        "opening history cannot pull an off-channel hull onto the route"
+    );
+}
+
+#[test]
+fn a_known_opener_prearm_gets_an_eta_only_from_live_corridor_motion() {
+    let mut item = ais_bridge_item();
+    item.attributes
+        .insert("route_intersects".into(), json!(false));
+    item.attributes.insert("posture".into(), json!("underway"));
+    item.attributes
+        .insert("distance_meters".into(), json!(3_200));
+    item.attributes.insert("sog_knots".into(), json!(6.0));
+    item.attributes.remove("eta_min_minutes");
+    item.attributes.remove("eta_max_minutes");
+    let known = BTreeMap::from([("367719770".to_string(), 7_000_u16)]);
+
+    let eta = |item: &CollectorItem, propensities: &BTreeMap<String, u16>| {
+        let Some(BridgeObservation::AisTrack {
+            route_intersects,
+            eta,
+            ..
+        }) = bridge_fact(item, propensities)
+        else {
+            panic!("expected an AIS track");
+        };
+        (route_intersects, eta)
+    };
+
+    assert_eq!(
+        eta(&item, &known),
+        (true, Some(EtaRangeMinutes::new(12, 24)))
+    );
+    assert_eq!(
+        eta(
+            &item,
+            &BTreeMap::from([("367719770".to_string(), 6_667_u16)])
+        ),
+        (false, None)
+    );
+
+    item.attributes
+        .insert("posture".into(), json!("off_channel"));
+    assert_eq!(eta(&item, &known), (false, None));
+
+    item.attributes.insert("posture".into(), json!("moored"));
+    assert_eq!(eta(&item, &known), (false, None));
+
+    item.attributes.insert("posture".into(), json!("underway"));
+    item.attributes.insert("movement".into(), json!("unknown"));
+    assert_eq!(eta(&item, &known), (false, None));
+}
+
 fn transition(
     bridge_key: &str,
     relation: &str,
@@ -838,6 +920,94 @@ async fn snapshot_publishes_the_tracked_corridor_whenever_ais_is_running() {
 }
 
 #[tokio::test]
+async fn known_opener_history_and_current_opening_likelihood_are_independent() {
+    let now_ms = 1_786_741_200_000;
+    let clock = Arc::new(FixedClock(AtomicI64::new(now_ms)));
+    let engine = engine_with(Arc::new(DownFl511Collector), clock).await;
+
+    sqlx::query(
+        r#"
+        INSERT INTO ais_vessel_ledger(
+            mmsi, name, vessel_class, transits_opened, first_seen_ms, last_seen_ms
+        ) VALUES
+            ('367000101', 'PAST OPENER', 'yacht', 1, ?1, ?1),
+            ('367000102', 'RETURNING OPENER', 'yacht', 1, ?1, ?1)
+        "#,
+    )
+    .bind(now_ms - 86_400_000)
+    .execute(engine.store.pool())
+    .await
+    .unwrap();
+
+    let observed_at = iso_timestamp(now_ms).unwrap();
+    let track = |mmsi: &str, movement: &str, vessel_class: &str, eta: Option<u16>| {
+        serde_json::from_value::<VesselTrackSnapshot>(json!({
+            "mmsi": mmsi,
+            "movement": movement,
+            "routeIntersects": true,
+            "speedKnots": 5.0,
+            "courseDegrees": 270.0,
+            "observedAt": observed_at,
+            "vesselClass": vessel_class,
+            "posture": "underway",
+            "etaMinMinutes": eta,
+            "etaMaxMinutes": eta.map(|minutes| minutes + 2),
+            "points": [{
+                "latitude": 25.76975,
+                "longitude": -80.185,
+                "observedAt": observed_at
+            }]
+        }))
+        .unwrap()
+    };
+    let tracks = vec![
+        track("367000101", "diverging", "yacht", None),
+        track("367000102", "approaching", "yacht", Some(8)),
+        track("367000103", "approaching", "sailing", Some(8)),
+        track("367000104", "approaching", "yacht", Some(8)),
+    ];
+
+    let mut source = SourceState::empty("bridge.brickell");
+    source.cursor.metadata.insert(
+        AIS_VESSEL_TRACKS_CURSOR_KEY.into(),
+        serde_json::to_string(&tracks).unwrap(),
+    );
+    let propensities = engine.load_ais_propensities().await.unwrap();
+    let mut state = engine.state.lock().await;
+    state
+        .active_sources
+        .insert("aisstream.bridge.brickell".into(), "bridge.brickell".into());
+    state
+        .sources
+        .insert("aisstream.bridge.brickell".into(), source);
+    state.ais_propensities = propensities;
+    drop(state);
+
+    let flags = engine
+        .get_snapshot()
+        .await
+        .unwrap()
+        .vessel_tracks
+        .into_iter()
+        .map(|track| {
+            (
+                track.mmsi,
+                (track.known_opener, track.likely_to_open_brickell),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        flags,
+        BTreeMap::from([
+            ("367000101".into(), (true, false)),
+            ("367000102".into(), (true, true)),
+            ("367000103".into(), (false, true)),
+            ("367000104".into(), (false, false)),
+        ])
+    );
+}
+
+#[tokio::test]
 async fn corridor_is_published_even_when_the_ais_channel_is_switched_off() {
     // The failure this guards: with AIS disabled an earlier build sent no
     // corridor at all, so the live surface rendered an empty space that looked
@@ -1128,6 +1298,7 @@ async fn ais_secret_can_be_set_replaced_and_cleared_without_restart() {
         .await
         .unwrap();
     assert!(engine.get_preferences().await.ais.api_key_configured);
+    assert!(engine.get_preferences().await.ais.enabled);
     let armed = engine.get_aisstream_status().await.unwrap();
     assert_eq!(armed.connection_state, AisConnectionStateDto::Armed);
     assert!(armed.source_registered);
@@ -1146,6 +1317,7 @@ async fn ais_secret_can_be_set_replaced_and_cleared_without_restart() {
         .await
         .unwrap();
     assert!(engine.get_preferences().await.ais.api_key_configured);
+    assert!(engine.get_preferences().await.ais.enabled);
     assert!(
         !engine
             .state
@@ -1157,6 +1329,7 @@ async fn ais_secret_can_be_set_replaced_and_cleared_without_restart() {
 
     engine.set_aisstream_key(None).await.unwrap();
     assert!(!engine.get_preferences().await.ais.api_key_configured);
+    assert!(!engine.get_preferences().await.ais.enabled);
     let needs_key = engine.get_aisstream_status().await.unwrap();
     assert_eq!(needs_key.connection_state, AisConnectionStateDto::NeedsKey);
     assert!(!needs_key.source_registered);
@@ -1405,6 +1578,226 @@ async fn collector_minimum_interval_limits_background_polling_but_not_manual_ref
 
     assert_eq!(engine.refresh_all().await.unwrap().attempted, 1);
     assert_eq!(collector.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn forecast_history_keeps_one_latest_material_sample_per_minute() {
+    let now_ms = "2026-08-14T19:10:00Z"
+        .parse::<Timestamp>()
+        .unwrap()
+        .as_millisecond();
+    let clock = Arc::new(FixedClock(AtomicI64::new(now_ms)));
+    let engine = engine_with(Arc::new(DownFl511Collector), clock).await;
+    let mut state = PersistedRuntimeState::default();
+    let clear = engine
+        .predictor
+        .evaluate(TimestampMillis(now_ms), &[], None)
+        .unwrap();
+    engine
+        .record_forecast_sample(&clear, &mut state)
+        .await
+        .unwrap();
+
+    let observed_at = TimestampMillis(now_ms + 15_000);
+    let ais = BridgeEvidence {
+        observation_id: ObservationId::from("ais-strong"),
+        source_id: SourceId::from("aisstream.bridge.brickell"),
+        observed_at,
+        expires_at: None,
+        availability: AvailabilityStatus::Live,
+        reliability: Confidence::CERTAIN,
+        fact: BridgeObservation::AisTrack {
+            mmsi: Some("367000001".into()),
+            vessel_name: Some("Test Vessel".into()),
+            movement: VesselMovement::Approaching,
+            route_intersects: true,
+            eta: Some(EtaRangeMinutes::new(8, 12)),
+            opening_propensity: Some(Confidence::CERTAIN),
+        },
+    };
+    let likely = engine
+        .predictor
+        .evaluate(observed_at, std::slice::from_ref(&ais), Some(&clear))
+        .unwrap();
+    engine
+        .record_forecast_sample(&likely, &mut state)
+        .await
+        .unwrap();
+    let next_minute = engine
+        .predictor
+        .evaluate(TimestampMillis(now_ms + 60_000), &[ais], Some(&likely))
+        .unwrap();
+    engine
+        .record_forecast_sample(&next_minute, &mut state)
+        .await
+        .unwrap();
+
+    let samples = engine
+        .store
+        .forecast_samples_since(FORECAST_TARGET_KEY, now_ms, 10)
+        .await
+        .unwrap();
+    assert_eq!(samples.len(), 2);
+    assert_eq!(samples[0].evaluated_at_ms, now_ms + 15_000);
+    assert_eq!(samples[0].state, "likely");
+    assert!(samples[0].predictive_score_bps < 10_000);
+    assert!(!samples[0].contribution_bps_json.contains("controller"));
+    assert_eq!(samples[1].minute_bucket_ms, now_ms + 60_000);
+}
+
+#[tokio::test]
+async fn cached_bridge_items_do_not_advance_confirmation_time() {
+    let now_ms = 1_786_741_200_000;
+    let clock = Arc::new(FixedClock(AtomicI64::new(now_ms)));
+    let engine = engine_with(Arc::new(DownFl511Collector), clock).await;
+    let source_id = "fl511.bridge.brickell";
+    let mut source = healthy_source_state(
+        "bridge.brickell",
+        bridge_item("253", "Brickell Avenue Bridge", "target", "up"),
+        now_ms - 60_000,
+    );
+    let mut state = PersistedRuntimeState {
+        active_sources: BTreeMap::from([(source_id.into(), "bridge.brickell".into())]),
+        ..PersistedRuntimeState::default()
+    };
+    state.sources.insert(source_id.into(), source.clone());
+
+    engine.persist_refresh(&state, now_ms).await.unwrap();
+    assert!(
+        engine
+            .store
+            .list_bridge_state_intervals(source_id, "brickell")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    source.last_success_ms = Some(now_ms);
+    state.sources.insert(source_id.into(), source);
+    engine.persist_refresh(&state, now_ms).await.unwrap();
+    let intervals = engine
+        .store
+        .list_bridge_state_intervals(source_id, "brickell")
+        .await
+        .unwrap();
+    assert_eq!(intervals.len(), 1);
+    assert_eq!(intervals[0].last_confirmed_at_ms, now_ms);
+}
+
+#[tokio::test]
+async fn every_live_track_refreshes_the_full_vessel_catalog() {
+    let now_ms = 1_786_741_200_000;
+    let clock = Arc::new(FixedClock(AtomicI64::new(now_ms)));
+    let engine = engine_with(Arc::new(DownFl511Collector), clock).await;
+    let source_id = "aisstream.bridge.brickell";
+    let mut source = SourceState::empty("bridge.brickell");
+    source.cursor.metadata.insert(
+        AIS_VESSEL_CATALOG_CURSOR_KEY.into(),
+        json!([{
+            "mmsi": "367000001",
+            "observedAt": "2026-08-14T21:00:00Z",
+            "positionObservedAt": "2026-08-14T21:00:00Z",
+            "vesselName": "MIAMI STAR",
+            "vesselClass": "yacht",
+            "callSign": "WDF1234",
+            "imoNumber": 9876543,
+            "destination": "MIAMI RIVER",
+            "lengthMeters": 31.4,
+            "beamMeters": 7.1,
+            "draughtMeters": 2.4,
+            "latitude": 25.7698,
+            "longitude": -80.1902,
+            "speedKnots": 7.2,
+            "courseDegrees": 265.0,
+            "posture": "underway",
+            "branch": "river",
+            "sMeters": 51.0,
+            "offsetMeters": -2.0
+        }, {
+            "mmsi": "368000002",
+            "observedAt": "2026-08-14T21:00:00Z",
+            "positionObservedAt": "2026-08-14T21:00:00Z",
+            "vesselName": "BAY RUNNER",
+            "vesselClass": "passenger",
+            "latitude": 25.7702,
+            "longitude": -80.1801,
+            "speedKnots": 9.1,
+            "courseDegrees": 270.0,
+            "posture": "underway",
+            "branch": "north_approach",
+            "sMeters": -820.0,
+            "offsetMeters": 8.0
+        }])
+        .to_string(),
+    );
+    source.cursor.metadata.insert(
+        AIS_VESSEL_TRACKS_CURSOR_KEY.into(),
+        json!([{
+            "mmsi": "367000001",
+            "vesselName": "MIAMI STAR",
+            "movement": "approaching",
+            "routeIntersects": true,
+            "speedKnots": 7.2,
+            "courseDegrees": 265.0,
+            "observedAt": "2026-08-14T21:00:00Z",
+            "vesselClass": "yacht",
+            "callSign": "WDF1234",
+            "imoNumber": 9876543,
+            "destination": "MIAMI RIVER",
+            "lengthMeters": 31.4,
+            "beamMeters": 7.1,
+            "draughtMeters": 2.4,
+            "points": [{
+                "latitude": 25.7698,
+                "longitude": -80.1902,
+                "observedAt": "2026-08-14T20:59:30Z",
+                "speedKnots": 3.8,
+                "courseDegrees": 271.0,
+                "branch": "river",
+                "sMeters": 42.0,
+                "offsetMeters": -3.0
+            }]
+        }])
+        .to_string(),
+    );
+    let state = PersistedRuntimeState {
+        sources: BTreeMap::from([(source_id.into(), source)]),
+        active_sources: BTreeMap::from([(source_id.into(), "bridge.brickell".into())]),
+        ..PersistedRuntimeState::default()
+    };
+
+    engine.record_ais_track_fixes(&state).await.unwrap();
+    let vessels = engine.store.list_ais_ledger(10).await.unwrap();
+    let vessel = vessels
+        .iter()
+        .find(|vessel| vessel.mmsi == "367000001")
+        .expect("live hull entered catalog");
+    assert_eq!(vessel.name.as_deref(), Some("MIAMI STAR"));
+    assert_eq!(vessel.call_sign.as_deref(), Some("WDF1234"));
+    assert_eq!(vessel.imo_number, Some(9_876_543));
+    assert_eq!(vessel.destination.as_deref(), Some("MIAMI RIVER"));
+    assert_eq!(vessel.beam_meters, Some(7.1));
+    assert!(
+        vessels.iter().any(|vessel| vessel.mmsi == "368000002"),
+        "the compact catalog must retain hulls outside the rich-history cap"
+    );
+    let fixes = engine.store.track_fixes_since(0).await.unwrap();
+    let fix = fixes
+        .iter()
+        .find(|fix| fix.mmsi == "367000001")
+        .expect("point entered track history");
+    assert_eq!(fix.speed_knots, Some(3.8));
+    assert_eq!(fix.course_degrees, Some(271.0));
+    assert_eq!(fix.branch.as_deref(), Some("river"));
+    assert_eq!(fix.s_meters, Some(42.0));
+    assert_eq!(fix.offset_meters, Some(-3.0));
+    let breadth_fix = fixes
+        .iter()
+        .find(|fix| fix.mmsi == "368000002")
+        .expect("catalog latest fix entered broad movement history");
+    assert_eq!(breadth_fix.speed_knots, Some(9.1));
+    assert_eq!(breadth_fix.branch.as_deref(), Some("north_approach"));
+    assert_eq!(breadth_fix.s_meters, Some(-820.0));
 }
 
 struct PanicCollector;
@@ -2228,6 +2621,221 @@ fn news_signal_exposes_publisher_content_and_replacement_identity() {
 }
 
 #[test]
+fn authored_notices_publish_their_automatic_expiration_without_a_provider_end() {
+    let now_ms = 1_786_741_200_000;
+    let preferences = AppPreferences::default();
+    let observed_ms = now_ms - 15 * 60_000;
+
+    let news_channel = preferences
+        .profile
+        .channels
+        .iter()
+        .find(|channel| channel.kind == ChannelKindDto::News)
+        .unwrap();
+    let news = news_item("news:expiry", "Miami transportation update", observed_ms);
+    let news_signal = channel_signal(
+        ChannelKindDto::News,
+        news_channel,
+        &[&news],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(
+        news_signal.expires_at.as_deref(),
+        Some(
+            iso_timestamp(observed_ms + i64::from(news_channel.max_age_minutes) * 60_000)
+                .unwrap()
+                .as_str()
+        )
+    );
+
+    let sports_channel = preferences
+        .profile
+        .channels
+        .iter()
+        .find(|channel| channel.kind == ChannelKindDto::Sports)
+        .unwrap();
+    let sports = news_item("sports:expiry", "Miami team roster update", observed_ms);
+    let sports_signal = channel_signal(
+        ChannelKindDto::Sports,
+        sports_channel,
+        &[&sports],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(
+        sports_signal.expires_at.as_deref(),
+        Some(
+            iso_timestamp(observed_ms + i64::from(sports_channel.max_age_minutes) * 60_000)
+                .unwrap()
+                .as_str()
+        )
+    );
+
+    let earthquake_channel = preferences
+        .profile
+        .channels
+        .iter()
+        .find(|channel| channel.kind == ChannelKindDto::Earthquake)
+        .unwrap();
+    let earthquake = earthquake_item("usgs:expiry", observed_ms);
+    let earthquake_signal = channel_signal(
+        ChannelKindDto::Earthquake,
+        earthquake_channel,
+        &[&earthquake],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(
+        earthquake_signal.expires_at.as_deref(),
+        Some(
+            iso_timestamp(observed_ms + 1_440 * 60_000)
+                .unwrap()
+                .as_str()
+        )
+    );
+
+    for (kind, mut item) in [
+        (ChannelKindDto::Hurricane, tropical_item("al01")),
+        (ChannelKindDto::Markets, market_quote_item(6.5, None)),
+    ] {
+        item.observed_at = chrono::DateTime::from_timestamp_millis(observed_ms);
+        let channel = preferences
+            .profile
+            .channels
+            .iter()
+            .find(|channel| channel.kind == kind)
+            .unwrap();
+        let signal =
+            channel_signal(kind, channel, &[&item], true, now_ms, UnitSystem::Imperial).unwrap();
+        assert_eq!(
+            signal.expires_at.as_deref(),
+            Some(
+                iso_timestamp(observed_ms + i64::from(channel.max_age_minutes) * 60_000)
+                    .unwrap()
+                    .as_str()
+            )
+        );
+    }
+
+    let mut provider_bounded = news;
+    provider_bounded.ends_at = chrono::DateTime::from_timestamp_millis(now_ms + 10 * 60_000);
+    let provider_bounded = channel_signal(
+        ChannelKindDto::News,
+        news_channel,
+        &[&provider_bounded],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(
+        provider_bounded.expires_at.as_deref(),
+        Some(iso_timestamp(now_ms + 10 * 60_000).unwrap().as_str()),
+        "a provider end remains authoritative"
+    );
+}
+
+#[test]
+fn every_current_item_becomes_a_notice_regardless_of_the_legacy_slide_cap() {
+    let now_ms = 1_786_741_200_000;
+    let mut preferences = AppPreferences::default();
+    let news = preferences
+        .profile
+        .channels
+        .iter_mut()
+        .find(|channel| channel.id == "news.local")
+        .unwrap();
+    // Stored profiles may still carry this retired control. It must no longer
+    // decide how many current items survive into the slide set.
+    news.max_items = 1;
+
+    let routine = news_item("news:routine", "Miami transportation update", now_ms);
+    let breaking = news_item(
+        "news:breaking",
+        "Breaking Miami transportation closure",
+        now_ms,
+    );
+    let mut state = PersistedRuntimeState {
+        active_sources: BTreeMap::from([("rss.local".into(), "news.local".into())]),
+        ..PersistedRuntimeState::default()
+    };
+    state.sources.insert(
+        "rss.local".into(),
+        healthy_source_state("news.local", routine, now_ms),
+    );
+    state
+        .sources
+        .get_mut("rss.local")
+        .unwrap()
+        .items
+        .push(breaking);
+
+    let snapshots = channel_snapshots(&preferences, &state, &clear_decision(), now_ms);
+    let news = snapshots
+        .iter()
+        .find(|channel| channel.id == "news.local")
+        .unwrap();
+
+    assert_eq!(news.notices.len(), 2);
+    assert_eq!(
+        news.notices[0].signal.headline,
+        "Breaking Miami transportation closure"
+    );
+    assert_eq!(news.notices[0].priority.urgency, UrgencyDto::HeadsUp);
+    assert_eq!(news.notices[1].priority.urgency, UrgencyDto::Routine);
+    assert_eq!(news.signal.as_ref(), Some(&news.notices[0].signal));
+    assert_ne!(news.notices[0].key, news.notices[1].key);
+}
+
+#[test]
+fn syndicated_signal_uses_new_context_instead_of_repeating_the_headline() {
+    let now_ms = 1_786_741_200_000;
+    let channel = &AppPreferences::default().profile.channels[4];
+    let title = "The Data Center Backlash Bursts Into the Midterms";
+    let mut clustered = news_item("news:cluster", title, now_ms - 18 * 60_000);
+    clustered.source.name = "The New York Times".into();
+    clustered.source.url =
+        Some(Url::parse("https://news.google.com/rss/articles/cluster-id").unwrap());
+    clustered.summary = Some(format!(
+        "{title} The New York Times See the moment politicians turned against data centers"
+    ));
+
+    let signal = channel_signal(
+        ChannelKindDto::News,
+        channel,
+        &[&clustered],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(signal.detail, "Published 18 min ago");
+
+    let mut no_synopsis = news_item("news:no-summary", title, now_ms - 18 * 60_000);
+    no_synopsis.summary = Some(title.into());
+    no_synopsis
+        .attributes
+        .insert("authors".into(), json!(["Signals Desk"]));
+    let signal = channel_signal(
+        ChannelKindDto::News,
+        channel,
+        &[&no_synopsis],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(signal.detail, "By Signals Desk · 18 min ago");
+}
+
+#[test]
 fn signal_text_removes_controls_and_is_character_bounded() {
     let hostile = format!("\u{202e}\n{}\u{0007}", "x".repeat(300));
     let bounded = bounded_signal_text(&hostile, 160);
@@ -2685,6 +3293,34 @@ fn weather_minutely_item(now_ms: i64, millimetres: f64, starts_in_minutes: i64) 
     }
 }
 
+fn weather_current_item(now_ms: i64, millimetres: f64, observed_minutes_ago: i64) -> CollectorItem {
+    CollectorItem {
+        id: format!("open-meteo:current:{observed_minutes_ago}"),
+        kind: ItemKind::WeatherCurrent,
+        title: "Current weather".into(),
+        summary: Some(format!("{millimetres} mm in the current period")),
+        observed_at: Some(
+            chrono::DateTime::from_timestamp_millis(now_ms - observed_minutes_ago * 60_000)
+                .unwrap(),
+        ),
+        starts_at: None,
+        ends_at: None,
+        location: Some(Location::point(25.7617, -80.1918)),
+        source: SourceLink {
+            name: "Open-Meteo".into(),
+            url: Some(Url::parse("https://open-meteo.com/").unwrap()),
+        },
+        attributes: BTreeMap::from([
+            ("precipitation".into(), json!(millimetres)),
+            ("rain".into(), json!(millimetres)),
+            (
+                "units".into(),
+                json!({"precipitation": "mm", "rain": "mm", "showers": "mm"}),
+            ),
+        ]),
+    }
+}
+
 /// An hourly bucket answers "some time in the next hour". A 15-minute bin
 /// answers "in eight minutes". Only the second is worth interrupting someone
 /// for, so when both are available the bin has to be the one that speaks.
@@ -2702,9 +3338,9 @@ fn a_measured_quarter_hour_speaks_over_an_hourly_probability() {
         now_ms,
     );
     assert!(active);
-    assert!(summary.contains("mm expected"), "{summary}");
+    assert!(summary.contains("mm forecast"), "{summary}");
     assert!(!summary.contains("chance"), "{summary}");
-    assert!(summary.contains("within 8 min"), "{summary}");
+    assert!(summary.contains("beginning in 8 min"), "{summary}");
 }
 
 /// The amount rule reads only its own bin, so there is no path by which a
@@ -2744,10 +3380,10 @@ fn the_amount_rule_fails_closed_outside_its_window_and_units() {
     assert!(summary.contains("chance"), "{summary}");
 }
 
-/// The band and the ETA come from the same fact, so a bin in progress reads as
-/// rain now rather than as a forecast, and its rule is named.
+/// A forecast bin already in progress remains a forecast. It may rank at zero
+/// lead, but neither its headline nor severity may claim an observation.
 #[test]
-fn rain_falling_now_reports_zero_lead_and_an_amount_band() {
+fn a_current_quarter_hour_forecast_does_not_claim_rain_is_observed() {
     let now_ms = 1_786_741_200_000;
     let channel = AppPreferences::default().profile.channels[1].clone();
     let falling = weather_minutely_item(now_ms, 1.4, 0);
@@ -2755,7 +3391,16 @@ fn rain_falling_now_reports_zero_lead_and_an_amount_band() {
 
     assert_eq!(signal.imminence_minutes, Some(0));
     assert_eq!(signal.band.as_deref(), Some("rain-amount:0-5:moderate"));
-    assert!(signal.detail.contains("Rain now"), "{}", signal.detail);
+    assert_eq!(signal.headline, "Rain expected soon");
+    assert_eq!(signal.severity, "Imminent");
+    assert!(
+        signal
+            .detail
+            .contains("forecast in the current 15-minute period"),
+        "{}",
+        signal.detail
+    );
+    assert!(!signal.detail.contains("observed"), "{}", signal.detail);
 
     // Heavier rain in the same bin is a different band, so it re-alerts.
     let heavier = weather_minutely_item(now_ms, 4.0, 0);
@@ -2765,16 +3410,265 @@ fn rain_falling_now_reports_zero_lead_and_an_amount_band() {
     );
 }
 
-/// An hourly probability must never be dressed up as an ETA. It is the term
-/// that outranks every other channel, and a bucket does not know the answer.
+/// A strong hourly chance whose bucket is about to begin earns the imminence
+/// ordering bonus, while its copy honestly continues to describe an hour.
 #[test]
-fn an_hourly_probability_never_reports_an_imminence() {
+fn high_confidence_near_hourly_rain_is_imminent_without_claiming_an_onset() {
     let now_ms = 1_786_741_200_000;
     let channel = AppPreferences::default().profile.channels[1].clone();
-    let hourly = weather_hourly_item(now_ms, 95.0, 10.0);
+    let mut near = weather_hourly_item(now_ms, 80.0, 10.0);
+    near.starts_at = Some(chrono::DateTime::from_timestamp_millis(now_ms + 15 * 60_000).unwrap());
+    let near_signal = channel_signal(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&near],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+
+    assert_eq!(near_signal.imminence_minutes, Some(15));
+    assert_eq!(near_signal.headline, "Rain likely soon");
+    assert_eq!(near_signal.severity.as_deref(), Some("Imminent"));
     assert_eq!(
-        weather_signal(&hourly, &channel, now_ms, UnitSystem::Imperial).imminence_minutes,
+        near_signal.detail,
+        "80% chance of rain in the hour beginning in 15 min."
+    );
+    assert_eq!(
+        near_signal.expires_at.as_deref(),
+        Some(iso_timestamp(now_ms + 75 * 60_000).unwrap().as_str())
+    );
+
+    // The actionable hourly bucket must not be hidden by a narrower forecast
+    // that does not begin until after the 15-minute decision window.
+    let farther_amount = weather_minutely_item(now_ms, 0.6, 20);
+    let selected = channel_signal(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&farther_amount, &near],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(selected.headline, "Rain likely soon");
+    assert_eq!(selected.imminence_minutes, Some(15));
+
+    let mut lower_confidence = near.clone();
+    lower_confidence
+        .attributes
+        .insert("precipitation_probability".into(), json!(79.0));
+    let lower_confidence =
+        weather_signal(&lower_confidence, &channel, now_ms, UnitSystem::Imperial);
+    assert_eq!(lower_confidence.imminence_minutes, None);
+
+    let mut later = near.clone();
+    later.starts_at = Some(chrono::DateTime::from_timestamp_millis(now_ms + 16 * 60_000).unwrap());
+    let later_signal = channel_signal(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&later],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(later_signal.imminence_minutes, None);
+
+    let mut just_over_boundary = near.clone();
+    just_over_boundary.starts_at =
+        Some(chrono::DateTime::from_timestamp_millis(now_ms + 15 * 60_000 + 1).unwrap());
+    assert_eq!(
+        weather_signal(&just_over_boundary, &channel, now_ms, UnitSystem::Imperial,)
+            .imminence_minutes,
         None
+    );
+    assert!(
+        channel_priority(
+            ChannelKindDto::Weather,
+            Some(&near_signal),
+            &clear_decision(),
+            false,
+        )
+        .score
+            > channel_priority(
+                ChannelKindDto::Weather,
+                Some(&later_signal),
+                &clear_decision(),
+                false,
+            )
+            .score
+    );
+}
+
+/// Current precipitation remains actionable even if every future period is
+/// dry, and expires at the end of the current provider interval.
+#[test]
+fn observed_current_precipitation_keeps_rain_active_until_its_bin_ends() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let current = weather_current_item(now_ms, 0.4, 5);
+    let dry_minutely = weather_minutely_item(now_ms, 0.0, 8);
+    let dry_hourly = weather_hourly_item(now_ms, 10.0, 10.0);
+
+    let (summary, active) = weather_activation(
+        &channel,
+        &[&current, &dry_minutely, &dry_hourly],
+        AvailabilityDto::Fresh,
+        now_ms,
+    );
+    assert!(active);
+    assert!(summary.contains("observed in the current 15-minute period"));
+
+    let signal = channel_signal(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&current, &dry_minutely, &dry_hourly],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(signal.headline, "Rain is falling now");
+    assert_eq!(signal.severity.as_deref(), Some("Falling now"));
+    assert_eq!(signal.imminence_minutes, Some(0));
+    assert_eq!(
+        signal.expires_at.as_deref(),
+        Some(iso_timestamp(now_ms + 10 * 60_000).unwrap().as_str())
+    );
+
+    assert!(
+        !weather_activation(
+            &channel,
+            &[&current],
+            AvailabilityDto::Fresh,
+            now_ms + 10 * 60_000,
+        )
+        .1
+    );
+    assert!(
+        !weather_activation(
+            &channel,
+            &[&current],
+            AvailabilityDto::Fresh,
+            now_ms + 10 * 60_000 + 1,
+        )
+        .1
+    );
+}
+
+#[test]
+fn overlapping_weather_bins_compose_one_current_notice() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let current = weather_current_item(now_ms, 0.4, 5);
+    let minutely = weather_minutely_item(now_ms, 0.8, 8);
+    let hourly = weather_hourly_item(now_ms, 90.0, 10.0);
+
+    let notices = channel_notices(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&current, &minutely, &hourly],
+        now_ms,
+        UnitSystem::Imperial,
+        &clear_decision(),
+        false,
+    );
+
+    assert_eq!(notices.len(), 1, "forecast bins are evidence, not slides");
+    assert_eq!(notices[0].signal.headline, "Rain is falling now");
+}
+
+#[test]
+fn separate_rain_and_wind_rows_compose_one_imminent_weather_notice() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let current_rain = weather_current_item(now_ms, 0.4, 5);
+    let mut near_wind = weather_hourly_item(now_ms, 10.0, 65.0);
+    near_wind.id = "open-meteo:hourly:near-wind".into();
+    near_wind.starts_at =
+        Some(chrono::DateTime::from_timestamp_millis(now_ms + 5 * 60_000).unwrap());
+    let mut farther_stronger_wind = weather_hourly_item(now_ms, 10.0, 95.0);
+    farther_stronger_wind.id = "open-meteo:hourly:farther-wind".into();
+    farther_stronger_wind.starts_at =
+        Some(chrono::DateTime::from_timestamp_millis(now_ms + 40 * 60_000).unwrap());
+
+    let notices = channel_notices(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&farther_stronger_wind, &current_rain, &near_wind],
+        now_ms,
+        UnitSystem::Imperial,
+        &clear_decision(),
+        false,
+    );
+
+    assert_eq!(notices.len(), 1, "weather rows compose one live state");
+    let notice = &notices[0];
+    assert_eq!(notice.signal.headline, "Rain now; strong gusts expected");
+    assert!(notice.signal.detail.contains("observed"));
+    assert!(notice.signal.detail.contains("Gusts 40 mph in 5 min"));
+    assert!(!notice.signal.detail.contains("59 mph in 40 min"));
+    assert_eq!(notice.signal.imminence_minutes, Some(0));
+    assert_eq!(notice.priority.imminence_minutes, Some(0));
+    assert!(
+        notice
+            .signal
+            .band
+            .as_deref()
+            .is_some_and(|band| band.contains("rain-amount") && band.contains("wind-gust"))
+    );
+    assert_eq!(
+        notice.signal.expires_at.as_deref(),
+        Some(iso_timestamp(now_ms + 10 * 60_000).unwrap().as_str()),
+        "combined copy expires when its first supporting fact does"
+    );
+}
+
+#[test]
+fn wind_only_notice_carries_imminence_into_its_priority() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let mut wind = weather_hourly_item(now_ms, 10.0, 80.0);
+    wind.starts_at = Some(chrono::DateTime::from_timestamp_millis(now_ms + 12 * 60_000).unwrap());
+
+    let notices = channel_notices(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&wind],
+        now_ms,
+        UnitSystem::Imperial,
+        &clear_decision(),
+        false,
+    );
+
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].signal.headline, "Strong gusts expected");
+    assert_eq!(notices[0].signal.imminence_minutes, Some(12));
+    assert_eq!(notices[0].priority.imminence_minutes, Some(12));
+    assert_eq!(notices[0].signal.severity.as_deref(), Some("Imminent"));
+}
+
+#[test]
+fn quarter_hour_weather_signal_expires_at_the_end_of_its_forecast_bin() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let minutely = weather_minutely_item(now_ms, 0.6, 8);
+    let signal = channel_signal(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&minutely],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+
+    assert_eq!(signal.headline, "Rain expected soon");
+    assert_eq!(
+        signal.expires_at.as_deref(),
+        Some(iso_timestamp(now_ms + 23 * 60_000).unwrap().as_str())
     );
 }
 

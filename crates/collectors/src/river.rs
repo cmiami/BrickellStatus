@@ -552,8 +552,15 @@ pub fn corridor_geometry() -> [CorridorBranch; 4] {
     ]
 }
 
-/// Bounding boxes tiling the corridor: four slim river tiles plus the two
-/// marked entrance channels. Format matches the AISStream subscription:
+/// Bounding boxes tiling the corridor plus three bounded discovery aprons.
+///
+/// The corridor boxes keep the live predictor focused. The aprons start the
+/// durable track earlier on the three ways a hull can reach Brickell: offshore
+/// of Government Cut and along the ICW north and south. Those outer fixes are
+/// evidence for fitting the route, not proof that a vessel is coming to the
+/// bridge; normal corridor/heading rules still decide that.
+///
+/// Format matches the AISStream subscription:
 /// `[[south, west], [north, east]]`.
 pub(crate) fn corridor_bounding_boxes() -> Vec<[[f64; 2]; 2]> {
     vec![
@@ -569,6 +576,12 @@ pub(crate) fn corridor_bounding_boxes() -> Vec<[[f64; 2]; 2]> {
         [[25.7620, -80.1860], [25.7790, -80.1280]],
         // South approach: ICW down to the Rickenbacker.
         [[25.7440, -80.1900], [25.7720, -80.1740]],
+        // Government Cut discovery apron: jetties → near-shore approaches.
+        [[25.7400, -80.1300], [25.7900, -80.0850]],
+        // North ICW discovery apron: vessels descending toward the bay.
+        [[25.7750, -80.1700], [25.8250, -80.1300]],
+        // South ICW discovery apron: vessels approaching from Biscayne Bay.
+        [[25.7000, -80.1900], [25.7500, -80.1450]],
     ]
 }
 
@@ -746,7 +759,9 @@ mod tests {
 
     #[test]
     fn corridor_boxes_are_valid_subscription_geometry() {
-        for bounds in corridor_bounding_boxes() {
+        let boxes = corridor_bounding_boxes();
+        assert_eq!(boxes.len(), 9);
+        for bounds in boxes {
             let [[south, west], [north, east]] = bounds;
             assert!(south < north && west < east);
             assert!((-90.0..=90.0).contains(&south) && (-90.0..=90.0).contains(&north));

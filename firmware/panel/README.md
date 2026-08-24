@@ -48,13 +48,14 @@ is the wrong one leaves the panel alone and says so, and the desktop app writes
 the right image without asking anything:
 
 ```text
-READY INK1 0x0 0 <build> E290 MISMATCH
+READY INK1 0x0 0 <build> E290 <board-id> FW2 MISMATCH
 ```
 
-The E213's two panel revisions are the one thing hardware cannot answer: same
-wiring, same `BUSY` line, no read-back path, and the controller is behind the
-glass. The app settles that by flashing one build and asking whether the screen
-is readable, then remembering the answer for that board.
+The E213's two panel revisions share the same wiring and board probe, but their
+controllers use opposite `BUSY` polarity. The wrong image blocks before the
+decoder loop and never answers `READY INK1`. The app writes one internal E213
+image, sends the repeatable identity query, and tries the other image once only
+when READY is absent. It remembers only the image that answers.
 
 ## Build and flash
 
@@ -84,7 +85,7 @@ read when a board comes up blank:
 
 ```text
 PROBE attempt=0 pin1=driven pin6=floating
-READY INK1 250x122 3904 9f3c2ab E213
+READY INK1 250x122 3904 9f3c2ab E213 26B4 FW4 BAT4012
 ```
 
 ## Wire contract
@@ -93,19 +94,70 @@ The frame contract is unchanged apart from carrying whichever geometry the
 attached panel has. It has always announced its dimensions; only the host's
 assumption that there was one answer had to go.
 
-- BLE advertised name: `InkDock E213` or `InkDock E290`, by what the probe found
+- BLE advertised name: `BrickellStatus XXXX`, where `XXXX` is the stable
+  four-character board code shown on the waiting screen
 - service UUID: `8b7a0000-4f4b-4a9b-9d6e-1d0c1a2b3c4d`
 - RX UUID: `8b7a0001-4f4b-4a9b-9d6e-1d0c1a2b3c4d`
 - TX UUID: `8b7a0002-4f4b-4a9b-9d6e-1d0c1a2b3c4d`
 - host packet: `INK1`, 3,922 bytes on the E213 and 4,754 on the E290
 - payload: 3,904 bytes at 32 bytes per row, or 4,736 at 37, MSB-first black bits
-- replies: `READY INK1 ...`, `ACK INK1`, or a descriptive `NACK ...`
+- replies: `READY INK1 ... [BAT<mV> [LOWBAT]]`,
+  `ACK INK1 [BAT<mV> [LOW]]`, or a descriptive `NACK ...`
+- identity query: a single `?` byte between frames repeats the full
+  `READY INK1 ...` banner
+
+The trailing `FW<n>` is the monotonic firmware release shared by E213 and
+E290. It is the only field used to decide upgrade direction: lower means the
+bundled firmware is newer, higher means the desktop app must be updated and
+must not downgrade the panel. The adjacent source build identifies exact bytes
+but is never ordered. Clean builds use the last firmware Git revision; dirty
+builds add a deterministic content digest so two different working trees cannot
+claim the same identity. Any firmware-affecting release must increment
+`version.txt`; changing a source build without incrementing it is intentionally
+reported as a different, unordered build rather than an automatic update.
 
 A host that sends the geometry the attached panel does not have is answered
 `NACK SIZE` rather than shown a smear.
 
+## Battery status
+
+The E213 and E290 share the same battery circuit: GPIO 46 enables the voltage
+divider, and GPIO 7 reads it with 2.5 dB ADC attenuation. Firmware powers that
+divider only for a bounded nine-sample median reading, applies the board's
+`4.9 × 1.03` divider calibration, and refreshes it at most once every 30
+seconds. Values outside the plausible 2,500–5,000 mV range are omitted. An
+omitted `BAT` token means unknown — commonly no attached battery — never zero.
+
+`LOWBAT` enters at or below 3,400 mV and clears only at or above 3,550 mV, so a
+battery near the boundary does not repeatedly alert. READY uses `LOWBAT`; ACK
+uses the equivalent compact `LOW`, keeping `ACK INK1 BAT3388 LOW` exactly 20
+bytes so it fits the default BLE notification payload before any MTU upgrade.
+The firmware reports raw millivolts and the hysteretic warning only. These
+boards expose no charger-state signal, so connecting USB is not labeled as
+charging and no battery percentage is invented. The app sees the warning on
+the next READY identity or successful frame ACK and can notify the user once
+for that low-battery transition.
+
+The board advertises without a time limit whenever no BLE client is connected,
+restarts advertising after a disconnect, and checks the radio every two seconds
+so a transient stopped-advertising state repairs itself. BLE starts before the
+e-paper driver, and a 30-second main-loop watchdog reboots a board if a display
+operation wedges, so persistent glass cannot leave the radio permanently
+unreachable. The e-paper waiting screen is drawn once at boot and persists by
+design; it identifies the panel but is not a live connection or advertising
+indicator.
+
 The TX characteristic holds the full banner rather than a bare `READY`, because
 over Bluetooth that line is the only place the geometry is spoken and the host
-has to know which panel it is drawing for before it draws. USB serial is
-115,200 baud. BLE clients must subscribe to TX before writing packet chunks to
-RX so that a fast acknowledgement cannot be missed.
+has to know which panel it is drawing for before it draws. ACK and NACK are
+notified transiently, then the characteristic's readable value is restored to
+the current READY banner. A later reconnect therefore still reads geometry,
+version, identity, and the latest battery measurement instead of an old ACK.
+USB serial is 115,200 baud. BLE clients must subscribe to TX before writing
+packet chunks to RX so that a fast acknowledgement cannot be missed.
+
+The repeated identity query also makes E213 controller recovery objective. The
+two E213 images use opposite BUSY polarity; the wrong one blocks before the
+main loop and cannot answer `?`, even though the glass may retain a perfectly
+readable image from older firmware. The desktop app tries the other E213 image
+once when READY is absent and remembers only the image that answers.

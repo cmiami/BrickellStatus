@@ -22,6 +22,7 @@ pub use location_search::{
     LocationSearchError, LocationSearchService, parse_location_search_response,
 };
 pub use preferences::{
+    AUTOMATIC_FRAME_DWELL_SECONDS, AUTOMATIC_FULL_REFRESH_EVERY, AUTOMATIC_ITEM_LIMIT,
     PreferencesError, default_alert_areas, default_channel_preferences, validate_preferences,
     whatsapp_consent_is_current,
 };

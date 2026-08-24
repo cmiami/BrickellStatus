@@ -15,15 +15,14 @@
 //!   if the probe then reports a different board the app writes the right one
 //!   without asking again.
 //!
-//! The single exception is the E213's panel revision. Its two revisions are the
-//! same ESP32-S3, the same USB identifiers, the same six pins and the same BUSY
-//! line — only the controller behind the glass differs, and it cannot be read
-//! back. That one stays a remembered answer, arrived at by flashing a build and
-//! asking whether the screen is readable, never by asking someone to identify
-//! hardware sealed inside a case.
+//! E213 carries two internal controller images behind one product-facing panel
+//! identity. Their BUSY polarity is opposite, so the wrong image blocks before
+//! it can answer READY. Flash recovery is objective: write one, query READY,
+//! try the other once only on silence, and remember only the image that answers.
+//! Retained e-paper pixels are never treated as proof that firmware booted.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -60,7 +59,7 @@ pub const EXPECTED_CHIP: &str = "esp32s3";
 
 /// Manifest revision this app reads. Version 2 names the board each build
 /// drives, which is what lets the app pick one without asking.
-pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
+pub const MANIFEST_SCHEMA_VERSION: u32 = 3;
 
 /// Which E213 panel controller a build drives.
 ///
@@ -120,6 +119,10 @@ pub struct FirmwareVariantSpec {
 pub struct FirmwareManifest {
     pub schema_version: u32,
     pub chip: String,
+    /// Monotonic firmware release. This, not the Git-derived source revision,
+    /// establishes whether the app or device is newer.
+    #[serde(default)]
+    pub firmware_version: u32,
     /// Firmware source revision, so a support question can be answered without
     /// guessing which build is on the device.
     #[serde(default)]
@@ -145,6 +148,55 @@ pub struct FirmwareVariant {
     pub segments: Vec<FlashSegment>,
 }
 
+/// Validates that a READY line came from the image just written.
+///
+/// `Ok(None)` is a complete, current, driveable image. `Ok(Some(board))` is the
+/// firmware's explicit board-mismatch redirect. Every incomplete or stale
+/// identity is an error rather than evidence to try a different controller.
+pub fn validate_current_banner(
+    banner: &DeviceBanner,
+    written: &FirmwareVariant,
+    bundled_version: u32,
+    bundled_build: Option<&str>,
+) -> Result<Option<PanelModel>, String> {
+    if !banner.saw_ready {
+        return Err("the panel did not return READY INK1".into());
+    }
+    if let Some(expected) = bundled_build
+        && banner.build.as_deref() != Some(expected)
+    {
+        return Err(format!(
+            "the panel reported build {}, expected {expected}",
+            banner.build.as_deref().unwrap_or("none")
+        ));
+    }
+    if banner.board_id.is_none() {
+        return Err("the panel READY response had no valid four-hex board id".into());
+    }
+    if banner.version_malformed || banner.firmware_version != Some(bundled_version) {
+        return Err(format!(
+            "the panel reported firmware version {}, expected {bundled_version}",
+            banner
+                .firmware_version
+                .map(|version| version.to_string())
+                .unwrap_or_else(|| "none".into())
+        ));
+    }
+    if banner.mismatch {
+        return banner
+            .board
+            .map(Some)
+            .ok_or_else(|| "the panel reported MISMATCH without naming its board".into());
+    }
+    if banner.panel != Some(written.panel) || banner.board != Some(written.panel) {
+        return Err(format!(
+            "the panel READY response does not identify the written {} image",
+            written.panel.label()
+        ));
+    }
+    Ok(None)
+}
+
 impl FirmwareVariant {
     /// Total bytes written to the device, for progress reporting.
     pub fn total_bytes(&self) -> usize {
@@ -158,6 +210,7 @@ impl FirmwareVariant {
 /// Every firmware build shipped inside the app.
 #[derive(Clone, Debug)]
 pub struct FirmwareBundle {
+    pub firmware_version: u32,
     pub source_revision: Option<String>,
     variants: Vec<FirmwareVariant>,
 }
@@ -194,6 +247,9 @@ impl FirmwareBundle {
         if manifest.variants.is_empty() {
             return Err(FirmwareError::NoVariants);
         }
+        if manifest.firmware_version == 0 {
+            return Err(FirmwareError::FirmwareVersion);
+        }
 
         let mut seen_ids = BTreeMap::new();
         let mut variants = Vec::with_capacity(manifest.variants.len());
@@ -205,6 +261,7 @@ impl FirmwareBundle {
         }
 
         Ok(Self {
+            firmware_version: manifest.firmware_version,
             source_revision: manifest.source_revision,
             variants,
         })
@@ -221,9 +278,9 @@ impl FirmwareBundle {
     /// The build to write to a board.
     ///
     /// `board` is what the device reported about itself, so on everything but a
-    /// virgin board this is a fact rather than a guess. `revision` is the
-    /// remembered answer to the one question hardware cannot settle, and only
-    /// the E213 has more than one build for it to choose between.
+    /// virgin board this is a fact rather than a guess. `revision` selects the
+    /// last E213 controller image that objectively answered READY; it is an
+    /// internal recovery detail, not a panel choice shown to the reader.
     pub fn for_board(
         &self,
         board: PanelModel,
@@ -244,13 +301,67 @@ impl FirmwareBundle {
             .or_else(|| for_board().next())
     }
 
-    /// Every build that could drive this board, so a screen that comes up
-    /// unreadable has somewhere to go next.
+    /// Every other controller image that could drive this board.
+    ///
+    /// These are recovery images, not user-facing panel choices. E-paper keeps
+    /// its last image without power, so looking at the glass cannot prove the
+    /// firmware that was just written actually booted. Recovery is selected
+    /// only from the board's `READY INK1` response (or its absence).
     pub fn alternatives_for(&self, board: PanelModel, written: &str) -> Vec<&FirmwareVariant> {
         self.variants
             .iter()
             .filter(|variant| variant.panel == board && variant.id != written)
             .collect()
+    }
+
+    /// One objective recovery image after a freshly written build boots.
+    ///
+    /// A positive `READY INK1` without `MISMATCH` finishes the flash. A board
+    /// mismatch names the panel whose image should be written next. Silence is
+    /// actionable only for an E213 image: its two controller revisions share
+    /// the same board probe, and the wrong controller blocks forever on the
+    /// opposite BUSY polarity before it can announce READY. Each image is
+    /// returned at most once, which makes recovery bounded even when hardware
+    /// is absent or damaged.
+    pub fn recovery_after_boot(
+        &self,
+        written: &FirmwareVariant,
+        banner: Option<&DeviceBanner>,
+        attempted: &BTreeSet<String>,
+    ) -> Option<&FirmwareVariant> {
+        if let Some(banner) = banner.filter(|banner| banner.saw_ready) {
+            if !banner.mismatch {
+                return None;
+            }
+            let board = banner.board?;
+            return self
+                .variants
+                .iter()
+                .find(|variant| variant.panel == board && !attempted.contains(&variant.id));
+        }
+
+        if written.panel != PanelModel::E213 {
+            return None;
+        }
+        self.variants.iter().find(|variant| {
+            variant.panel == PanelModel::E213
+                && variant.id != written.id
+                && !attempted.contains(&variant.id)
+        })
+    }
+
+    /// Previously verified controller image for this exact USB device.
+    ///
+    /// Records written by the old visual-confirm workflow default to
+    /// `verified = false` and are intentionally ineligible.
+    pub fn trusted_rollback(
+        &self,
+        record: &FlashRecord,
+        serial_number: &str,
+    ) -> Option<&FirmwareVariant> {
+        (record.verified && record.serial_number == serial_number)
+            .then(|| self.variant(&record.variant_id))
+            .flatten()
     }
 }
 
@@ -341,14 +452,10 @@ fn validate_layout(variant: &str, segments: &[FlashSegment]) -> Result<(), Firmw
 /// What the firmware banner told us about the attached board.
 ///
 /// The device announces itself on boot as
-/// `READY INK1 <w>x<h> <payload> <build> [panel]`. It is the same line the
-/// display route reads to learn which panel it is drawing for, so the parser
-/// lives beside the protocol rather than here; this module only cares about the
-/// build id it carries.
-///
-/// Firmware predating build reporting omits that field, so a missing build is
-/// "unknown", never "wrong" -- a working device must not be nagged to reflash
-/// just because it cannot say which build it runs.
+/// `READY INK1 <w>x<h> <payload> <build> <panel> <id> FW<version>`. It is the
+/// same line the display route reads to learn which panel it is drawing for, so
+/// the parser lives beside the protocol rather than here. The monotonic version
+/// orders releases; the build identifies exact provenance within one release.
 pub use brickellstatus_eink::DeviceBanner;
 
 /// Why a flash is being offered.
@@ -360,6 +467,12 @@ pub enum FlashReason {
     NotResponding,
     /// The board runs a different build from the one this app ships.
     BuildMismatch { device: String, bundled: String },
+    /// The bundled firmware has a strictly greater monotonic release number.
+    FirmwareOutdated { device: u32, bundled: u32 },
+    /// The board claimed a current-style identity that cannot be trusted.
+    IncompatibleIdentity { device: String, bundled: String },
+    /// A saved pre-identity Bluetooth route cannot be safely auto-attached.
+    LegacyConnection,
     /// The board is running this firmware, but the build for another panel.
     ///
     /// Only the device can tell us this, and it does: its probe names the board
@@ -377,6 +490,16 @@ pub enum FlashRequirement {
     NoDevice,
     /// The board runs exactly what this app ships.
     UpToDate { build: String },
+    /// The board runs a greater firmware release than this app bundles. The app
+    /// must be updated; flashing would be a downgrade.
+    DeviceNewer { device: u32, bundled: u32 },
+    /// Same ordered release, different exact source provenance. Git hashes do
+    /// not establish which came later, so this is visible but not auto-flashed.
+    DifferentBuild {
+        version: u32,
+        device: String,
+        bundled: String,
+    },
     /// The board works but predates build reporting, so it cannot be compared.
     /// Flashing is available, but nothing here says it is needed.
     UnknownBuild,
@@ -405,8 +528,18 @@ pub struct FlashRecord {
     pub serial_number: String,
     /// The bundled build that was written.
     pub build: String,
-    /// Which panel variant was written, so the prompt can offer the other one.
+    /// Monotonic bundled firmware release. Missing on legacy records, which
+    /// means they cannot prove upgrade ordering.
+    #[serde(default)]
+    pub firmware_version: Option<u32>,
+    /// Which internal controller image was written, so a later repair starts
+    /// with the last objectively working candidate.
     pub variant_id: String,
+    /// True only when the image answered a full, current `READY INK1` identity
+    /// query after it was written. Records created by the older visual-confirm
+    /// flow deserialize false and can never be used as rollback truth.
+    #[serde(default)]
+    pub verified: bool,
     pub flashed_at: String,
 }
 
@@ -516,6 +649,137 @@ pub fn evaluate_flash_requirement(
     }
 }
 
+/// Version-aware firmware decision used by the application.
+///
+/// The integer firmware release is the only ordering signal. Source revisions
+/// are exact provenance within one release; unequal hashes never mean "older"
+/// because Git object names are intentionally unordered, and dirty builds may
+/// not even correspond to a commit.
+pub fn evaluate_versioned_flash_requirement(
+    probe: &DeviceProbe,
+    bundled_version: u32,
+    bundled_build: Option<&str>,
+    remembered: Option<&FlashRecord>,
+    evidence: RouteEvidence,
+) -> FlashRequirement {
+    let banner = match probe {
+        DeviceProbe::NoPort => return FlashRequirement::NoDevice,
+        DeviceProbe::Unreachable => {
+            return from_versioned_record(remembered, bundled_version, bundled_build);
+        }
+        DeviceProbe::Silent => {
+            return versioned_silent_board(remembered, bundled_version, bundled_build, evidence);
+        }
+        DeviceProbe::Answered(banner) => banner,
+    };
+    if !banner.saw_ready {
+        return versioned_silent_board(remembered, bundled_version, bundled_build, evidence);
+    }
+    // A controller image that explicitly names the other physical panel is
+    // incompatible regardless of version. Correct the board before comparing
+    // release identities.
+    if banner.mismatch
+        && let Some(board) = banner.board
+    {
+        return FlashRequirement::Required {
+            reason: FlashReason::WrongBoard { board },
+        };
+    }
+    if banner.version_malformed {
+        return FlashRequirement::Required {
+            reason: FlashReason::IncompatibleIdentity {
+                device: "malformed firmware version".into(),
+                bundled: format!("firmware version {bundled_version}"),
+            },
+        };
+    }
+
+    // This is the first explicitly versioned firmware generation. A complete
+    // READY banner without FW<n> is therefore the deployed legacy generation,
+    // not an unordered Git disagreement.
+    let device_version = banner.firmware_version.unwrap_or(1);
+    compare_versioned_identity(
+        device_version,
+        banner.build.as_deref(),
+        bundled_version,
+        bundled_build,
+    )
+}
+
+fn compare_versioned_identity(
+    device_version: u32,
+    device_build: Option<&str>,
+    bundled_version: u32,
+    bundled_build: Option<&str>,
+) -> FlashRequirement {
+    use std::cmp::Ordering;
+
+    match device_version.cmp(&bundled_version) {
+        Ordering::Less => FlashRequirement::Required {
+            reason: FlashReason::FirmwareOutdated {
+                device: device_version,
+                bundled: bundled_version,
+            },
+        },
+        Ordering::Greater => FlashRequirement::DeviceNewer {
+            device: device_version,
+            bundled: bundled_version,
+        },
+        Ordering::Equal => match (device_build, bundled_build) {
+            (Some(device), Some(bundled)) if device == bundled => FlashRequirement::UpToDate {
+                build: device.to_owned(),
+            },
+            (device, bundled) => FlashRequirement::DifferentBuild {
+                version: device_version,
+                device: device.unwrap_or("unknown").to_owned(),
+                bundled: bundled.unwrap_or("unknown").to_owned(),
+            },
+        },
+    }
+}
+
+fn from_versioned_record(
+    remembered: Option<&FlashRecord>,
+    bundled_version: u32,
+    bundled_build: Option<&str>,
+) -> FlashRequirement {
+    let Some(record) = remembered.filter(|record| record.verified) else {
+        return FlashRequirement::UnknownBuild;
+    };
+    let Some(version) = record.firmware_version else {
+        // Pre-verification records cannot establish ordering while the board is
+        // unreachable. Wait for a direct banner or a verified repair.
+        return FlashRequirement::UnknownBuild;
+    };
+    compare_versioned_identity(version, Some(&record.build), bundled_version, bundled_build)
+}
+
+fn versioned_silent_board(
+    remembered: Option<&FlashRecord>,
+    bundled_version: u32,
+    bundled_build: Option<&str>,
+    evidence: RouteEvidence,
+) -> FlashRequirement {
+    match evidence {
+        // ACK proves this is working BrickellStatus firmware, but cannot recover
+        // the one-time boot banner's version. Pending is the same grace period
+        // before the first ACK. Neither is evidence that an update is needed;
+        // only a verified record can make that stronger claim.
+        RouteEvidence::Acknowledged | RouteEvidence::Pending => {
+            from_versioned_record(remembered, bundled_version, bundled_build)
+        }
+        RouteEvidence::Failing => FlashRequirement::Required {
+            reason: FlashReason::NotResponding,
+        },
+        RouteEvidence::Absent if remembered.is_some() => {
+            from_versioned_record(remembered, bundled_version, bundled_build)
+        }
+        RouteEvidence::Absent => FlashRequirement::Required {
+            reason: FlashReason::NotResponding,
+        },
+    }
+}
+
 /// What this app remembers writing to the board in front of it, which answers
 /// for a board that cannot be asked.
 fn from_record(remembered: Option<&FlashRecord>, bundled_build: Option<&str>) -> FlashRequirement {
@@ -574,6 +838,8 @@ pub enum FirmwareError {
     Chip { found: String },
     #[error("firmware manifest declares no variants")]
     NoVariants,
+    #[error("firmware manifest has no positive firmware version")]
+    FirmwareVersion,
     #[error("firmware variant {0:?} appears more than once")]
     DuplicateVariant(String),
     #[error("firmware variant requires a non-empty id and label")]
@@ -780,8 +1046,9 @@ mod tests {
     fn manifest_json(images: &str) -> String {
         format!(
             r#"{{
-              "schemaVersion": 2,
+              "schemaVersion": 3,
               "chip": "esp32s3",
+              "firmwareVersion": 2,
               "sourceRevision": "abc1234",
               "variants": [
                 {{
@@ -814,13 +1081,14 @@ mod tests {
         fixture.image(variant, "firmware.bin", 502_736);
     }
 
-    /// The shipped shape: one build per board, and two for the board whose
-    /// panel revision nothing can read back.
+    /// The shipped shape: one image for E290 and two internal controller images
+    /// behind the single product-facing E213 panel identity.
     fn every_board_manifest() -> String {
         format!(
             r#"{{
-              "schemaVersion": 2,
+              "schemaVersion": 3,
               "chip": "esp32s3",
+              "firmwareVersion": 2,
               "sourceRevision": "abc1234",
               "variants": [
                 {{"id":"vision-master-e213","label":"Original panel","panel":"e213","panelRevision":"original","images":[{FULL_IMAGES}]}},
@@ -838,6 +1106,7 @@ mod tests {
         fixture.manifest(&manifest_json(FULL_IMAGES));
 
         let bundle = FirmwareBundle::load(&fixture.root).unwrap();
+        assert_eq!(bundle.firmware_version, 2);
         assert_eq!(bundle.source_revision.as_deref(), Some("abc1234"));
         let variant = bundle.variant("vision-master-e213").unwrap();
         assert_eq!(variant.panel_revision, Some(PanelRevision::Original));
@@ -932,6 +1201,19 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_legacy_manifest_by_schema_before_reading_version() {
+        let fixture = Fixture::new("legacy-schema");
+        let manifest = manifest_json(FULL_IMAGES)
+            .replace("\"schemaVersion\": 3", "\"schemaVersion\": 2")
+            .replace("\"firmwareVersion\": 2,", "");
+        fixture.manifest(&manifest);
+        assert!(matches!(
+            FirmwareBundle::load(&fixture.root).unwrap_err(),
+            FirmwareError::SchemaVersion(2)
+        ));
+    }
+
+    #[test]
     fn rejects_an_image_name_that_escapes_the_variant_directory() {
         let fixture = Fixture::new("traversal");
         write_full_images(&fixture);
@@ -979,8 +1261,9 @@ mod tests {
         }
         fixture.manifest(
             &r#"{
-              "schemaVersion": 2,
+              "schemaVersion": 3,
               "chip": "esp32s3",
+              "firmwareVersion": 2,
               "variants": [
                 {"id":"vision-master-e213","label":"Original panel","panel":"e213","panelRevision":"original","images":[IMAGES]},
                 {"id":"vision-master-e213-v11","label":"Panel v1.1","panel":"e213","panelRevision":"v11","images":[IMAGES]},
@@ -1023,6 +1306,151 @@ mod tests {
         );
     }
 
+    #[test]
+    fn silent_e213_boot_retries_the_other_controller_once() {
+        let fixture = Fixture::new("silent-e213-recovery");
+        for variant in [
+            "vision-master-e213",
+            "vision-master-e213-v11",
+            "vision-master-e290",
+        ] {
+            write_variant_images(&fixture, variant);
+        }
+        fixture.manifest(&every_board_manifest());
+        let bundle = FirmwareBundle::load(&fixture.root).unwrap();
+        let first = bundle.variant("vision-master-e213-v11").unwrap();
+        let mut attempted = BTreeSet::from([first.id.clone()]);
+
+        let recovery = bundle
+            .recovery_after_boot(first, None, &attempted)
+            .expect("the other E213 controller image is the bounded recovery");
+        assert_eq!(recovery.id, "vision-master-e213");
+
+        attempted.insert(recovery.id.clone());
+        assert!(
+            bundle
+                .recovery_after_boot(recovery, None, &attempted)
+                .is_none(),
+            "neither E213 image may be written twice"
+        );
+    }
+
+    #[test]
+    fn only_a_full_current_ready_banner_verifies_a_written_image() {
+        let fixture = Fixture::new("current-banner");
+        write_variant_images(&fixture, "vision-master-e213");
+        fixture.manifest(&manifest_json(FULL_IMAGES));
+        let bundle = FirmwareBundle::load(&fixture.root).unwrap();
+        let written = bundle.variant("vision-master-e213").unwrap();
+
+        let current = DeviceBanner::parse("READY INK1 250x122 3904 abc1234 E213 26B4 FW2");
+        assert_eq!(
+            validate_current_banner(&current, written, 2, Some("abc1234")),
+            Ok(None)
+        );
+
+        for line in [
+            "READY",
+            "READY INK1 250x122 3904 oldbuild E213 26B4 FW2",
+            "READY INK1 296x128 4736 abc1234 E290 26B4 FW2",
+            "READY INK1 250x122 3904 abc1234 E213 panel FW2",
+            "READY INK1 250x122 3904 abc1234 E213 26B4 FW1",
+        ] {
+            let banner = DeviceBanner::parse(line);
+            assert!(
+                validate_current_banner(&banner, written, 2, Some("abc1234")).is_err(),
+                "accepted incomplete or stale identity {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_full_mismatch_banner_objectively_redirects_to_its_board() {
+        let fixture = Fixture::new("current-mismatch-banner");
+        write_variant_images(&fixture, "vision-master-e213");
+        fixture.manifest(&manifest_json(FULL_IMAGES));
+        let bundle = FirmwareBundle::load(&fixture.root).unwrap();
+        let written = bundle.variant("vision-master-e213").unwrap();
+        let mismatch = DeviceBanner::parse("READY INK1 0x0 0 abc1234 E290 26B4 FW2 MISMATCH");
+
+        assert_eq!(
+            validate_current_banner(&mismatch, written, 2, Some("abc1234")),
+            Ok(Some(PanelModel::E290))
+        );
+    }
+
+    #[test]
+    fn ready_e213_boot_never_uses_the_other_controller() {
+        let fixture = Fixture::new("ready-e213");
+        for variant in [
+            "vision-master-e213",
+            "vision-master-e213-v11",
+            "vision-master-e290",
+        ] {
+            write_variant_images(&fixture, variant);
+        }
+        fixture.manifest(&every_board_manifest());
+        let bundle = FirmwareBundle::load(&fixture.root).unwrap();
+        let written = bundle.variant("vision-master-e213").unwrap();
+        let attempted = BTreeSet::from([written.id.clone()]);
+        let banner = DeviceBanner::parse("READY INK1 250x122 3904 abc1234 E213 26B4");
+
+        assert!(
+            bundle
+                .recovery_after_boot(written, Some(&banner), &attempted)
+                .is_none(),
+            "an objective READY is success even though another internal image exists"
+        );
+    }
+
+    #[test]
+    fn board_mismatch_recovers_to_the_reported_panel() {
+        let fixture = Fixture::new("board-mismatch-recovery");
+        for variant in [
+            "vision-master-e213",
+            "vision-master-e213-v11",
+            "vision-master-e290",
+        ] {
+            write_variant_images(&fixture, variant);
+        }
+        fixture.manifest(&every_board_manifest());
+        let bundle = FirmwareBundle::load(&fixture.root).unwrap();
+        let written = bundle.variant("vision-master-e213-v11").unwrap();
+        let attempted = BTreeSet::from([written.id.clone()]);
+        let banner = DeviceBanner::parse("READY INK1 0x0 0 abc1234 E290 26B4 MISMATCH");
+
+        assert_eq!(
+            bundle
+                .recovery_after_boot(written, Some(&banner), &attempted)
+                .unwrap()
+                .id,
+            "vision-master-e290"
+        );
+    }
+
+    #[test]
+    fn silent_e290_boot_does_not_guess_another_board() {
+        let fixture = Fixture::new("silent-e290");
+        for variant in [
+            "vision-master-e213",
+            "vision-master-e213-v11",
+            "vision-master-e290",
+        ] {
+            write_variant_images(&fixture, variant);
+        }
+        fixture.manifest(&every_board_manifest());
+        let bundle = FirmwareBundle::load(&fixture.root).unwrap();
+        let written = bundle.variant("vision-master-e290").unwrap();
+        let attempted = BTreeSet::from([written.id.clone()]);
+
+        assert!(
+            bundle
+                .recovery_after_boot(written, None, &attempted)
+                .is_none(),
+            "silence from E290 says nothing about which different board exists"
+        );
+    }
+
     /// Nothing remembered, and a board that has never spoken: the first build
     /// listed for it is written, and the firmware reports back if that was the
     /// wrong guess.
@@ -1042,7 +1470,7 @@ mod tests {
                 .map(|variant| variant.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["vision-master-e213-v11"],
-            "the other E213 build is what an unreadable screen is offered next"
+            "the other E213 controller image is the bounded silent-boot recovery"
         );
         assert!(
             bundle
@@ -1270,8 +1698,223 @@ mod tests {
         FlashRecord {
             serial_number: "F0:9E:9E:3B:26:B4".into(),
             build: build.into(),
+            firmware_version: Some(2),
             variant_id: "vision-master-e213".into(),
+            verified: true,
             flashed_at: "2026-08-16T13:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn legacy_flash_records_are_not_trusted_for_rollback() {
+        let legacy: FlashRecord = serde_json::from_str(
+            r#"{"serialNumber":"F0:9E:9E:3B:26:B4","build":"abc1234","variantId":"vision-master-e213-v11","flashedAt":"2026-08-20T20:58:15Z"}"#,
+        )
+        .unwrap();
+        assert!(!legacy.verified);
+        assert_eq!(legacy.firmware_version, None);
+    }
+
+    #[test]
+    fn rollback_requires_a_verified_record_for_the_exact_usb_board() {
+        let fixture = Fixture::new("trusted-rollback");
+        write_variant_images(&fixture, "vision-master-e213");
+        fixture.manifest(&manifest_json(FULL_IMAGES));
+        let bundle = FirmwareBundle::load(&fixture.root).unwrap();
+        let mut candidate = record("abc1234");
+
+        assert_eq!(
+            bundle
+                .trusted_rollback(&candidate, "F0:9E:9E:3B:26:B4")
+                .map(|variant| variant.id.as_str()),
+            Some("vision-master-e213")
+        );
+        candidate.verified = false;
+        assert!(
+            bundle
+                .trusted_rollback(&candidate, "F0:9E:9E:3B:26:B4")
+                .is_none()
+        );
+        candidate.verified = true;
+        assert!(
+            bundle
+                .trusted_rollback(&candidate, "11:22:33:44:55:66")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ordered_firmware_versions_drive_update_without_ordering_git_hashes() {
+        let outdated = evaluate_versioned_flash_requirement(
+            &DeviceProbe::Answered(DeviceBanner::parse(
+                "READY INK1 250x122 3904 newer-looking-hash E213 26B4 FW1",
+            )),
+            2,
+            Some("abc1234"),
+            None,
+            RouteEvidence::Acknowledged,
+        );
+        assert_eq!(
+            outdated,
+            FlashRequirement::Required {
+                reason: FlashReason::FirmwareOutdated {
+                    device: 1,
+                    bundled: 2
+                }
+            }
+        );
+
+        let unordered = evaluate_versioned_flash_requirement(
+            &DeviceProbe::Answered(DeviceBanner::parse(
+                "READY INK1 250x122 3904 other999 E213 26B4 FW2",
+            )),
+            2,
+            Some("abc1234-dirty-deadbeef"),
+            None,
+            RouteEvidence::Acknowledged,
+        );
+        assert_eq!(
+            unordered,
+            FlashRequirement::DifferentBuild {
+                version: 2,
+                device: "other999".into(),
+                bundled: "abc1234-dirty-deadbeef".into(),
+            }
+        );
+        assert!(!unordered.should_prompt());
+    }
+
+    #[test]
+    fn legacy_banner_is_a_one_time_version_one_update_for_e213_and_e290() {
+        for line in [
+            "READY INK1 250x122 3904 old0001 E213 26B4",
+            "READY INK1 296x128 4736 old0001 E290 26B4",
+        ] {
+            assert_eq!(
+                evaluate_versioned_flash_requirement(
+                    &DeviceProbe::Answered(DeviceBanner::parse(line)),
+                    2,
+                    Some("abc1234"),
+                    None,
+                    RouteEvidence::Acknowledged,
+                ),
+                FlashRequirement::Required {
+                    reason: FlashReason::FirmwareOutdated {
+                        device: 1,
+                        bundled: 2
+                    }
+                },
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_device_newer_than_the_app_is_never_downgraded() {
+        let requirement = evaluate_versioned_flash_requirement(
+            &DeviceProbe::Answered(DeviceBanner::parse(
+                "READY INK1 296x128 4736 future999 E290 26B4 FW3",
+            )),
+            2,
+            Some("abc1234"),
+            None,
+            RouteEvidence::Acknowledged,
+        );
+        assert_eq!(
+            requirement,
+            FlashRequirement::DeviceNewer {
+                device: 3,
+                bundled: 2
+            }
+        );
+        assert!(!requirement.should_prompt());
+    }
+
+    #[test]
+    fn malformed_version_is_incompatible_and_wrong_board_still_wins() {
+        let malformed = evaluate_versioned_flash_requirement(
+            &DeviceProbe::Answered(DeviceBanner::parse(
+                "READY INK1 250x122 3904 abc1234 E213 26B4 FWnext",
+            )),
+            2,
+            Some("abc1234"),
+            None,
+            RouteEvidence::Acknowledged,
+        );
+        assert!(matches!(
+            malformed,
+            FlashRequirement::Required {
+                reason: FlashReason::IncompatibleIdentity { .. }
+            }
+        ));
+
+        let wrong_board = evaluate_versioned_flash_requirement(
+            &DeviceProbe::Answered(DeviceBanner::parse(
+                "READY INK1 0x0 0 old0001 E290 26B4 FW1 MISMATCH",
+            )),
+            2,
+            Some("abc1234"),
+            None,
+            RouteEvidence::Absent,
+        );
+        assert_eq!(
+            wrong_board,
+            FlashRequirement::Required {
+                reason: FlashReason::WrongBoard {
+                    board: PanelModel::E290
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn an_unreachable_panel_uses_only_objectively_verified_version_memory() {
+        let mut stale = record("old0001");
+        stale.firmware_version = Some(1);
+        assert_eq!(
+            evaluate_versioned_flash_requirement(
+                &DeviceProbe::Unreachable,
+                2,
+                Some("abc1234"),
+                Some(&stale),
+                RouteEvidence::Absent,
+            ),
+            FlashRequirement::Required {
+                reason: FlashReason::FirmwareOutdated {
+                    device: 1,
+                    bundled: 2
+                }
+            }
+        );
+
+        stale.verified = false;
+        assert_eq!(
+            evaluate_versioned_flash_requirement(
+                &DeviceProbe::Unreachable,
+                2,
+                Some("abc1234"),
+                Some(&stale),
+                RouteEvidence::Absent,
+            ),
+            FlashRequirement::UnknownBuild
+        );
+    }
+
+    #[test]
+    fn a_connected_panel_without_a_readable_version_does_not_invent_an_update() {
+        for evidence in [RouteEvidence::Pending, RouteEvidence::Acknowledged] {
+            let requirement = evaluate_versioned_flash_requirement(
+                &DeviceProbe::Silent,
+                4,
+                Some("latest-build"),
+                None,
+                evidence,
+            );
+            assert_eq!(requirement, FlashRequirement::UnknownBuild);
+            assert!(
+                !requirement.should_prompt(),
+                "a working panel with a missed boot banner must not raise an update"
+            );
         }
     }
 

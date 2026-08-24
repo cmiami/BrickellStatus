@@ -21,11 +21,11 @@ This is a user-programmable signal instrument, not a feed firehose or binary bri
 ## Operating Context
 
 - Users check status shortly before or during a drive and may only have a few seconds to read it.
-- Meaningful stages are Clear, Watch, Likely, and Open. Predictive confidence distinguishes High from Very High without inventing an unobserved intermediate state.
+- Meaningful stages are Clear, Likely, and Open. There is deliberately no middle "something might happen" stage: it fired on evidence too weak to act on, which is what teaches a reader to stop believing the channel. Either the evidence supports saying an opening is likely, or the instrument stays quiet and shows the context without raising urgency. Predictive confidence distinguishes High from Very High without inventing an unobserved intermediate state.
 - Legal opening windows are context and a confidence modifier, never proof that an opening will occur.
 - AISStream vessel movement and upstream bridge progression are predictive signals; FL511 or equivalent controller status is ground truth.
 - WhatsApp is the preferred message channel. USB and Bluetooth are the desired display transports.
-- Users configure enabled channels, locations, sources, display rotation, interrupt eligibility, urgency threshold, destinations, quiet hours, and freshness expectations.
+- Users choose which channels to watch and configure their places, sources, output connections, and quiet hours. The runtime owns freshness, expiry, slide membership, ordering, cadence, and interruption consistently across channels.
 - Every important location is chosen on a reusable global pan/zoom map with search and draggable pins; raw coordinates are an advanced escape hatch, never the primary experience. Device location is an explicit one-shot action and is never sampled passively.
 - Every channel has an operational master gate, and independently configurable sub-rules expose their own enable/disable state. A disabled collector does not keep polling merely because its card is hidden.
 
@@ -39,7 +39,7 @@ This is a user-programmable signal instrument, not a feed firehose or binary bri
 - Provides guided BLE/USB discovery, direct GATT connection, connection state, and physical `ACK INK1` proof. Closing the configuration window leaves the service running in the platform tray/menu bar until the user explicitly quits.
 - Provides an optional AISStream WebSocket source with an operating-system-vault API key, a bridge-target-derived 2–30 km coverage radius, and explicit parked/missing-key/armed/live/degraded health. When enabled, only the backend sends that derived bounding box and key to AISStream over WSS; the UI never connects browser-side or samples location passively.
 - Provides first-class configurable channels for the bridge predictor, local weather, official life-safety alerts, hurricane changes, news/RSS, and market watch items; additional channels join through the same typed interface.
-- Channel configuration determines whether an item is collected, retained, shown in rotation, allowed to interrupt, and routed to WhatsApp or another destination.
+- Every relevant item becomes one current notice and one display slide until its typed expiry or resolution. Imminent, high-confidence events rank first and may interrupt once; continuing relevance never creates a repeat count.
 - User-authored policy stays structured and inspectable; arbitrary remote code is not required for ordinary configuration.
 - Does not depend on UHF hardware.
 - Camera and road-traffic detection are explicitly late confirmation sources, not the predictive foundation.
@@ -59,6 +59,7 @@ The founding research supplied in the project brief includes the applicable open
 3. One event model feeds every surface and transport.
 4. The user owns the signal mix; silence is better than false urgency or an unwanted feed.
 5. Local operation, inspectable data, and graceful degradation are default behavior.
+6. Relevance is membership: if an item is current it is present, and when it passes it is gone.
 
 ## Accessibility & Inclusion
 

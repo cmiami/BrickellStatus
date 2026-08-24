@@ -71,13 +71,13 @@
   const channelTitle = (id: string) => $snapshot?.channels.find((item) => item.id === id)?.title ?? id;
 
   const intervalLabel = (interval: BridgeStateInterval) =>
-    interval.state === 'up' ? 'Opened' : interval.state === 'down' ? 'Closed' : 'State unknown';
+    interval.state === 'up' ? 'Up' : interval.state === 'down' ? 'Down' : 'No reading';
 
   function intervalDuration(interval: BridgeStateInterval): string {
     const elapsed = Math.max(0, new Date(interval.endedAt ?? Date.now()).getTime() - new Date(interval.startedAt).getTime());
     const minutes = Math.floor(elapsed / 60_000);
     const seconds = Math.floor((elapsed % 60_000) / 1_000);
-    if (!interval.endedAt) return interval.state === 'up' ? `Open for ${minutes}m ${seconds}s` : 'Current state';
+    if (!interval.endedAt) return interval.state === 'up' ? `Up for ${minutes}m ${seconds}s` : 'Current state';
     return minutes ? `${minutes}m ${seconds}s` : `${seconds}s`;
   }
 
@@ -103,28 +103,27 @@
 
 <svelte:head>
   <title>Log · BrickellStatus</title>
-  <meta name="description" content="Inspect recorded bridge openings and durable outbound delivery outcomes." />
+  <meta name="description" content="Review bridge up/down history and message delivery results." />
 </svelte:head>
 
 <section class="page-sheet log-page">
   <SystemTabs />
   <header class="page-heading-row">
     <div>
-      <p class="registration-label">Durable history</p>
-      <h1 class="sheet-heading">See what changed, and when</h1>
+      <p class="registration-label">History</p>
+      <h1 class="sheet-heading">Activity log</h1>
       <p class="sheet-intro">
-        This ledger records bridge state intervals and durable WhatsApp outcomes. Routine polling stays out;
-        bridge changes and material delivery revisions stay in.
+        Bridge changes and WhatsApp delivery results are saved here. Routine background checks are not shown.
       </p>
     </div>
     <button class="secondary-action export-action" onclick={exportVisible} disabled={!filtered.length && !filteredBridgeIntervals.length}>
-      <Download size={17} aria-hidden="true" /> Export visible JSON
+      <Download size={17} aria-hidden="true" /> Export results
     </button>
   </header>
 
   {#if $snapshot}
     <div class="log-register">
-      <form class="log-filters" onsubmit={(event) => event.preventDefault()} aria-label="Filter dispatch log">
+      <form class="log-filters" onsubmit={(event) => event.preventDefault()} aria-label="Filter activity history">
         <label class="search-field">
           <Search size={18} strokeWidth={1.5} aria-hidden="true" />
           <span class="visually-hidden">Search title, channel, or state</span>
@@ -159,10 +158,10 @@
       <section class="history-section" aria-labelledby="bridge-history-heading">
         <header class="register-heading">
           <div>
-            <p class="registration-label">Bridge status reporting</p>
-            <h2 id="bridge-history-heading">Bridge openings</h2>
+            <p class="registration-label">Bridge history</p>
+            <h2 id="bridge-history-heading">Bridge movements</h2>
           </div>
-          <p>Target and upstream open/closed intervals retained for prediction history.</p>
+          <p>Recorded up and down states for Brickell and upstream bridges.</p>
         </header>
         {#if filteredBridgeIntervals.length}
           <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -219,10 +218,10 @@
       <section class="history-section" aria-labelledby="delivery-history-heading">
         <header class="register-heading">
           <div>
-            <p class="registration-label">Outbound history</p>
-            <h2 id="delivery-history-heading">Delivery revisions</h2>
+            <p class="registration-label">Message history</p>
+            <h2 id="delivery-history-heading">Message delivery</h2>
           </div>
-          <p>Material WhatsApp notices and provider acceptance outcomes.</p>
+          <p>WhatsApp alerts and their delivery results.</p>
         </header>
 
       {#if filtered.length}
@@ -232,13 +231,13 @@
           bind:this={dispatchScroll}
           tabindex="0"
           role="region"
-          aria-label="Dispatch records, scrollable"
+          aria-label="Message delivery records, scrollable"
         >
         <div class="dispatch-table">
           <div class="dispatch-head" aria-hidden="true">
             <span>Updated</span>
-            <span>Channel and revision</span>
-            <span>Attention</span>
+            <span>Channel and update</span>
+            <span>Priority</span>
             <span>Destinations</span>
             <span>Outcome</span>
           </div>
@@ -259,7 +258,7 @@
                     <span>{destination}</span>
                   {/each}
                 {:else}
-                  <em>No route</em>
+                  <em>No destination</em>
                 {/if}
               </div>
               <div>
@@ -279,14 +278,14 @@
         </div>
         </div>
         <p class="scroll-count" aria-live="polite">
-          Showing {visibleDispatches.length} of {filtered.length} dispatches
+          Showing {visibleDispatches.length} of {filtered.length} messages
         </p>
       {:else}
         <div class="empty-log">
-          <h2>{$snapshot.dispatches.length ? 'No dispatches match' : 'No durable messages yet'}</h2>
+          <h2>{$snapshot.dispatches.length ? 'No messages match' : 'No messages yet'}</h2>
           <p>{$snapshot.dispatches.length
-            ? 'Clear the search or broaden the channel and outcome filters. The stored log has not been changed.'
-            : 'A row appears after an interrupt-eligible material change enters the WhatsApp outbox. Routine refreshes and native notices stay out of this ledger.'}</p>
+            ? 'Clear the search or change the channel and outcome filters. Saved history has not been changed.'
+            : 'WhatsApp alerts will appear here after the app sends them. Routine refreshes and desktop notifications are not included.'}</p>
           <button
             class="secondary-action"
             onclick={() => {
@@ -300,7 +299,7 @@
       </section>
     </div>
   {:else}
-    <div class="empty-sheet" aria-busy="true"><h2>Loading dispatch log</h2><p>Waiting for a complete engine snapshot.</p></div>
+    <div class="empty-sheet" aria-busy="true"><h2>Loading history</h2><p>Waiting for the latest app status.</p></div>
   {/if}
 </section>
 

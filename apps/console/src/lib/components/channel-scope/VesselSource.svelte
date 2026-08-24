@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { KeyRound, ShieldCheck } from '@lucide/svelte';
+  import { ExternalLink, KeyRound, ShieldCheck } from '@lucide/svelte';
 
   import { clearAisstreamApiKey, getAisstreamStatus, getPreferences, setAisstreamApiKey } from '$lib/api';
   import { notice, preferences } from '$lib/state';
@@ -97,6 +97,13 @@
          to a good share of people and prints as grey. -->
     <span class="health" data-tone={tone}><i aria-hidden="true"></i>{word}</span>
   </header>
+
+  <p class="key-help">
+    <a href="https://aisstream.io/account" target="_blank" rel="noopener noreferrer">
+      Get or manage AISStream API keys <ExternalLink size={13} strokeWidth={1.8} aria-hidden="true" />
+    </a>
+    Paste the key this app should use below.
+  </p>
 
   <div class="key-row">
     <label>
@@ -199,6 +206,27 @@
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
+  }
+
+  .key-help {
+    margin: -2px 0 0;
+    color: var(--muted);
+    font-size: var(--type-caption);
+    line-height: 1.45;
+  }
+
+  .key-help a {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--channel);
+    font-weight: 650;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+  }
+
+  .key-help a:hover {
+    color: var(--marine);
   }
 
   .key-row label {

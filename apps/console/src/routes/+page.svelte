@@ -1,12 +1,13 @@
 <!--
 THESIS: One question — keep driving, or turn off — answered by the span's state and the traffic coming to change it.
 OWN-WORLD: Cool weatherproof paper, marine and graphite rules, condensed instrument type, corridor violet for AIS, one rationed amber mark.
-STORY: Read the state, then read the water that will change it. Nothing else.
-FIRST VIEWPORT: A decision band over the river, both inside one tile, no scroll.
-FORM: Distilled from the Live Time Rail composition — channel roster, signal board and delivery ledger moved to the surfaces that own them.
+STORY: Read the state, then the water that may change it, then every other current notice in priority order.
+FIRST VIEWPORT: A decision band over the river with a compact current-notices rail beneath it.
+FORM: Brickell Interchange remains the anchor; one ruled notice rail gives active non-bridge signals a shared live surface.
 -->
 <script lang="ts">
   import LiveDeck from '$lib/components/LiveDeck.svelte';
+  import SignalBoard from '$lib/components/SignalBoard.svelte';
   import { loadApp, loadError, loading, snapshot } from '$lib/state';
 </script>
 
@@ -14,7 +15,7 @@ FORM: Distilled from the Live Time Rail composition — channel roster, signal b
   <title>Live · BrickellStatus</title>
   <meta
     name="description"
-    content="Current bridge prediction, supporting evidence, channel health, and delivery state."
+    content="Current bridge prediction, supporting vessels, and active notices in priority order."
   />
 </svelte:head>
 
@@ -35,16 +36,18 @@ FORM: Distilled from the Live Time Rail composition — channel roster, signal b
       shapes — three readings of one fact, none of which said what was on the
       water.
     -->
-    <!-- Decision and river are one reading, so they are one tile, sized to
-         the viewport. Everything below is reference the reader scrolls to. -->
+    <!-- Decision and river remain one reading. Current non-bridge notices get
+         one shared rail rather than disappearing into a configuration desk. -->
     <LiveDeck
       decision={$snapshot.decision}
       corridor={$snapshot.riverCorridor}
       vesselTracks={$snapshot.vesselTracks}
       intervals={$snapshot.bridgeIntervals}
       crossings={$snapshot.bridgeCrossings}
+      generatedAt={$snapshot.generatedAt}
       localTimeZone={$snapshot.localTimeZone}
     />
+    <SignalBoard channels={$snapshot.channels} generatedAt={$snapshot.generatedAt} />
     <footer class="live-footer">
       <span>All times · {$snapshot.localTimeZone}</span>
       <span>Supports a decision; does not guarantee an opening.</span>
@@ -63,6 +66,20 @@ FORM: Distilled from the Live Time Rail composition — channel roster, signal b
   .live-console {
     min-height: calc(100vh - 72px);
     background: var(--paper);
+  }
+
+  /* At the desktop composition, the deck and its footer share the remaining
+     window instead of each claiming space after the other. The manifest keeps
+     its own scroll container inside the first row. */
+  @media (min-width: 1181px) {
+    .live-console {
+      display: grid;
+      height: calc(100vh - 72px);
+      height: calc(100dvh - 72px);
+      min-height: 0;
+      grid-template-rows: minmax(0, 1fr) auto auto;
+      overflow: hidden;
+    }
   }
 
   .live-footer {

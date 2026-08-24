@@ -15,6 +15,10 @@ colors:
   success: "#176B47"
   success-sheet: "#DCEEE5"
   danger: "#8D2D28"
+  corridor-violet: "#5B3E8C"
+  corridor-wash: "rgba(110, 79, 163, 0.14)"
+  corridor-rule: "rgba(91, 62, 140, 0.42)"
+  corridor-sheet: "#ECE6F5"
   nav-muted: "#CBD8E2"
   nav-subdued: "#B9CAD7"
   signal-green: "#4AC18A"
@@ -72,6 +76,11 @@ typography:
     fontSize: "1.75rem"
     fontWeight: 700
     lineHeight: 0.95
+  status:
+    fontFamily: "Barlow Condensed Variable, Barlow Condensed, Arial Narrow, sans-serif"
+    fontSize: "clamp(2rem, 3vw, 3.1rem)"
+    fontWeight: 700
+    lineHeight: 0.88
   display-compact:
     fontFamily: "Barlow Condensed Variable, Barlow Condensed, Arial Narrow, sans-serif"
     fontSize: "clamp(2.7rem, 5.5vw, 5.4rem)"
@@ -141,12 +150,13 @@ components:
 
 BrickellStatus turns an operator's weatherproof log sheet into a precise personal signal instrument. It feels written for daylight, motion, and consequential glances: cool paper, marine ink, clipped evidence strips, registration marks, and one live time rail. The system is tactile without cosplay and civic without becoming institutional.
 
-The visual hierarchy always answers three questions in order: what is happening, when might it matter, and why does the system believe it. Density belongs in the evidence log and configuration surfaces; the current decision remains large, plain, and calm. The web interface and monochrome e-paper layout share the same typography, line hierarchy, state words, and strip grammar rather than imitating one another pixel for pixel.
+The visual hierarchy always answers three questions in order: what is happening, when might it matter, and why does the system believe it. Density belongs in history and configuration surfaces; the current decision remains large, plain, and calm. The web interface and monochrome e-paper layout share the same typography, line hierarchy, state words, and strip grammar rather than imitating one another pixel for pixel. Visible copy uses ordinary words; technical implementation terms belong in developer logs and exported details, not primary headings or actions.
 
 **Key Characteristics:**
 
 - Weatherproof cool-paper fields, never warm stationery.
 - Condensed status lettering paired with highly legible civic body text.
+- Short, common labels that remain readable at a glance and never split a status word.
 - Evidence physically registers against a live time rail.
 - Safety amber is a scarce interrupt marker, not ambient decoration.
 - Square, clipped, ruled components with minimal optical depth.
@@ -163,6 +173,10 @@ The palette is a restrained daylight instrument: cold paper and graphite, with m
 ### Secondary
 
 - **Safety Amber** (`#F2A900`): Reserved for interrupt-eligible signals, warning edges, and the single item requiring action now.
+
+### Tertiary
+
+- **Corridor Violet** (`#5B3E8C`): The live Miami River route, AIS vessel courses, and vessel marks. It shows where vessel data came from, never urgency or severity.
 
 ### Neutral
 
@@ -190,6 +204,7 @@ The palette is a restrained daylight instrument: cold paper and graphite, with m
 - **Display** (700, `clamp(3.5rem, 6.5vw, 6rem)`, `0.78`): One current state and its ETA; never marketing copy.
 - **Headline** (700, `clamp(2rem, 5vw, 4.5rem)`, `0.92`): Channel titles, alert titles, and major section conclusions.
 - **Title** (650, `1.25rem`, `1.1`): Strip titles and configuration group names.
+- **Status** (700, `clamp(2rem, 3vw, 3.1rem)`, `0.88`): System and hardware states that must remain whole at ordinary widths.
 - **Body** (450, `1rem`, `1.5`): Explanations and source details, limited to about 68 characters per line.
 - **Body Small** (450, `0.875rem`, `1.5`): Dense configuration explanations that still need ordinary sentence legibility.
 - **Label** (600, `0.8125rem`, `0.09em`, uppercase): Source, time, state, and control labels.
@@ -198,11 +213,13 @@ The palette is a restrained daylight instrument: cold paper and graphite, with m
 
 **The Instrument Voice Rule.** Condensed uppercase states facts; Public Sans sentences explain them. Never set paragraphs in the display face.
 
+**The Plain Status Rule.** Use the simplest accurate term: bridge `UP`, `DOWN`, or `NO READING`; system `WORKING`, `NEEDS ATTENTION`, or `OFFLINE`; actions such as `REFRESH`, `CONNECT`, and `DISCONNECT`. Never expose internal terms such as poll, collector circuit, engine verdict, dispatch, or route as the primary label when a common word says the same thing.
+
 ## Layout
 
 The primary surface is a working log organized around an off-center vertical time rail. The current decision owns the broad field; evidence strips dock to the rail; source health and controls occupy a narrower ledger column. Desktop uses a 12-column grid with a 3/5/4 working split. Compact widths preserve the decision first, collapse evidence beneath it in time order, and convert the rail from vertical to horizontal only when the remaining width would make labels unreadable.
 
-Configuration surfaces retain the ruled ledger: channel index at left, selected channel form in the central work area, delivery policy at right. Spacing follows a 4px base with 16px control rhythm, 24–40px group rhythm, and 64px or more between major log sections.
+Configuration surfaces retain the ruled ledger: channel index at left, selected channel form in the central work area, and a preview or summary at right. Spacing follows a 4px base with 16px control rhythm, 24–40px group rhythm, and 64px or more between major sections. Long status words stay intact; reflow the surrounding grid or reduce within the documented Status scale before allowing a mid-word break.
 
 ## Elevation & Depth
 
@@ -231,7 +248,7 @@ Corners stay square or receive a 2px registration radius; form controls may use 
 ### Cards / Containers
 
 - **Corner Style:** 2px maximum.
-- **Background:** Frost sheets on cool paper; graphite inversion only for a confirmed open bridge or critical official alerts.
+- **Background:** Frost sheets on cool paper; graphite inversion only for a confirmed bridge-up reading or critical official alerts.
 - **Shadow Strategy:** No resting card shadows. Movable dispatch strips may use the contact shadow from Elevation.
 - **Border:** 1px steel rule, with stronger graphite registration at the owning edge.
 - **Internal Padding:** 16px compact, 24px standard, 40px for the current-decision field.
@@ -254,17 +271,46 @@ Every observation and delivered notice uses the same strip anatomy: source mark,
 
 Confidence is a rectangular ink stamp containing the numeric score and a word (`LOW`, `MODERATE`, `HIGH`, `CONFIRMED`). It is never a speedometer, radial gauge, or unexplained percentage. The explanation remains adjacent or one action away.
 
-### Location Desk
+### Map
 
-Location is a visual act before it is a number. Any configuration that materially depends on place uses the shared global MapLibre surface: world pan/zoom, search, a written active-location register, saved markers, and one draggable amber candidate pin. A search result or one-shot device sample is staged first, tuned on the map, given a human name, assigned explicit collector gates, and only then saved. Latitude, longitude, time zone, and radius remain available under an **Advanced coordinates** disclosure for engineers and recovery. Attribution is always visible; an unavailable WebGL or tile service falls back to search and the saved-area ledger without pretending the map is live.
+Location is visual before it is numeric. Place-based settings use the shared MapLibre surface with pan/zoom, search, saved markers, real AIS vessel positions, and one draggable amber candidate pin. Search or one-shot device location stages a pin before saving. Latitude, longitude, time zone, and radius remain under **Advanced coordinates**. Attribution stays visible, and an unavailable map falls back to search and the saved-place list without pretending vessel positions are live.
 
-### Circuit Gate
+Map also owns a persistent **Known Openers** catalog. It is durable history, not a filtered copy of the current AIS window, so a vessel remains browsable when it is no longer live or nearby. Each catalog row names the vessel or its MMSI and summarizes its confirmed Brickell opening record; selecting it opens the same vessel detail surface used by live marks, with identity, first and last sighting, confirmed bridge impacts, and recent passage history. Live readings and saved history occupy visibly separate sections so an old opening can never read as a current approach.
 
-Every channel and independently runnable sub-rule has a written operational gate. `RUNNING`, `PARKED`, `UNAVAILABLE`, and `NEEDS ATTENTION` are distinct from display presence. Turning a gate off stops its owned polling and evaluation while leaving its settings editable. Active gates use a success registration edge; parked gates use steel; faults use the danger edge. This pattern is shared by bridge evidence adapters, rain, wind, official alerts, hurricanes, news, earthquakes, markets, device routes, and WhatsApp consent.
+### Vessel Marks
 
-### Device Proof Desk
+Vessels are authored side-profile drawings, not generic map pins. The outer silhouette must identify the class before a user reads its label: a tug has a deep workboat hull and tall pilothouse; cargo has an aft house and stacked container mass; a tanker has a long flush deck and manifold; a sailboat has a curved hull, keel, and separated sloop rig; passenger, fishing, pilot, and yacht profiles each retain their own working anatomy. A missing or unrecognized type uses one complete Miami flybridge yacht. It is never dashed, hollow, ghosted, or marked with a question symbol.
 
-Hardware setup is a three-step ruled procedure—wake, discover, prove—not a serial-port form. USB and BLE candidates identify their actual transport; Bluetooth copy describes direct GATT connection rather than promising OS bonding. A route becomes healthy only after a physical `ACK INK1`. Friendly names, ports, and UUID-adjacent details are advanced selectors. The same connected/connecting/unavailable/error vocabulary appears in the Outputs screen and platform tray.
+Every profile shares a 44 × 26 drawing register and one waterline, then renders at the real 48–68 px live-view sizes. Recognition comes from bow, stern, sheer, cabin, and three to five class-defining details—not ornamental linework that only survives when zoomed in. Meaningful strokes remain at least 0.9 px at final size, windows remain at least 2 px, and masts or working gear never clip the view box.
+
+The normal two-tone construction is a Corridor Violet hull and working gear, White superstructure, Marine glazing, and a restrained Marine register shadow. A **known opener** keeps that normal violet construction: it is the durable historical fact that Brickell has gone up for that vessel before, not a statement about where it is now. State the history in words as `KNOWN OPENER`; never turn the hull amber merely because it is in the catalog.
+
+Amber Ink is reserved for a **current likely opener**: a live track whose present route and bridge-impact evidence say it is likely to raise Brickell on this passage. Pair amber with the written state `LIKELY TO OPEN BRICKELL`, and remove both as soon as the live judgement clears. A known opener moving away stays violet; a vessel with no recorded opening may become amber when its current evidence supports likely impact. If several vessels contribute to one predicted opening, they form one amber action cluster rather than spending amber on unrelated vessel history.
+
+The Live schematic and its one scrollable right-hand register contain all and only current tracks the engine says will cross Brickell Avenue Bridge. “All” means no arbitrary top-three cap, priority cutoff, `+N` summary, second vessel list, or hidden qualifying vessel; it does not mean every AIS contact in Miami. Moving-away, moored, off-corridor, and no-path traffic belongs on Map and in stored history, not on the Brickell decision surface. An AIS sailing or yacht type may strengthen the opening-impact estimate after a route is committed, but vessel type alone never turns inbound bay traffic into a Brickell passage. The register states the full qualifying count, gives every row a stable two-digit number, names the vessel or falls back to its MMSI, and shows its recognizable type, direction, speed in knots, and Brickell ETA when one is supported. Durable `KNOWN OPENER` history remains separate from current `LIKELY TO OPEN BRICKELL` impact.
+
+Every vessel honestly positioned on the schematic repeats its register number beside a compact detail plate containing its name, direction, knots, and ETA. Place all plates in one global collision pass: like matching-polarity magnets, plates may not cover any route ribbon, Brickell or another bridge, another vessel, or another plate. A leader connects each displaced plate to its exact AIS hull; if no legal plate position exists, the numbered hull and complete register row remain rather than forcing an overlap. Put two unmistakable chevrons ahead of each hull along its actual route tangent—never behind it and never as a line through the vessel. Selecting a register row emphasizes its matching hull and plate without moving the AIS position.
+
+Vessel color never invents a class, confidence level, or broadcast state. Exact diagonal travel belongs to the adjacent course arrow; the illustrated vessel stays upright and mirrors horizontally to face upriver or downriver.
+
+### Channel Status
+
+Every channel has a written `ON`, `OFF`, `UNAVAILABLE`, or `NEEDS ATTENTION` state separate from whether it appears on the display. Turning a channel off stops updates and alerts while leaving its settings editable. Active states use a success registration edge, off uses steel, and faults use the danger edge. Detailed source names and failure reasons remain available on System Health.
+
+### E-Paper Headline Card
+
+A headline card is a compact front page, not a generic alert. Its header names
+`NEWS` and urgency; the ruled subject row names the publisher; the display face
+gets up to two headline lines; and the lower field gets up to three smaller
+lines of synopsis. Freshness remains in the bottom tape. Do not spend the
+synopsis field repeating the headline, drawing an action box around a publisher,
+or listing “related” stories that cannot be opened from the panel. When a feed
+supplies no synopsis, show only truthful item metadata such as byline and
+publication age—never manufacture story detail.
+
+### Panel Connection
+
+Panel setup is a three-step procedure—switch it on, find it, and send a test frame. USB and Bluetooth candidates identify the real connection type. A panel becomes ready only after the hardware acknowledges a complete frame. Names and ports are shown when they help identify the device; UUID-like details stay secondary. The same connected, connecting, unavailable, and error words appear in Outputs and the platform tray.
 
 ## Do's and Don'ts
 
@@ -275,6 +321,10 @@ Hardware setup is a three-step ruled procedure—wake, discover, prove—not a s
 - **Do** let evidence strips carry density while the current-decision field keeps substantial empty space.
 - **Do** expose source age, offline state, and user routing policy wherever a signal appears.
 - **Do** reserve amber for an item that can genuinely interrupt the user's attention.
+- **Do** use `UP`, `DOWN`, and `NO READING` for bridge position, with `ROAD MOVING` or `ROAD STOPPED` only as the consequence.
+- **Do** label an immediate data update `REFRESH`; reserve source and transport jargon for exported details or developer logs.
+- **Do** keep side-profile vessel art upright and mirror it left or right; a separate route arrow carries the exact diagonal heading.
+- **Do** judge vessel marks unlabeled at 48, 56, and 68 px, including mirrored and expected-opener states.
 
 ### Don't:
 
@@ -283,3 +333,7 @@ Hardware setup is a three-step ruled procedure—wake, discover, prove—not a s
 - **Don't** show schedule eligibility as a predicted bridge opening.
 - **Don't** rely on color, iconography, or a confidence number without plain-language state.
 - **Don't** rasterize interface text from the concept board; core UI remains semantic and accessible.
+- **Don't** split a status word to preserve a grid; reflow the grid and keep the word intact.
+- **Don't** use implementation vocabulary as interface personality. Say channel, alert, message, panel, source, and refresh unless greater precision is genuinely necessary.
+- **Don't** rotate side-profile boats as though they were top-down hulls; cabins, masts, and readable details must never turn upside down.
+- **Don't** use a ghost outline, dashed hull, question mark, or AIS/broadcast decoration when a vessel type is unknown; draw the generic Miami yacht and keep uncertainty in the adjacent words.

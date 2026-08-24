@@ -29,3 +29,13 @@
 
 # Same reasoning for our own JNI entry point: nothing in Kotlin calls it.
 -keep class com.cmiami.brickellstatus.NativeBridge { *; }
+
+# WatchService.publishStatus is the same case and was missed: Rust resolves it
+# by name (see publish_status in src-tauri/src/android_bridge.rs) and no Kotlin
+# caller exists, so R8 strips it. The class itself survives because the manifest
+# declares it as a service, which is why the symptom was a NoSuchMethodError on
+# the first status update rather than a missing class at startup -- a crash that
+# only ever reproduced in a minified build.
+-keep class com.cmiami.brickellstatus.WatchService {
+    public static void publishStatus(java.lang.String, java.lang.String);
+}

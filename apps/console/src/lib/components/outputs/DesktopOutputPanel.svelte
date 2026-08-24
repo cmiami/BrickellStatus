@@ -10,8 +10,8 @@
     <div class="route-mark"><MonitorUp size={26} strokeWidth={1.45} aria-hidden="true" /></div>
     <div>
       <h2 id="desktop-heading">Desktop notices</h2>
-      <p>Native local notifications remain available when messaging is not configured or is offline.</p>
-      <small>Best-effort submission: the OS does not return a reliable displayed or read receipt.</small>
+      <p>Urgent changes from every enabled channel are submitted as native notifications.</p>
+      <small>Current notices always remain on Live. Native delivery is best effort because the OS does not return a reliable displayed receipt.</small>
     </div>
     <span class="status-word" data-state={output?.state ?? 'offline'}>{output?.state ?? 'offline'}</span>
   </header>

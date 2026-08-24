@@ -46,9 +46,8 @@ function preferencesFixture(): AppPreferences {
     display: {
       transport: 'preview',
       serialPort: 'auto',
-      bleName: 'Tender E213',
+      bleName: 'BrickellStatus 26B4',
       dwellSeconds: 30,
-      returnHomeAfter: 2,
       fullRefreshEvery: 10,
       orientation: 'upright'
     },
@@ -116,20 +115,20 @@ describe('WhatsApp recipient consent', () => {
   });
 });
 
-describe('display connection safety', () => {
-  it('starts in Preview and explains the unauthenticated BLE frame boundary', () => {
+describe('display connection default', () => {
+  // Nothing reaches the hardware until the reader picks a panel: the default
+  // draws frames on screen only. The GATT write boundary this used to also
+  // assert is unchanged and still documented in SECURITY.md; it is no longer
+  // repeated on the settings page.
+  it('starts with no panel selected, so no bytes are written', () => {
     const configured = preferencesFixture();
     preferences.set(configured);
 
     render(OutputsPage);
 
-    expect(screen.getByRole('radio', { name: /Render only/i })).toHaveAttribute(
+    expect(screen.getByRole('radio', { name: /No panel/i })).toHaveAttribute(
       'aria-checked',
       'true'
     );
-    expect(
-      screen.getByRole('heading', { name: /Bluetooth frame writes are not authenticated/i })
-    ).toBeInTheDocument();
-    expect(screen.getByText(/does not prove who sent it/i)).toBeInTheDocument();
   });
 });

@@ -14,11 +14,21 @@ CREATE TABLE IF NOT EXISTS bridge_state_intervals (
     state TEXT NOT NULL CHECK (state IN ('up', 'down', 'unknown')),
     started_at_ms INTEGER NOT NULL,
     ended_at_ms INTEGER,
+    -- Most recent successful reading that explicitly repeated this state.
+    -- `ended_at_ms` alone is not proof of coverage: an app can disappear for
+    -- hours and only learn that the state changed when it returns.
+    last_confirmed_at_ms INTEGER NOT NULL,
+    -- Why this interval began. Session/gap boundaries deliberately split an
+    -- unchanged state so training never invents continuity across downtime.
+    start_reason TEXT NOT NULL CHECK (
+        start_reason IN ('initial_observation', 'state_change', 'session_start', 'continuity_gap', 'legacy')
+    ),
     -- Engine run that observed this interval. Distinguishes a genuine bridge
     -- transition from an artifact of the app restarting, which otherwise write
     -- identical rows. NULL for rows recorded before sessions were tracked.
     session_id TEXT,
     PRIMARY KEY (source_id, bridge_key, started_at_ms),
+    CHECK (last_confirmed_at_ms >= started_at_ms),
     CHECK (ended_at_ms IS NULL OR ended_at_ms >= started_at_ms)
 );
 
@@ -76,7 +86,11 @@ CREATE TABLE IF NOT EXISTS ais_vessel_ledger (
     mmsi TEXT PRIMARY KEY NOT NULL,
     name TEXT,
     vessel_class TEXT,
+    call_sign TEXT,
+    imo_number INTEGER,
+    destination TEXT,
     length_meters REAL,
+    beam_meters REAL,
     draught_meters REAL,
     transits_opened INTEGER NOT NULL DEFAULT 0 CHECK (transits_opened >= 0),
     transits_fits_under INTEGER NOT NULL DEFAULT 0 CHECK (transits_fits_under >= 0),
@@ -105,13 +119,14 @@ CREATE INDEX IF NOT EXISTS ais_transits_unresolved
     ON ais_transits(crossed_at_ms)
     WHERE outcome IS NULL;
 
--- Where hulls actually ran, kept for a week so the charted centreline can be
+-- Where hulls actually ran, kept for a year so the charted centreline can be
 -- calibrated against observed water rather than traced once and trusted
 -- (docs/AIS_DISCOVERY.md §6). The projection is stored beside the raw fix:
 -- `offset_meters` is the distance from the charted branch, so a leg the chart
 -- has in the wrong place shows up as a run of fixes that all miss the same
 -- way. Fixes are thinned to one per vessel per 30 s on the way in, which is
--- finer than any hull changes position, and pruned at seven days.
+-- finer than any hull changes position. Fixes for vessels proven to require a
+-- Brickell opening are retained indefinitely as their movement catalog.
 CREATE TABLE IF NOT EXISTS ais_track_fixes (
     mmsi TEXT NOT NULL,
     observed_at_ms INTEGER NOT NULL,
@@ -130,6 +145,34 @@ CREATE TABLE IF NOT EXISTS ais_track_fixes (
 
 CREATE INDEX IF NOT EXISTS ais_track_fixes_recent
     ON ais_track_fixes(observed_at_ms);
+
+-- A compact, versioned record of what the predictor said at the time. The
+-- runtime records at most one periodic sample per minute plus material state
+-- changes; keeping the score, ETA and compact evidence arithmetic makes
+-- false alarms, misses and timing error measurable after the bridge outcome
+-- is known instead of overwriting the only prediction in app state.
+CREATE TABLE IF NOT EXISTS bridge_forecast_samples (
+    target_key TEXT NOT NULL,
+    evaluated_at_ms INTEGER NOT NULL,
+    minute_bucket_ms INTEGER NOT NULL,
+    model_version TEXT NOT NULL,
+    state TEXT NOT NULL,
+    predictive_score_bps INTEGER NOT NULL CHECK (predictive_score_bps BETWEEN 0 AND 10000),
+    confidence_bps INTEGER NOT NULL CHECK (confidence_bps BETWEEN 0 AND 10000),
+    eta_min_minutes INTEGER,
+    eta_max_minutes INTEGER,
+    schedule_mode TEXT NOT NULL,
+    contribution_bps_json TEXT NOT NULL CHECK (json_valid(contribution_bps_json)),
+    source_freshness_json TEXT NOT NULL CHECK (json_valid(source_freshness_json)),
+    session_id TEXT NOT NULL,
+    PRIMARY KEY (target_key, minute_bucket_ms),
+    CHECK (minute_bucket_ms = evaluated_at_ms - (evaluated_at_ms % 60000)),
+    CHECK (eta_min_minutes IS NULL OR eta_min_minutes >= 0),
+    CHECK (eta_max_minutes IS NULL OR eta_max_minutes >= COALESCE(eta_min_minutes, 0))
+);
+
+CREATE INDEX IF NOT EXISTS bridge_forecast_samples_training
+    ON bridge_forecast_samples(target_key, evaluated_at_ms, model_version);
 
 -- Ledger seed: the four vessels whose crossings were observed end-to-end with
 -- FL511 confirmation during the 2026-08-17 discovery session

@@ -1,17 +1,19 @@
 <script lang="ts">
   import { page } from '$app/stores';
-  import { Check, ChevronDown, ChevronUp, MapPinned, RadioTower, Save } from '@lucide/svelte';
+  import { MapPinned, RadioTower } from '@lucide/svelte';
   import { onMount } from 'svelte';
 
   import ChannelScopeEditor from '$lib/components/ChannelScopeEditor.svelte';
   import EpaperPreview from '$lib/components/EpaperPreview.svelte';
   import SwitchField from '$lib/components/SwitchField.svelte';
-  import { persistPreferences, preferences, saving, snapshot } from '$lib/state';
-  import type { AppPreferences, ChannelPreference, DestinationId, SurfacePresence } from '$lib/types';
+  import { persistPreferences, preferences, snapshot } from '$lib/state';
+  import type { AppPreferences, ChannelPreference } from '$lib/types';
 
   let draft = $state<AppPreferences | null>(null);
   let selectedId = $state('');
   let initializedFromStore = $state(false);
+  let saveInFlight = false;
+  let saveQueued = false;
 
   $effect(() => {
     if ($preferences && !initializedFromStore) {
@@ -24,28 +26,6 @@
   let selected = $derived(draft?.profile.channels.find((channel) => channel.id === selectedId));
   let liveSelected = $derived($snapshot?.channels.find((channel) => channel.id === selectedId));
 
-  const presenceOptions: { id: SurfacePresence; label: string; detail: string }[] = [
-    { id: 'home', label: 'Home', detail: 'The display returns here after routine frames.' },
-    { id: 'rotation', label: 'Rotation', detail: 'Appears in normal user-ordered rotation.' },
-    { id: 'active_only', label: 'When active', detail: 'Appears only while material is current.' },
-    { id: 'messages_only', label: 'Messages only', detail: 'Never enters the e-paper rotation.' },
-    { id: 'off', label: 'Off', detail: 'Collected only when another enabled module needs it.' }
-  ];
-
-  const destinations: { id: DestinationId; label: string }[] = [
-    { id: 'epaper', label: 'E-paper' },
-    { id: 'whatsapp', label: 'WhatsApp' },
-    { id: 'desktop', label: 'Desktop notice' }
-  ];
-
-  function toggleDestination(destination: DestinationId, enabled: boolean) {
-    if (!selected) return;
-    selected.destinations = enabled
-      ? [...new Set([...selected.destinations, destination])]
-      : selected.destinations.filter((item) => item !== destination);
-    void saveNow();
-  }
-
   function replaceSelected(channel: ChannelPreference, commit = false) {
     if (!draft) return;
     const index = draft.profile.channels.findIndex((item) => item.id === channel.id);
@@ -56,22 +36,25 @@
     else scheduleSave();
   }
 
-  function moveSelected(direction: -1 | 1) {
-    if (!draft || !selected) return;
-    const index = draft.profile.channels.findIndex((channel) => channel.id === selected.id);
-    const nextIndex = index + direction;
-    if (nextIndex < 0 || nextIndex >= draft.profile.channels.length) return;
-    [draft.profile.channels[index], draft.profile.channels[nextIndex]] = [
-      draft.profile.channels[nextIndex],
-      draft.profile.channels[index]
-    ];
-    draft.profile.preset = 'custom';
-    scheduleSave();
-  }
-
   async function save() {
     if (!draft) return;
-    await persistPreferences($state.snapshot(draft));
+    if (saveInFlight) {
+      saveQueued = true;
+      return;
+    }
+
+    saveInFlight = true;
+    const payload = $state.snapshot(draft);
+    const submittedFingerprint = JSON.stringify(payload);
+    try {
+      await persistPreferences(payload);
+    } finally {
+      saveInFlight = false;
+      const currentFingerprint = draft ? JSON.stringify($state.snapshot(draft)) : '';
+      const anotherSaveIsNeeded = saveQueued || currentFingerprint !== submittedFingerprint;
+      saveQueued = false;
+      if (anotherSaveIsNeeded) void save();
+    }
   }
 
   // A switch is a decision, not a draft: it commits the moment it is thrown.
@@ -103,9 +86,21 @@
     }
   });
 
-  const unsaved = $derived(
-    !!draft && !!$preferences && JSON.stringify($state.snapshot(draft)) !== JSON.stringify($preferences)
-  );
+  const draftFingerprint = $derived(draft ? JSON.stringify($state.snapshot(draft)) : '');
+  const savedFingerprint = $derived($preferences ? JSON.stringify($preferences) : '');
+
+  $effect(() => {
+    // Depend on the full fingerprint, not merely an `unsaved` boolean. Every
+    // keystroke therefore restarts the settle window, even after the first edit
+    // has already made the page dirty.
+    if (!initializedFromStore || !draftFingerprint || !savedFingerprint) return;
+    if (draftFingerprint === savedFingerprint) {
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = undefined;
+      return;
+    }
+    scheduleSave();
+  });
 </script>
 
 <svelte:head><title>Channels · BrickellStatus</title></svelte:head>
@@ -113,34 +108,25 @@
 <section class="page-sheet channels-page">
   <header class="page-heading-row">
     <div>
-      <p class="registration-label">Signal roster</p>
-      <h1 class="sheet-heading">Choose what earns space</h1>
+      <p class="registration-label">Channels</p>
+      <h1 class="sheet-heading">Choose what to track</h1>
       <p class="sheet-intro">
-        Appearance, interruption, and delivery are separate decisions. Disabling a screen does not silently
-        disable a safety dependency, and enabling a feed does not grant it permission to message you.
+        Turn on what you want to watch. Current items appear automatically, and urgent events move to the front
+        until they pass.
       </p>
     </div>
     <div class="heading-actions">
       <a class="secondary-action" href="/map"><MapPinned size={17} aria-hidden="true" /> Open map</a>
       <!-- No Save button: every change on this page applies itself. The status
            exists so "applied" is something the reader can see, not assume. -->
-      <p class="apply-state" aria-live="polite" data-state={$saving || unsaved ? 'working' : 'applied'}>
-        {#if $saving}
-          <Save size={15} aria-hidden="true" /> Applying…
-        {:else if unsaved}
-          <Save size={15} aria-hidden="true" /> Applying changes
-        {:else}
-          <Check size={15} aria-hidden="true" /> All changes applied
-        {/if}
-      </p>
     </div>
   </header>
 
   {#if draft && selected}
     <div class="channel-workbench">
-      <aside class="channel-index" aria-label="Channel roster">
+      <aside class="channel-index" aria-label="Channels">
         <div class="index-heading">
-          <span>Channel</span><span>Collection</span>
+          <span>Channel</span><span>Status</span>
         </div>
         {#each draft.profile.channels as channel (channel.id)}
           <button
@@ -164,38 +150,30 @@
             <h2>{selected.title}</h2>
             <p>{liveSelected?.summary ?? 'No live snapshot is available for this channel.'}</p>
           </div>
-          <div class="order-buttons" aria-label="Rotation order">
-            <button class="secondary-action" onclick={() => moveSelected(-1)} aria-label="Move channel earlier">
-              <ChevronUp size={16} aria-hidden="true" /> Earlier
-            </button>
-            <button class="secondary-action" onclick={() => moveSelected(1)} aria-label="Move channel later">
-              <ChevronDown size={16} aria-hidden="true" /> Later
-            </button>
-          </div>
         </header>
 
         <section class="editor-section">
           <div class="section-copy">
-            <p class="registration-label">Collection</p>
-            <h3>What runs</h3>
-            <p>Collection stays explicit. A disabled channel may still expose an offline reason; it never carries a stale value forward as current.</p>
+            <p class="registration-label">Updates</p>
+            <h3>Watch this channel</h3>
+            <p>On means the app keeps it current. Off stops collection, display updates, and notifications.</p>
           </div>
           <div class:enabled={selected.enabled} class="collection-gate">
             <div class="gate-state">
-              <span>Collector circuit</span>
-              <strong>{selected.enabled ? 'Running' : 'Parked'}</strong>
+              <span>Channel status</span>
+              <strong>{selected.enabled ? 'On' : 'Off'}</strong>
               <small>
                 {selected.enabled
-                  ? 'Fresh data may enter policy evaluation.'
-                  : 'No polling, evaluation, rotation, or dispatch for this channel.'}
+                  ? 'The app checks this source for new information.'
+                  : 'The app does not check, display, or send alerts for this channel.'}
               </small>
             </div>
             <SwitchField
               checked={selected.enabled}
-              label={selected.enabled ? 'Channel enabled' : 'Channel disabled'}
+              label={selected.enabled ? 'Channel on' : 'Channel off'}
               description={selected.enabled
-                ? 'Its configured collectors are allowed to run.'
-                : 'Settings remain editable without starting the source.'}
+                ? 'New data can update this channel.'
+                : 'You can still change its settings.'}
               onchange={(enabled) => {
                 selected.enabled = enabled;
                 draft!.profile.preset = 'custom';
@@ -203,31 +181,19 @@
               }}
             />
           </div>
-          <div class="two-fields">
-            <label class="field">
-              <span>Maximum accepted age</span>
-              <input type="number" min="1" max="1440" bind:value={selected.maxAgeMinutes} />
-              <small class="field-note">Minutes before the channel becomes stale.</small>
-            </label>
-            <label class="field">
-              <span>Maximum rotation items</span>
-              <input type="number" min="1" max="10" bind:value={selected.maxItems} />
-              <small class="field-note">A cap prevents news or markets from flooding the display.</small>
-            </label>
-          </div>
         </section>
 
         <section class="editor-section">
           <div class="section-copy">
-            <p class="registration-label">Content scope</p>
+            <p class="registration-label">Settings</p>
             <h3>What it watches</h3>
-            <p>Locations, source URLs, and thresholds are saved with this channel.</p>
+            <p>Choose the places, sources, or subjects that belong to this channel.</p>
           </div>
-            <ChannelScopeEditor
-              channel={selected}
-              areas={draft.areas}
-              ais={draft.ais}
-              unitSystem={draft.unitSystem}
+          <ChannelScopeEditor
+            channel={selected}
+            areas={draft.areas}
+            ais={draft.ais}
+            unitSystem={draft.unitSystem}
             onchannelchange={replaceSelected}
             onaischange={(ais) => {
               draft!.ais = ais;
@@ -244,79 +210,24 @@
           />
         </section>
 
-        <section class="editor-section">
+        <section class="editor-section automatic-section" aria-labelledby="automatic-policy-heading">
           <div class="section-copy">
-            <p class="registration-label">Presence</p>
-            <h3>Where it appears</h3>
-            <p>Presence controls the console and e-paper rotation. It does not grant interrupt or message permission.</p>
+            <p class="registration-label">Automatic</p>
+            <h3 id="automatic-policy-heading">One notice policy</h3>
+            <p>The same relevance and priority rules apply to every enabled channel.</p>
           </div>
-          <div class="choice-register" role="radiogroup" aria-label="Display presence">
-            {#each presenceOptions as option}
-              <button
-                type="button"
-                role="radio"
-                aria-checked={selected.presence === option.id}
-                onclick={() => {
-                  selected!.presence = option.id;
-                  if (option.id === 'home') draft!.profile.homeChannelId = selected!.id;
-                  draft!.profile.preset = 'custom';
-                }}
-              >
-                <strong>{option.label}</strong><span>{option.detail}</span>
-              </button>
-            {/each}
-          </div>
-          <label class="field compact-field">
-            <span>Normal dwell</span>
-            <input type="number" min="10" max="120" bind:value={selected.rotationSeconds} />
-            <small class="field-note">Seconds. Interrupt holds are controlled by event policy.</small>
-          </label>
-        </section>
-
-        <section class="editor-section">
-          <div class="section-copy">
-            <p class="registration-label">Interrupts</p>
-            <h3>What may take over</h3>
-            <p>Built-in presets map to explicit event rules. Custom rules stay parked until a detailed matrix is configured.</p>
-          </div>
-          <label class="field compact-field">
-            <span>Interrupt policy</span>
-            <select bind:value={selected.interruptPreset}>
-              <option value="recommended">Recommended</option>
-              <option value="confirmed_only">Confirmed only</option>
-              <option value="meaningful">All meaningful changes</option>
-              <option value="off">Off</option>
-              <option value="custom" disabled>Custom matrix · not configured</option>
-            </select>
-          </label>
-        </section>
-
-        <section class="editor-section">
-          <div class="section-copy">
-            <p class="registration-label">Delivery</p>
-            <h3>Where notices go</h3>
-            <p>Destinations receive only events allowed by this channel’s policy and the destination’s quiet hours.</p>
-          </div>
-          <div class="destination-register">
-            {#each destinations as destination}
-              <SwitchField
-                checked={selected.destinations.includes(destination.id)}
-                label={destination.label}
-                description={destination.id === 'whatsapp'
-                  ? 'Template-based, material-change-only messages.'
-                  : destination.id === 'epaper'
-                    ? 'Rotation or takeover according to this channel’s presence.'
-                  : 'Best-effort local notification; the OS does not return a displayed or read receipt.'}
-                onchange={(enabled) => toggleDestination(destination.id, enabled)}
-              />
-            {/each}
-          </div>
+          <ol class="automatic-policy">
+            <li><strong>Current stays visible</strong><span>Every relevant item joins the Live notices and panel set.</span></li>
+            <li><strong>Urgent moves first</strong><span>Immediate, likely events can interrupt the ordinary sequence.</span></li>
+            <li><strong>Passed means gone</strong><span>Resolved or expired items leave automatically.</span></li>
+          </ol>
+          <a class="secondary-action output-link" href="/system/outputs">Set up outputs and quiet hours →</a>
         </section>
       </div>
 
       {#if $snapshot}
         <aside class="live-preview">
-          <p class="registration-label">Selected channel frame</p>
+          <p class="registration-label">Panel preview</p>
           <EpaperPreview
             decision={$snapshot.decision}
             channel={liveSelected}
@@ -325,18 +236,16 @@
           <div class="policy-sentence">
             <RadioTower size={19} aria-hidden="true" />
             <p>
-              <strong>{selected.title}</strong> is {selected.presence.replace('_', ' ')}. It
-              {selected.interruptPreset === 'off' ? ' never interrupts' : ` uses ${selected.interruptPreset.replace('_', ' ')} interrupts`}.
-              {selected.destinations.length
-                ? ` Notices may route to ${selected.destinations.join(', ')}.`
-                : ' No outbound notices are permitted.'}
+              <strong>{selected.title}</strong> {selected.enabled
+                ? 'is watched. Current items appear automatically; urgent changes move to the front.'
+                : 'is off. Its settings are kept, but it will not collect or surface notices.'}
             </p>
           </div>
         </aside>
       {/if}
     </div>
   {:else}
-    <div class="empty-sheet"><h2>Loading channel policy</h2><p>The saved configuration has not arrived yet.</p></div>
+    <div class="empty-sheet"><h2>Loading channels</h2><p>Waiting for saved settings.</p></div>
   {/if}
 </section>
 
@@ -507,18 +416,6 @@
     font-size: var(--type-caption);
   }
 
-  .order-buttons {
-    display: flex;
-    gap: 7px;
-  }
-
-  .order-buttons button {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 9px 10px;
-  }
-
   .editor-section {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
@@ -554,12 +451,6 @@
     color: var(--muted);
     font-size: var(--type-caption);
     line-height: 1.5;
-  }
-
-  .two-fields {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 14px;
   }
 
   .collection-gate {
@@ -608,54 +499,43 @@
     line-height: 1.4;
   }
 
-  .compact-field {
-    max-width: 320px;
-  }
-
-  .choice-register {
-    display: grid;
-    border-top: 1px solid var(--rule);
-  }
-
-  .choice-register button {
-    display: grid;
-    grid-template-columns: 110px 1fr;
-    gap: 16px;
-    color: var(--graphite);
-    background: transparent;
-    border-bottom: 1px solid var(--rule);
-    padding: 12px 9px;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .choice-register button:hover,
-  .choice-register button[aria-checked='true'] {
+  .automatic-section {
     background: var(--paper);
   }
 
-  .choice-register button[aria-checked='true'] strong::after {
-    margin-left: 8px;
-    color: var(--channel);
-    content: '●';
+  .automatic-policy {
+    display: grid;
+    margin: 0;
+    border-top: 1px solid var(--rule-strong);
+    padding: 0;
+    list-style: none;
   }
 
-  .choice-register strong {
+  .automatic-policy li {
+    display: grid;
+    grid-template-columns: minmax(150px, 0.7fr) minmax(0, 1.3fr);
+    gap: 18px;
+    border-bottom: 1px solid var(--rule);
+    padding: 13px 4px;
+  }
+
+  .automatic-policy strong {
+    color: var(--marine);
     font-family: var(--font-instrument);
+    font-size: var(--type-label);
+    letter-spacing: 0.035em;
     text-transform: uppercase;
   }
 
-  .choice-register span {
+  .automatic-policy span {
     color: var(--muted);
     font-size: var(--type-caption);
-    line-height: 1.4;
+    line-height: 1.45;
   }
 
-  .destination-register {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    align-content: start;
-    gap: 6px;
+  .output-link {
+    width: fit-content;
+    text-decoration: none;
   }
 
   .live-preview {
@@ -776,38 +656,13 @@
       grid-column: 1;
     }
 
-    .two-fields,
-    .destination-register {
+    .automatic-policy li {
       grid-template-columns: 1fr;
-    }
-
-    .choice-register button {
-      grid-template-columns: 90px 1fr;
+      gap: 4px;
     }
 
     .live-preview {
       padding: 24px 16px;
     }
-  }
-
-  .apply-state {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    margin: 0;
-    padding: 9px 12px;
-    color: var(--muted);
-    background: var(--frost);
-    border: 1px solid var(--rule);
-    font-family: var(--font-instrument);
-    font-size: var(--type-micro);
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-  }
-
-  .apply-state[data-state='applied'] {
-    color: var(--success);
-    border-color: var(--success);
   }
 </style>

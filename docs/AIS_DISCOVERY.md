@@ -93,8 +93,10 @@ exactly this; corridor membership kills it.
 
 The signal-to-noise choice is therefore not the radius knob (2–30 km around
 the bridge) but **corridor membership**: on-river or approach-fan, moving,
-river-plausible. A 5-box subscription shaped to the river + approach fan was
-accepted by AISStream and works:
+river-plausible. The production subscription now separates prediction geometry
+from discovery geometry: six tight corridor boxes drive live intent, while
+three bounded outer aprons retain earlier movement without claiming every hull
+in the bay is headed to Brickell:
 
 ```
 lower river    [[25.7660,-80.2020],[25.7760,-80.1840]]   mouth → I-95 (incl. Brickell)
@@ -103,13 +105,16 @@ upper-mid      [[25.7850,-80.2400],[25.8020,-80.2100]]   NW 5 St → NW 22 Ave
 upper river    [[25.7990,-80.2600],[25.8100,-80.2380]]   NW 22 Ave → Palmer Lake
 north approach [[25.7620,-80.1860],[25.7790,-80.1280]]   ICW + Main Channel to Government Cut
 south approach [[25.7440,-80.1900],[25.7720,-80.1740]]   ICW from the Rickenbacker
+Cut apron      [[25.7400,-80.1300],[25.7900,-80.0850]]   jetties → near-shore approaches
+north ICW      [[25.7750,-80.1700],[25.8250,-80.1300]]   early north-bay approach
+south ICW      [[25.7000,-80.1900],[25.7500,-80.1450]]   early south-bay approach
 ```
 
-Recommended production shape: **one connection, river boxes + the two approach
-boxes**, with two-tier client-side handling — inside the river corridor every
-vessel is tracked; on the approaches, vessels are tracked when they are
-*following the marked channel* toward the mouth (see §6), and otherwise only
-watchlist MMSIs and sailing-type vessels get full treatment.
+Production shape: **one connection, river/approach boxes + the three discovery
+aprons**, with two-tier client-side handling — inside the river corridor every
+vessel is tracked; outer-apron fixes feed the durable route catalog but still
+need to follow a marked channel toward the mouth before they become predictive
+evidence (see §6).
 (`FiltersShipMMSI` exists, caps at 50 MMSIs, and applies per-subscription —
 client-side tiering is strictly more flexible at these message rates.)
 
@@ -207,26 +212,38 @@ recorded inbound transit refines the line.
 
 ## 7. The vessel ledger (per-MMSI opening propensity)
 
-The policy layer already prices this in
+The policy layer prices this in
 (`BridgeObservation::AisTrack.opening_propensity`, factor
-`0.50 + 0.50·score`, unknown = 0.75) — the engine just always feeds it `None`
-today. What is missing is durable per-vessel history:
+`0.50 + 0.50·score`, unknown = 0.75), and the runtime now supplies the
+Beta-smoothed per-MMSI result from durable history:
 
-- **`ais_transits`** — one row per bridge-zone passage: MMSI, name, direction,
-  entered/crossed timestamps, min |s|, speed. Detected by `s` sign change (or
-  min |s| < 150 m) from the live track state; recorded whether or not the
-  bridge moved.
-- **`vessel_ledger`** — one row per MMSI: name, type, dims, draught,
-  first/last seen, `transits_with_opening`, `transits_without_opening`,
-  moored-home reach (which river dock it habitually occupies), last state.
-- **Correlation** joins a transit to `bridge_state_intervals` (already
-  durable, target = brickell): crossing inside an `up` interval (±5 min entry
-  slack) → opener; crossing entirely inside `down` → fits-under. Propensity =
-  Beta-smoothed ratio, mapped onto `Confidence`, with type-36-sailing and
-  tug-with-tow priors for vessels not yet in the ledger.
+- **`ais_transits`** permanently retains each interpolated bridge-line
+  crossing: MMSI, direction, crossing time, speed, outcome and source session.
+  A plausible sign change can cross from farther than 600 m between sparse
+  Class B reports; it is no longer discarded merely because both endpoints
+  were not inside an arbitrary bridge bubble.
+- **`ais_vessel_ledger`** is the catalog: name, friendly class, call sign, IMO,
+  latest destination, length, beam, draught, first/last seen, opening count and
+  fits-under count. Bare position reports never blank identity learned from a
+  later or earlier static packet.
+- **`ais_track_fixes`** retains one fix per vessel per 30 seconds for one year.
+  Once `transits_opened > 0`, that MMSI is exempt from pruning, so every
+  observed movement of a known opener remains available to fit its habitual
+  corridor and timing.
+- **Correlation** only labels a crossing when successful FL511 readings prove
+  bridge state across the required before/after window. Restarts and collection
+  gaps split intervals; an open-ended stale row is never extended to the
+  present by assumption. Propensity is the Beta-smoothed opened share.
 - **Moored→underway transition** on a ledger vessel whose propensity is high
   is itself evidence — for an upper-river shipyard departure it is the
   earliest signal that exists, ahead of any geometry.
+
+The pre-bundle-rename database is merged idempotently at startup for its AIS
+catalog, crossings, fixes and pilots-board movements. Its bridge intervals are
+deliberately not imported because they predate successful-reading continuity.
+The runtime also stores a compact, model-versioned forecast sample each minute
+for two years, so the catalog can be evaluated against false alerts, misses,
+warning lead and ETA coverage instead of tuned from anecdotes.
 
 Air draft never appears in AIS; the ledger *is* the height sensor.
 
@@ -296,8 +313,10 @@ IMMINENT` — published only while its confidence gate holds:
 | Behavioral moored detection | collector track state | variance window over history points (already retained 1 h / 30 s buckets) |
 | Expose > 1 track | collector (`MAX_EXPOSED_TRACKS`) | ladder + queue display need the top few openers (per direction), not global top-1 |
 | Vessel class labels | collector | ship type + dims → friendly class word (`sailing`, `yacht`, `tug + tow`, `cargo`…) carried as item attributes |
-| `ais_transits`, `vessel_ledger` tables | `crates/storage/schema.sql` | new tables + Store methods; correlation job in runtime against `bridge_state_intervals` |
-| `opening_propensity` wiring | `crates/runtime/src/engine.rs` `bridge_fact()` | ledger lookup by MMSI instead of hardcoded `None` |
+| `ais_transits`, `ais_vessel_ledger`, `ais_track_fixes` | `crates/storage/schema.sql` | permanent outcomes/catalog; one-year general tracks and permanent known-opener tracks |
+| `opening_propensity` wiring | `crates/runtime/src/engine.rs` `bridge_fact()` | Beta-smoothed ledger lookup by MMSI |
+| Continuous outcome labels | storage bridge intervals + runtime successful-poll gate | split restarts/gaps; resolve a transit only against explicitly confirmed coverage |
+| Forecast history | `bridge_forecast_samples`, `scripts/calibrate_bridge.py` | model-versioned episode precision/recall, false alerts, lead and ETA coverage |
 | BBP ↔ AIS matching | runtime engine | name match at evidence-assembly time; booked+moving overrides placeholder offset |
 | Ladder stage + clamp | `crates/policy/src/bridge.rs` | derive rung from fused ETA interval; blackout clamp via existing schedule; add rung to `BridgePrediction` |
 | Surfaces | dto/eink/console | show rung + driving evidence sentence + vessel card (name · class · length · rung, `+N queued`) |

@@ -25,8 +25,9 @@ mod yahoo_chart;
 
 #[cfg(feature = "native")]
 pub use ais_stream::{
-    AIS_CROSSINGS_CURSOR_KEY, AIS_VESSEL_TRACKS_CURSOR_KEY, AisCrossing, AisStreamApiKey,
-    AisStreamCollector, AisStreamConfig, AisStreamSubscription,
+    AIS_CROSSINGS_CURSOR_KEY, AIS_VESSEL_CATALOG_CURSOR_KEY, AIS_VESSEL_TRACKS_CURSOR_KEY,
+    AisCrossing, AisStreamApiKey, AisStreamCollector, AisStreamConfig, AisStreamSubscription,
+    AisVesselCatalogEntry,
 };
 pub use bbpilots::{
     BbPilotsCollector, BbPilotsConfig, BbpMovement, BbpParseError, BbpSchedule, MovementAction,

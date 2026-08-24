@@ -70,10 +70,34 @@
     const element = document.createElement('button');
     element.type = 'button';
     element.className = `location-map-pin location-map-pin--${point.kind ?? 'saved'}`;
+    // Also inline, not only in the stylesheet. MapLibre measures this element to
+    // work out how far to shift it for the requested anchor, and it measures at
+    // the moment the marker is added. An element measured before its CSS applies
+    // measures 0x0, so the anchor shift is zero and every mark sits a fixed
+    // number of screen pixels from its coordinate -- which does not look like a
+    // constant offset, it looks like the marks sliding around as you zoom.
+    // MapLibre also requires every marker root to be absolute. Letting this
+    // button fall back into normal flow adds its place in the horizontal row to
+    // the projected coordinate, which lines otherwise unrelated vessels up
+    // east of their real fixes.
+    element.style.position = 'absolute';
+    element.style.width = '34px';
+    element.style.height = '34px';
     if (point.enabled === false) element.classList.add('is-disabled');
     if (point.id === selectedId || point.id === candidate?.id) element.classList.add('is-selected');
-    element.setAttribute('aria-label', `${point.label}. Select location.`);
-    element.title = point.detail ? `${point.label} · ${point.detail}` : point.label;
+    if (point.knownOpener) element.classList.add('is-known-opener');
+    if (point.likelyToOpenBrickell) element.classList.add('is-likely-opener');
+    const vesselStatus = point.kind === 'vessel'
+      ? [
+          point.knownOpener ? 'Known Brickell opener.' : '',
+          point.likelyToOpenBrickell ? 'Likely to open Brickell on this passage.' : ''
+        ].filter(Boolean).join(' ')
+      : '';
+    element.setAttribute(
+      'aria-label',
+      `${point.label}. ${vesselStatus} Select ${point.kind === 'vessel' ? 'vessel' : 'location'}.`
+    );
+    element.title = [point.label, vesselStatus, point.detail].filter(Boolean).join(' · ');
     if (point.courseDegrees != null) element.style.setProperty('--course', `${point.courseDegrees}deg`);
     // MapLibre writes an inline transform on the root every camera frame, so
     // the pin's own shape and hover motion live one level in; anything
@@ -255,7 +279,7 @@
 
   $effect(() => {
     const markerSignature = allPoints
-      .map((point) => `${point.id}:${point.latitude}:${point.longitude}:${point.enabled}:${point.draggable}`)
+      .map((point) => `${point.id}:${point.latitude}:${point.longitude}:${point.enabled}:${point.draggable}:${point.knownOpener}:${point.likelyToOpenBrickell}`)
       .join('|');
     const trackSignature = vesselTracks
       .map((track) => `${track.mmsi}:${track.observedAt}:${track.points.length}:${track.movement}`)
@@ -352,16 +376,6 @@
 <div class:compact={variant === 'compact'} class="location-map-shell">
   <div bind:this={mapHost} class="location-map" role="application" aria-label={ariaLabel}></div>
 
-  <div class="map-registration" aria-hidden="true">
-    <span><Globe2 size={15} strokeWidth={1.6} /> Global coverage</span>
-    <strong>{activePoint?.label ?? 'Drag anywhere on Earth'}</strong>
-    <small>
-      {activePoint
-        ? `${activePoint.latitude.toFixed(4)} · ${activePoint.longitude.toFixed(4)}`
-        : 'Search, pan, zoom, then click to set a precise point'}
-    </small>
-  </div>
-
   {#if radar}
     <button
       type="button"
@@ -443,7 +457,6 @@
     content: '';
   }
 
-  .map-registration,
   .map-instruction,
   .map-corridor-key,
   .map-radar-toggle,
@@ -475,8 +488,8 @@
     width: 15px;
     height: 15px;
     margin-top: 1px;
-    background: rgba(140, 110, 200, 0.42);
-    border: 1px solid #a88fd4;
+    background: var(--corridor);
+    border: 1px solid var(--corridor-sheet);
   }
 
   .map-corridor-key strong {
@@ -524,43 +537,9 @@
     opacity: 0.72;
   }
 
-  .map-registration {
-    top: 22px;
-    left: 22px;
-    display: grid;
-    width: min(330px, calc(100% - 96px));
-    gap: 5px;
-    padding: 15px 17px 16px;
-    color: var(--white);
-    background: var(--marine);
-    border: 1px solid var(--nav-subdued);
-    box-shadow: var(--strip-shadow);
-  }
 
-  .map-registration > span {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    color: var(--nav-muted);
-    font-family: var(--font-instrument);
-    font-size: var(--type-micro);
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
 
-  .map-registration strong {
-    overflow-wrap: anywhere;
-    font-family: var(--font-instrument);
-    font-size: var(--type-title);
-    line-height: 1;
-    text-transform: uppercase;
-  }
 
-  .map-registration small {
-    color: var(--nav-muted);
-    font-size: var(--type-caption);
-  }
 
   .map-instruction {
     right: 15px;
@@ -641,7 +620,10 @@
      the bottom edge, dead centre. `anchor: 'bottom'` then puts that tip on the
      coordinate. Change the square and this box has to change with it. */
   :global(.location-map-pin) {
-    position: relative;
+    /* Preserve MapLibre's positioning contract. The root itself must never
+       participate in layout; its transform is the projected longitude and
+       latitude. */
+    position: absolute;
     width: 34px;
     height: 34px;
     padding: 0;
@@ -731,6 +713,17 @@
     transform: rotate(var(--course, 0deg));
   }
 
+  :global(.location-map-pin--vessel.is-known-opener) :global(.location-map-pin__body) {
+    outline: 2px solid var(--marine);
+    outline-offset: 2px;
+  }
+
+  :global(.location-map-pin--vessel.is-likely-opener) :global(.location-map-pin__body) {
+    color: var(--graphite);
+    background: var(--amber);
+    border-color: var(--graphite);
+  }
+
   :global(.location-map-pin.is-disabled) :global(.location-map-pin__body) {
     color: var(--marine);
     background: var(--paper);
@@ -772,11 +765,6 @@
       min-height: 440px;
     }
 
-    .map-registration {
-      top: 14px;
-      left: 14px;
-      width: calc(100% - 76px);
-    }
 
     .map-corridor-key {
       top: 118px;

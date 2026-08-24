@@ -89,13 +89,7 @@
   .decision[data-state='likely'] {
     background: var(--amber-sheet);
     border-left-color: var(--danger);
-  }
-
-  .decision[data-state='possible'] {
-    border-left-color: var(--amber);
-  }
-
-  .decision-header {
+  }  .decision-header {
     display: flex;
     align-items: center;
     justify-content: space-between;

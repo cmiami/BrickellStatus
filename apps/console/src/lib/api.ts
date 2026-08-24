@@ -9,7 +9,8 @@ import type {
   LocationSearchResult,
   MutationResult,
   PlatformCapabilities,
-  RadarLayer
+  RadarLayer,
+  VesselDetail
 } from './types';
 
 const LOCATION_SEARCH_TIMEOUT_MS = 12_000;
@@ -230,6 +231,11 @@ export async function clearWhatsAppToken(): Promise<MutationResult> {
 
 export async function getAisstreamStatus(): Promise<AisStreamStatus> {
   return desktopInvoke<AisStreamStatus>('get_aisstream_status');
+}
+
+/** The local opening record for this hull, or null before its first ledger entry. */
+export async function getVesselDetail(mmsi: string): Promise<VesselDetail | null> {
+  return desktopInvoke<VesselDetail | null>('get_vessel_detail', { mmsi });
 }
 
 export async function setAisstreamApiKey(apiKey: string): Promise<MutationResult> {

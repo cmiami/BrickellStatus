@@ -17,17 +17,17 @@
 <section class="dispatch-ledger" aria-labelledby="dispatch-heading">
   <header class="ruled-header">
     <div>
-      <p class="registration-label">Durable outbound work</p>
-      <h2 id="dispatch-heading">Recent dispatches</h2>
+      <p class="registration-label">Message history</p>
+      <h2 id="dispatch-heading">Recent messages</h2>
     </div>
-    <a href="/log">View full log</a>
+    <a href="/system/log">View history</a>
   </header>
 
   {#if dispatches.length}
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>Updated</th><th>Channel</th><th>Material change</th><th>Urgency</th><th>Routed to</th><th>Outcome</th></tr>
+          <tr><th>Updated</th><th>Channel</th><th>Change</th><th>Priority</th><th>Destination</th><th>Status</th></tr>
         </thead>
         <tbody>
           {#each dispatches.slice(0, 5) as dispatch (dispatch.id)}
@@ -45,8 +45,8 @@
     </div>
   {:else}
     <div class="ledger-empty">
-      <strong>No durable messages yet</strong>
-      <span>A WhatsApp row appears only after an interrupt-eligible material change.</span>
+      <strong>No messages yet</strong>
+      <span>WhatsApp alerts will appear here after they are sent.</span>
     </div>
   {/if}
 </section>

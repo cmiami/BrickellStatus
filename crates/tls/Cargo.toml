@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 license.workspace = true
 description = "The TLS trust decision every BrickellStatus HTTP client shares"
+# Internal to this application: never published, and the path dependencies
+# between these crates could not be published anyway.
+publish = false
 
 [dependencies]
 reqwest.workspace = true

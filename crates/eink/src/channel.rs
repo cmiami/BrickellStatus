@@ -194,7 +194,7 @@ pub struct ChannelCard {
     pub title: String,
     /// Primary fact a glance should communicate.
     pub headline: String,
-    /// One concise supporting measurement or explanation.
+    /// One concise supporting measurement, explanation, or story synopsis.
     pub detail: String,
     /// One concise status line for the current channel state.
     pub action: String,

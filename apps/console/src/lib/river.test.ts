@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  OPENER_PROPENSITY_BASIS_POINTS,
   corridorRing,
-  isOpener,
+  currentVesselTracks,
   isUnderway,
   makeChannelProjector,
   reachScale,
@@ -135,20 +134,16 @@ describe('what counts as under way', () => {
   });
 });
 
-describe('naming an opener', () => {
-  it('marks a hull the ledger has watched open the span', () => {
-    expect(isOpener(track({ openingPropensity: OPENER_PROPENSITY_BASIS_POINTS }))).toBe(true);
-    expect(isOpener(track({ openingPropensity: 6700 }))).toBe(true);
-  });
-
-  it('marks a sailing rig on sight', () => {
-    expect(isOpener(track({ vesselClass: 'sailing', openingPropensity: undefined }))).toBe(true);
-  });
-
-  it('leaves an unproven hull unclaimed, and one seen fitting under', () => {
-    expect(isOpener(track({ openingPropensity: undefined }))).toBe(false);
-    // Beta-smoothed: one crossing under a closed span reads 3300, not zero.
-    expect(isOpener(track({ openingPropensity: 3300 }))).toBe(false);
+describe('opener facts published by the engine', () => {
+  it('keeps durable history separate from current bridge impact', () => {
+    const [known, likely] = reachVessels([
+      track({ knownOpener: true, likelyToOpenBrickell: false }),
+      track({ mmsi: '367705811', knownOpener: false, likelyToOpenBrickell: true })
+    ]);
+    expect(known.knownOpener).toBe(true);
+    expect(known.likelyToOpenBrickell).toBe(false);
+    expect(likely.knownOpener).toBe(false);
+    expect(likely.likelyToOpenBrickell).toBe(true);
   });
 });
 
@@ -169,6 +164,21 @@ describe('travel direction', () => {
   it('claims no heading for a vessel on station', () => {
     expect(travelDirection(track({ movement: 'stationary' }))).toBe('holding');
     expect(travelDirection(track({ sMeters: undefined }))).toBe('holding');
+  });
+});
+
+describe('live vessel freshness', () => {
+  it('keeps the one-hour archive intact while selecting only current tracks for Live', () => {
+    const generatedAt = '2026-08-23T16:10:00Z';
+    const fresh = track({ mmsi: '111111111', observedAt: '2026-08-23T16:04:00Z' });
+    const stale = track({ mmsi: '222222222', observedAt: '2026-08-23T16:03:59Z' });
+    const future = track({ mmsi: '333333333', observedAt: '2026-08-23T16:10:31Z' });
+    const archive = [fresh, stale, future];
+
+    expect(currentVesselTracks(archive, generatedAt).map((item) => item.mmsi)).toEqual([
+      '111111111'
+    ]);
+    expect(archive).toHaveLength(3);
   });
 });
 

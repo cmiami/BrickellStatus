@@ -1,8 +1,14 @@
 <!--
-THESIS: One tile answers the whole question — what the bridge is doing, and what
-on the water is about to change it — inside the first viewport, without a scroll.
-FORM: A single ruled sheet. A decision band across the head, and beneath it the
-river at full width, which is the element the page exists to show.
+THESIS: Brickell is the interchange every live route resolves against; this
+surface refuses the category's top-down map and detached dashboard cards.
+OWN-WORLD: Cool dispatch paper, marine rules, muscular violet transit lines,
+condensed civic lettering, mechanical bascule marks, and one rationed amber hull.
+STORY: Read Brickell's road state, follow the vessel that can change it, then
+read that vessel's plain type, direction, knots, and ETA without leaving its route.
+FIRST VIEWPORT: A compact decision band above a full-field schematic; a traffic
+rail docks only when boats exist. Brickell is 3–4× every other bridge.
+FORM: First-ranked Brickell Interchange fused with visible-transit-network
+staging and the approved map/ETA/mechanism comp combination; seed 55e9df82.
 -->
 <script lang="ts">
   import RiverLine from './RiverLine.svelte';
@@ -21,6 +27,7 @@ river at full width, which is the element the page exists to show.
     vesselTracks = [],
     intervals = [],
     crossings = [],
+    generatedAt,
     localTimeZone
   }: {
     decision: DecisionSnapshot;
@@ -28,13 +35,14 @@ river at full width, which is the element the page exists to show.
     vesselTracks?: VesselTrack[];
     intervals?: BridgeStateInterval[];
     crossings?: BridgeCrossing[];
+    generatedAt?: string;
     localTimeZone?: string;
   } = $props();
 </script>
 
 <section class="live-deck" data-state={decision.state}>
   <StatusDecision {decision} band />
-  <RiverLine {corridor} {vesselTracks} {intervals} {crossings} {localTimeZone} />
+  <RiverLine {corridor} {vesselTracks} {intervals} {crossings} {generatedAt} {localTimeZone} />
 </section>
 
 <style>
@@ -51,8 +59,8 @@ river at full width, which is the element the page exists to show.
   .live-deck {
     display: grid;
     grid-template-rows: auto minmax(0, 1fr);
-    height: calc(100vh - 72px);
-    min-height: 560px;
+    height: 100%;
+    min-height: 0;
     overflow: hidden;
     background: var(--paper);
     border-bottom: 1px solid var(--rule-strong);
@@ -68,7 +76,7 @@ river at full width, which is the element the page exists to show.
   }
 
   /* On a phone the tile stops being a viewport and becomes a page again. */
-  @media (max-width: 900px) {
+  @media (max-width: 1180px) {
     .live-deck {
       height: auto;
       min-height: 0;

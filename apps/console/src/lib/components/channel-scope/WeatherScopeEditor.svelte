@@ -30,8 +30,8 @@
          a probability slider only ever asked the reader to guess. -->
     <SwitchField
       checked={scopeBool(channel, 'rainAlertEnabled', true)}
-      label="Rain alerts"
-      description="Warn when rain is about to start, with the minutes until it does."
+      label="Rain"
+      description="Include rain that is falling now or likely to begin soon."
       onchange={(enabled) => set('rainAlertEnabled', enabled)}
     />
     <SwitchField
@@ -43,8 +43,8 @@
     <div class="wind-rule">
       <SwitchField
         checked={scopeBool(channel, 'windAlertEnabled', true)}
-        label="Wind alerts"
-        description="Warn on forecast gusts above your own threshold."
+        label="Strong wind"
+        description="Include forecast gusts above this threshold."
         onchange={(enabled) => set('windAlertEnabled', enabled)}
       />
       <label class="field gust-field">

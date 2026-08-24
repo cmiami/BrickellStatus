@@ -139,15 +139,6 @@ fn render_panel(panel: PanelModel, out: &std::path::Path) {
                 bridge(panel, SnapshotState::Clear, None, false),
             ),
             (
-                "watch + eta range".into(),
-                bridge(
-                    panel,
-                    SnapshotState::Watch,
-                    Some(EtaRange::new(6, 9)),
-                    false,
-                ),
-            ),
-            (
                 "likely + eta range".into(),
                 bridge(
                     panel,
@@ -180,15 +171,6 @@ fn render_panel(panel: PanelModel, out: &std::path::Path) {
             (
                 "clear + stale".into(),
                 bridge(panel, SnapshotState::Clear, None, true),
-            ),
-            (
-                "watch + stale".into(),
-                bridge(
-                    panel,
-                    SnapshotState::Watch,
-                    Some(EtaRange::new(11, 18)),
-                    true,
-                ),
             ),
         ],
         out.join(format!("panel-states-bridge-{label}.png")),
@@ -269,11 +251,9 @@ fn render_panel(panel: PanelModel, out: &std::path::Path) {
                     ChannelKind::News,
                     ChannelUrgency::Routine,
                     ChannelAvailability::Current,
-                    "Headlines",
+                    "Miami Herald",
                     "Commission delays vote",
-                    "Brickell zoning decision pushed to next month",
-                    // The action line carries the publisher. It used to read
-                    // "Headline only. Open the story for detail." on every card.
+                    "Commissioners postponed the Brickell zoning decision until next month after residents requested a new traffic study.",
                     "Miami Herald",
                 ),
             ),
@@ -286,9 +266,9 @@ fn render_panel(panel: PanelModel, out: &std::path::Path) {
                     ChannelKind::News,
                     ChannelUrgency::Routine,
                     ChannelAvailability::Current,
-                    "Venezuela",
+                    "Efecto Cocuyo",
                     "Sismo de magnitud 4 se sintió en La Guaira",
-                    "Sin daños reportados en la zona costera",
+                    "Sin daños reportados en la zona costera después del movimiento registrado durante la madrugada.",
                     "Efecto Cocuyo",
                 ),
             ),

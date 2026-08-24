@@ -62,6 +62,10 @@ describe('the Brickell bridge channel', () => {
     mount();
     expect(screen.getByRole('heading', { name: /vessel source/i })).toBeInTheDocument();
     expect(screen.getByPlaceholderText(/replace saved key|paste aisstream api key/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /get or manage aisstream api keys/i })).toHaveAttribute(
+      'href',
+      'https://aisstream.io/account'
+    );
   });
 
   // A dropped socket and a quiet river look identical from here, and only one

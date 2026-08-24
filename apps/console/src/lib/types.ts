@@ -1,6 +1,5 @@
 export type BridgeState =
   | 'clear'
-  | 'possible'
   | 'likely'
   | 'open';
 
@@ -68,6 +67,12 @@ export interface ChannelPriority {
   confirmed: boolean;
 }
 
+export interface ChannelNotice {
+  key: string;
+  signal: ChannelSignal;
+  priority: ChannelPriority;
+}
+
 export interface ChannelSnapshot {
   id: string;
   kind:
@@ -88,6 +93,7 @@ export interface ChannelSnapshot {
   summary: string;
   materialKey: string;
   signal?: ChannelSignal;
+  notices?: ChannelNotice[];
   priority: ChannelPriority;
   enabled: boolean;
   active: boolean;
@@ -183,6 +189,10 @@ export interface VesselTrack {
    * means unproven, which is not the same as "fits under".
    */
   openingPropensity?: number;
+  /** This MMSI has at least one confirmed Brickell bridge-up passage. */
+  knownOpener?: boolean;
+  /** Current route and opening evidence indicate an approaching bridge impact. */
+  likelyToOpenBrickell?: boolean;
   /** Minutes until this vessel reaches the span. Absent when it is not closing. */
   etaMinMinutes?: number;
   etaMaxMinutes?: number;
@@ -228,6 +238,46 @@ export interface BridgeCrossing {
   speedKnots?: number;
   /** `opened`, `fits_under`, `unknown`, or absent while still unresolved. */
   outcome?: 'opened' | 'fits_under' | 'unknown';
+  /** When the crossing was matched to a bridge result. */
+  resolvedAt?: string;
+}
+
+/**
+ * Durable Brickell passage history for one MMSI.
+ *
+ * Current position and broadcast identity stay on `VesselTrack`; this record
+ * answers the separate question of what the app has learned when this hull
+ * reached the bridge. `null` from the command means the hull has not entered
+ * the local ledger yet, not that the request failed.
+ */
+export interface VesselDetail {
+  mmsi: string;
+  transitsOpened: number;
+  transitsFitsUnder: number;
+  transitsUnknown: number;
+  transitsPending: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  lastCrossingAt?: string;
+  lastOpenedAt?: string;
+  /** Learned opening likelihood in basis points, when a resolved passage exists. */
+  openingPropensity?: number;
+  recentCrossings: BridgeCrossing[];
+}
+
+/** A durable opener remains here even without a position in the Map's live hour. */
+export interface KnownOpener {
+  mmsi: string;
+  vesselName?: string;
+  vesselClass?: string;
+  callSign?: string;
+  imoNumber?: number;
+  transitsOpened: number;
+  transitsFitsUnder: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  lastOpenedAt?: string;
+  openingPropensity?: number;
 }
 
 export interface RiverCorridor {
@@ -248,6 +298,8 @@ export interface AppSnapshot {
   dispatches: DispatchRecord[];
   bridgeIntervals: BridgeStateInterval[];
   vesselTracks: VesselTrack[];
+  /** Every locally learned Brickell opener, whether currently broadcasting or not. */
+  knownOpeners: KnownOpener[];
   /** Always present; `aisLive` says whether vessels are being received. */
   riverCorridor: RiverCorridor;
   /** Recent bridge-line crossings, newest first. */
@@ -272,6 +324,7 @@ export interface ChannelPreference {
   kind: ChannelSnapshot['kind'];
   title: string;
   enabled: boolean;
+  /** Legacy wire fields. The runtime normalizes them; they are not user controls. */
   presence: SurfacePresence;
   interruptPreset: InterruptPreset;
   destinations: DestinationId[];
@@ -324,6 +377,8 @@ export interface LocationMapPoint {
   enabled?: boolean;
   draggable?: boolean;
   courseDegrees?: number;
+  knownOpener?: boolean;
+  likelyToOpenBrickell?: boolean;
 }
 
 export interface PolicyProfile {
@@ -340,7 +395,6 @@ export interface DisplaySettings {
   serialPort: string;
   bleName: string;
   dwellSeconds: number;
-  returnHomeAfter: number;
   fullRefreshEvery: number;
   orientation: 'upright' | 'inverted';
 }
@@ -421,12 +475,17 @@ export type PanelRevision = 'original' | 'v11';
 export type FlashRequirement =
   | { state: 'noDevice' }
   | { state: 'upToDate'; build: string }
+  | { state: 'deviceNewer'; device: number; bundled: number }
+  | { state: 'differentBuild'; version: number; device: string; bundled: string }
   | { state: 'unknownBuild' }
   | {
       state: 'required';
       reason:
         | { kind: 'notResponding' }
         | { kind: 'buildMismatch'; device: string; bundled: string }
+        | { kind: 'firmwareOutdated'; device: number; bundled: number }
+        | { kind: 'incompatibleIdentity'; device: string; bundled: string }
+        | { kind: 'legacyConnection' }
         | { kind: 'wrongBoard'; board: PanelModel };
     };
 
@@ -441,6 +500,8 @@ export interface FirmwareVariantSummary {
 export interface FirmwareStatus {
   port?: string;
   bundledBuild?: string;
+  /** Monotonic release used for upgrade ordering. */
+  bundledVersion?: number;
   /** The board that answered, when one has. */
   board?: PanelModel;
   /** The build to write to it, decided from what the board reported. */

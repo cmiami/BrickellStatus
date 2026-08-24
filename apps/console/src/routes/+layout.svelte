@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { fade } from 'svelte/transition';
 
   import '../app.css';
   import AppNav from '$lib/components/AppNav.svelte';
@@ -9,6 +10,23 @@
   import { loadApp, startSnapshotRefresh, stopSnapshotRefresh, loadError, notice } from '$lib/state';
 
   let { children } = $props();
+
+  // A result the reader did not ask to keep should not wait to be clicked away.
+  // Failures dwell longer than confirmations because they are the ones worth
+  // reading, but both leave on their own.
+  const NOTICE_MS = { ok: 3_500, failed: 7_000 };
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+
+  $effect(() => {
+    const current = $notice;
+    clearTimeout(noticeTimer);
+    if (!current) return;
+    noticeTimer = setTimeout(
+      () => notice.set(null),
+      current.ok ? NOTICE_MS.ok : NOTICE_MS.failed
+    );
+    return () => clearTimeout(noticeTimer);
+  });
 
   function openExternalLink(event: MouseEvent) {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -51,9 +69,14 @@
   {/if}
 
   {#if $notice}
-    <div class="global-notice" data-ok={$notice.ok} role="status">
+    <div
+      class="global-notice"
+      data-ok={$notice.ok}
+      role={$notice.ok ? 'status' : 'alert'}
+      in:fade={{ duration: 140 }}
+      out:fade={{ duration: 420 }}
+    >
       <span>{$notice.message}</span>
-      <button aria-label="Dismiss notice" onclick={() => notice.set(null)}>Dismiss</button>
     </div>
   {/if}
 
@@ -85,8 +108,7 @@
     transform: translateY(0);
   }
 
-  .connection-warning,
-  .global-notice {
+  .connection-warning {
     position: relative;
     z-index: 18;
     display: flex;
@@ -100,12 +122,35 @@
     font-size: var(--type-label);
   }
 
+  /* A result that leaves on its own must not push the page down and pull it
+     back up on the way out, so it lifts off the sheet instead of sitting in
+     the flow. Temporary overlays are the one thing allowed to lift. */
+  .global-notice {
+    position: fixed;
+    inset-inline: 0;
+    bottom: 26px;
+    z-index: 40;
+    width: fit-content;
+    max-width: min(78ch, calc(100vw - 32px));
+    margin-inline: auto;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 20px;
+    color: var(--graphite);
+    background: var(--frost);
+    border: 1px solid var(--rule-strong);
+    border-radius: 2px;
+    box-shadow: 0 10px 22px -14px rgb(17 20 24 / 55%);
+    font-size: var(--type-label);
+    pointer-events: none;
+  }
+
   .connection-warning strong {
     white-space: nowrap;
   }
 
-  .connection-warning button,
-  .global-notice button {
+  .connection-warning button {
     color: var(--graphite);
     background: transparent;
     border-bottom: 1px solid currentColor;
@@ -117,17 +162,20 @@
 
   .global-notice[data-ok='true'] {
     background: var(--success-sheet);
-    border-bottom-color: var(--success);
+    border-color: var(--success);
   }
 
   .global-notice[data-ok='false'] {
     color: var(--white);
     background: var(--danger);
-    border-bottom-color: var(--graphite);
+    border-color: var(--graphite);
   }
 
-  .global-notice[data-ok='false'] button {
-    color: var(--white);
+
+  @media (prefers-reduced-motion: reduce) {
+    .global-notice {
+      transition: none;
+    }
   }
 
   @media (max-width: 720px) {
@@ -140,10 +188,14 @@
       left: 12px;
     }
 
-    .connection-warning,
-    .global-notice {
+    .connection-warning {
       align-items: flex-start;
       padding: 10px 14px;
+    }
+
+    .global-notice {
+      bottom: 14px;
+      padding: 11px 15px;
     }
 
     .connection-warning strong {

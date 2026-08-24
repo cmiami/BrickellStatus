@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 description = "BrickellStatus desktop and tray application"
 default-run = "brickellstatus-desktop"
+# Internal to this application: never published, and the path dependencies
+# between these crates could not be published anyway.
+publish = false
 
 [lib]
 name = "brickellstatus_desktop_lib"

@@ -16,17 +16,18 @@ import type { RiverCorridor, VesselTrack } from './types';
  */
 export const UNDERWAY_DISPLACEMENT_METERS = 50;
 
-/**
- * Ledger confidence at which a hull is named an opener, in basis points.
- *
- * The engine smooths one observed opening to ~6700 and never to 10000, so this
- * admits a hull seen opening the span once and excludes one seen fitting under.
- */
-export const OPENER_PROPENSITY_BASIS_POINTS = 6_000;
-
 /** Channel metres shown either side of the span before the axis is stretched. */
 export const REACH_UPRIVER_METERS = 3_500;
 export const REACH_SEAWARD_METERS = 2_500;
+
+/**
+ * A hull belongs on the Live schematic only while the collector would still
+ * call its position current. The Map deliberately keeps the full one-hour
+ * discovery trail; this cutoff prevents that archive from masquerading as
+ * present movement on the bridge decision surface.
+ */
+export const LIVE_VESSEL_FRESHNESS_MS = 6 * 60 * 1_000;
+const LIVE_VESSEL_FUTURE_SKEW_MS = 30 * 1_000;
 
 export type TravelDirection = 'upriver' | 'downriver' | 'holding';
 
@@ -51,8 +52,10 @@ export interface ReachVessel {
    * on it must never draw as empty — but it is drawn quietly.
    */
   underway: boolean;
-  /** True when this hull's own history says it forces an opening. */
-  opener: boolean;
+  /** Durable history: Brickell has gone up for this MMSI at least once. */
+  knownOpener: boolean;
+  /** Current engine judgement that this approach is likely to raise Brickell. */
+  likelyToOpenBrickell: boolean;
   /** The engine's judgement that this course crosses the span. */
   closing: boolean;
   observedAtMs: number;
@@ -61,6 +64,20 @@ export interface ReachVessel {
 function toMilliseconds(value: string): number {
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+export function currentVesselTracks(
+  tracks: VesselTrack[],
+  generatedAt: string | undefined
+): VesselTrack[] {
+  const generatedAtMs = generatedAt ? toMilliseconds(generatedAt) : 0;
+  if (!generatedAtMs) return tracks;
+  const cutoff = generatedAtMs - LIVE_VESSEL_FRESHNESS_MS;
+  const latest = generatedAtMs + LIVE_VESSEL_FUTURE_SKEW_MS;
+  return tracks.filter((track) => {
+    const observedAtMs = toMilliseconds(track.observedAt);
+    return observedAtMs >= cutoff && observedAtMs <= latest;
+  });
 }
 
 /** Great-circle metres; the reach spans a few kilometres, so this is exact enough. */
@@ -119,18 +136,6 @@ export function isUnderway(track: VesselTrack): boolean {
 }
 
 /**
- * Whether this hull is expected to force the span open.
- *
- * Two grounds only: a ledger that has watched it do so, or a sailing rig, whose
- * mast is the reason the bascule exists. An unproven hull is drawn as traffic
- * and never claimed as an opener.
- */
-export function isOpener(track: VesselTrack): boolean {
-  if (track.vesselClass === 'sailing') return true;
-  return (track.openingPropensity ?? 0) >= OPENER_PROPENSITY_BASIS_POINTS;
-}
-
-/**
  * Which way along the channel the vessel is travelling.
  *
  * Course over ground bends with the river, so direction is read from the side
@@ -176,7 +181,8 @@ export function reachVessels(tracks: VesselTrack[]): ReachVessel[] {
         speedKnots: track.speedKnots,
         direction: travelDirection(track),
         underway: isUnderway(track),
-        opener: isOpener(track),
+        knownOpener: track.knownOpener === true,
+        likelyToOpenBrickell: track.likelyToOpenBrickell === true,
         closing: track.routeIntersects,
         observedAtMs: toMilliseconds(track.observedAt)
       };

@@ -1,43 +1,22 @@
-"""Re-measures the bridge predictor against what the app has actually recorded.
+"""Audit Brickell forecasts against continuously observed bridge outcomes.
 
     python3 scripts/calibrate_bridge.py [path/to/brickellstatus.sqlite3]
 
-Reads the running app's history read-only and answers three questions the weight
-table in `crates/policy/src/bridge.rs` currently answers from a single weekend:
+This is deliberately read-only. It reports whether there is enough trustworthy
+history to change a model; it never edits a weight or the database.
 
-  * is the record complete enough to calibrate on at all;
-  * does the clock predict an opening, and in which window;
-  * does upstream movement predict one, ordered or otherwise.
+Pre-registered gates:
 
-Everything is reported against a chance level and a held-out tail, because both
-omissions have already bitten this project once. The first calibration compared
-a clock statistic against the chance level for *one* anchor when there are two
-per hour, which overstated its lift about twofold, and nothing was held out, so
-a rule that scores below firing-constantly on unseen minutes looked strong.
+* Ordered upstream movement weights may be halved only after the sub-1.2 lift
+  result survives 100 clean target openings and includes weekdays. They may be
+  raised only above 2.0 lift with at least 50 weekday openings.
+* A pilots-board transit offset may replace its placeholder only after 20
+  paired movements in that direction, and only when its IQR is at most 40 min.
+* Forecast quality is scored per alert episode, not per correlated minute:
+  precision, recall, false alerts, warning lead, and ETA-interval coverage.
 
-DECISION RULES, pre-registered so a future window is not read by eye.
-
-  Ordered upstream movement (weights `outbound_high`, `outbound_very_high`)
-    Halve both if lift stays below 1.2 across at least two windows totalling
-    100+ openings, with at least one of them a weekday sample. Raise them only
-    if lift exceeds 2.0 on a weekday window with 50+ openings. Two weekends
-    measuring 1.4x and 0.86x is not evidence either way; it is one regime,
-    measured twice, on a river the regulation leaves on signal.
-
-  Transit offset (`DEFAULT_INBOUND_TRANSIT_MINUTES`, `DEFAULT_OUTBOUND_TRANSIT_MINUTES`
-  in crates/collectors/src/bbpilots.rs, currently 60 and 20 as placeholders)
-    Replace a placeholder with the measured median once a direction has 20+
-    movements pairing to an opening, and set `eta_calibrated` true only then.
-    Report the interquartile range with it: an offset with a 40-minute spread is
-    a number, not a countdown, and the panel should not treat it as one.
-
-  Clock slot (weight `schedule_clock_slot`)
-    Judge on the asymmetric window, which is what survived re-measurement: the
-    tender lifts ahead of the scheduled minute. Compare -10..+5 against its own
-    50% chance level, not +/-5 against 37%.
-
-Nothing here writes to the database, and nothing here changes a weight. It
-prints what the data supports; a human decides what to do about it.
+Rows created before successful-reading continuity was recorded are identified
+as legacy data. They are never presented as continuous coverage.
 """
 
 from __future__ import annotations
@@ -47,117 +26,158 @@ import sqlite3
 import statistics
 import sys
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 DEFAULT_DB = (
     Path.home()
     / "Library/Application Support/com.cmiami.brickellstatus/brickellstatus.sqlite3"
 )
-LOCAL = timezone(timedelta(hours=-4))  # Miami, EDT
+LOCAL = ZoneInfo("America/New_York")
 MINUTE = 60_000
-HORIZON = 15  # minutes of warning the panel promises
+HORIZON = 15
+CONTINUITY_GAP = 2 * MINUTE
 TARGET = "brickell"
-
-# Mouth first. Used only to ask whether lifts descend the river in order; the
-# answer so far is that they do not, which is itself worth re-checking.
 RIVER = [
-    "sw_2_ave", "sw_1_st", "w_flagler", "nw_5_st",
-    "nw_12_ave", "nw_17_ave", "nw_22_ave", "nw_27_ave",
+    "sw_2_ave",
+    "sw_1_st",
+    "w_flagler",
+    "nw_5_st",
+    "nw_12_ave",
+    "nw_17_ave",
+    "nw_22_ave",
+    "nw_27_ave",
 ]
 
 
-def read_transits(path: Path):
-    """Booked river movements, if this build has been recording them."""
-    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    try:
-        present = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='river_transits'"
-        ).fetchone()
-        if not present:
-            return None
-        return connection.execute(
-            "SELECT vessel, action, river_direction, scheduled_at_ms, "
-            "estimated_offset_minutes FROM river_transits ORDER BY scheduled_at_ms"
-        ).fetchall()
-    finally:
-        connection.close()
+@dataclass(frozen=True)
+class Interval:
+    source: str
+    key: str
+    relation: str
+    state: str
+    started: int
+    ended: int | None
+    confirmed: int
+    reason: str
+    session: str | None
 
 
-def transit_section(transits, openings) -> None:
-    """Learns the offset between a pilot boarding time and a bridge opening."""
-    print("\nRIVER TRANSITS  (the pilots' board against what the bridge did)")
-    if transits is None:
-        print("  no river_transits table — this database predates the build that")
-        print("  records movements. The offset cannot be learned until the app")
-        print("  runs long enough to collect them.")
-        return
-    if not transits:
-        print("  table present, no movements recorded yet. The board publishes")
-        print("  hours ahead, so give it a day of running before reading this.")
-        return
-
-    print(f"  {len(transits)} movements recorded")
-    by_direction = defaultdict(list)
-    for vessel, action, direction, scheduled, placeholder in transits:
-        # The opening that followed the boarding time, within a generous bound:
-        # a transit that never produced one inside three hours was not this
-        # bridge's traffic.
-        following = [t for t in openings if scheduled < t <= scheduled + 180 * MINUTE]
-        if not following:
-            continue
-        by_direction[direction or "unknown"].append(
-            ((min(following) - scheduled) / MINUTE, placeholder)
-        )
-
-    if not by_direction:
-        print("  none of them pair to an opening yet")
-        return
-
-    print(f"  {'direction':<12}{'paired':>8}{'median':>9}{'IQR':>16}{'placeholder':>13}")
-    for direction, pairs in sorted(by_direction.items()):
-        offsets = sorted(p[0] for p in pairs)
-        placeholder = next((p[1] for p in pairs if p[1] is not None), None)
-        median = statistics.median(offsets)
-        if len(offsets) >= 4:
-            low, high = statistics.quantiles(offsets, n=4)[0], statistics.quantiles(offsets, n=4)[2]
-            spread = f"{low:.0f} to {high:.0f} min"
-        else:
-            spread = "--"
-        shown = f"{placeholder} min" if placeholder is not None else "--"
-        print(f"  {direction:<12}{len(offsets):>8}{median:>6.0f} min{spread:>16}{shown:>13}")
-
-    print("\n  VERDICT (pre-registered)")
-    for direction, pairs in sorted(by_direction.items()):
-        offsets = [p[0] for p in pairs]
-        if len(offsets) < 20:
-            print(f"    {direction}: {len(offsets)} pairs — need 20 before replacing a placeholder")
-            continue
-        median = statistics.median(offsets)
-        low, high = statistics.quantiles(offsets, n=4)[0], statistics.quantiles(offsets, n=4)[2]
-        if high - low > 40:
-            print(f"    {direction}: median {median:.0f} min but IQR {high - low:.0f} min — too")
-            print("      loose to publish as a countdown; keep eta_calibrated false")
-        else:
-            print(f"    {direction}: set the placeholder to {median:.0f} min "
-                  f"(IQR {high - low:.0f}) and eta_calibrated true")
+@dataclass(frozen=True)
+class Forecast:
+    at: int
+    minute: int
+    model: str
+    state: str
+    score: int
+    confidence: int
+    eta_min: int | None
+    eta_max: int | None
+    mode: str
 
 
-def read(path: Path):
+def connect(path: Path) -> sqlite3.Connection:
+    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+
+def table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    return connection.execute(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+        (table,),
+    ).fetchone()[0] == 1
+
+
+def columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+
+
+def read_intervals(path: Path) -> tuple[list[Interval], bool]:
     if not path.exists():
         sys.exit(f"no database at {path}\nrun the app once, or pass a path")
-    # Read-only: the app may be running, and its history is the only copy.
-    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    connection = connect(path)
     try:
+        names = columns(connection, "bridge_state_intervals")
+        continuity = {"last_confirmed_at_ms", "start_reason"}.issubset(names)
+        confirmed = (
+            "last_confirmed_at_ms"
+            if "last_confirmed_at_ms" in names
+            else "COALESCE(ended_at_ms, started_at_ms)"
+        )
+        reason = "start_reason" if "start_reason" in names else "'legacy'"
+        session = "session_id" if "session_id" in names else "NULL"
         rows = connection.execute(
-            "SELECT bridge_key, relation, state, started_at_ms, ended_at_ms "
+            "SELECT source_id, bridge_key, relation, state, started_at_ms, "
+            f"ended_at_ms, {confirmed}, {reason}, {session} "
             "FROM bridge_state_intervals ORDER BY started_at_ms"
         ).fetchall()
     finally:
         connection.close()
-    if not rows:
-        sys.exit("no recorded intervals yet")
-    return rows
+    intervals = [Interval(*row) for row in rows]
+    if not intervals:
+        sys.exit("no recorded bridge intervals yet")
+    return intervals, continuity
+
+
+def read_transits(path: Path):
+    connection = connect(path)
+    try:
+        if not table_exists(connection, "river_transits"):
+            return None
+        rows = connection.execute(
+            "SELECT vessel, action, river_direction, scheduled_at_ms, "
+            "estimated_offset_minutes, first_seen_at_ms, last_seen_at_ms "
+            "FROM river_transits ORDER BY first_seen_at_ms, scheduled_at_ms"
+        ).fetchall()
+    finally:
+        connection.close()
+    # A retime currently receives a new provider item ID. Collapse a row that
+    # replaced the same vessel/action/direction within one observation window;
+    # keep the latest revision rather than training twice on one booking.
+    collapsed = []
+    latest_by_identity: dict[tuple[str, str, str], int] = {}
+    for row in rows:
+        vessel, action, direction, scheduled, _placeholder, first_seen, last_seen = row
+        identity = (vessel.strip().casefold(), action, direction or "unknown")
+        prior_index = latest_by_identity.get(identity)
+        if prior_index is not None:
+            prior = collapsed[prior_index]
+            same_revision_window = (
+                first_seen <= prior[6] + 30 * MINUTE
+                and abs(scheduled - prior[3]) <= 6 * 60 * MINUTE
+            )
+            if same_revision_window:
+                if last_seen >= prior[6]:
+                    collapsed[prior_index] = row
+                continue
+        latest_by_identity[identity] = len(collapsed)
+        collapsed.append(row)
+    return sorted(collapsed, key=lambda row: row[3])
+
+
+def read_forecasts(path: Path) -> list[Forecast] | None:
+    connection = connect(path)
+    try:
+        if not table_exists(connection, "bridge_forecast_samples"):
+            return None
+        rows = connection.execute(
+            "SELECT evaluated_at_ms, minute_bucket_ms, model_version, state, "
+            "predictive_score_bps, confidence_bps, eta_min_minutes, "
+            "eta_max_minutes, schedule_mode FROM bridge_forecast_samples "
+            "WHERE target_key=? ORDER BY evaluated_at_ms",
+            (TARGET,),
+        ).fetchall()
+    finally:
+        connection.close()
+    # A material change may add another row inside a minute. Calibration uses
+    # the last thing the app believed in that minute, not several correlated
+    # votes from the same minute.
+    by_minute: dict[tuple[str, int], Forecast] = {}
+    for row in rows:
+        sample = Forecast(*row)
+        by_minute[(sample.model, sample.minute)] = sample
+    return sorted(by_minute.values(), key=lambda sample: sample.at)
 
 
 def local(ms: int) -> datetime:
@@ -172,203 +192,568 @@ def clock_offset(ms: int) -> float:
 
 
 def binomial_tail(hits: int, trials: int, chance: float) -> float:
-    """Probability of at least `hits` successes by chance alone."""
     return sum(
-        math.comb(trials, i) * chance**i * (1 - chance) ** (trials - i)
-        for i in range(hits, trials + 1)
+        math.comb(trials, index)
+        * chance**index
+        * (1 - chance) ** (trials - index)
+        for index in range(hits, trials + 1)
     )
 
 
-def completeness(rows) -> tuple[int, int]:
-    """Prints coverage and returns the observed window."""
-    lo = min(r[3] for r in rows)
-    hi = max(r[4] or r[3] for r in rows)
-    target = sorted((r[3], r[4] or hi, r[2]) for r in rows if r[0] == TARGET)
+def merge_spans(spans: list[tuple[int, int]], tolerance: int = 0):
+    merged: list[list[int]] = []
+    for start, end in sorted(spans):
+        if end <= start:
+            continue
+        if not merged or start > merged[-1][1] + tolerance:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+    return [(start, end) for start, end in merged]
 
-    covered, holes, previous_end = 0, [], None
-    for start, end, _ in target:
-        if previous_end is not None and start > previous_end + MINUTE:
-            holes.append((previous_end, start))
-        covered += end - max(start, previous_end or start)
-        previous_end = max(previous_end or end, end)
-    unknown = sum(e - s for s, e, state in target if state == "unknown")
 
+def observed_spans(intervals: list[Interval]) -> list[tuple[int, int]]:
+    return merge_spans(
+        [
+            (row.started, row.confirmed)
+            for row in intervals
+            if row.key == TARGET
+            and row.relation == "target"
+            and row.reason != "legacy"
+            and row.state != "unknown"
+        ],
+        CONTINUITY_GAP,
+    )
+
+
+def clean_lifts(intervals: list[Interval], key: str) -> list[int]:
+    """Down-to-up changes witnessed inside one continuous source session."""
+    grouped: dict[tuple[str, str], list[Interval]] = defaultdict(list)
+    for row in intervals:
+        if row.key == key:
+            grouped[(row.source, row.key)].append(row)
+    lifts = []
+    for rows in grouped.values():
+        rows.sort(key=lambda row: row.started)
+        for previous, current in zip(rows, rows[1:]):
+            if (
+                previous.state == "down"
+                and current.state == "up"
+                and current.reason == "state_change"
+                and current.session is not None
+                and current.session == previous.session
+                and 0 <= current.started - previous.confirmed <= CONTINUITY_GAP
+                and current.confirmed >= current.started + 30_000
+            ):
+                lifts.append(current.started)
+    return sorted(set(lifts))
+
+
+def completeness(intervals: list[Interval], continuity_supported: bool):
+    trustworthy = [row for row in intervals if row.reason != "legacy"]
     print("COMPLETENESS")
-    print(f"  window          {local(lo):%a %d %b %H:%M} -> {local(hi):%a %d %b %H:%M} local")
-    print(f"  duration        {(hi - lo) / 3.6e6:.1f} h")
-    print(f"  coverage        {100 * covered / max(hi - lo, 1):.0f}% of the window has a recorded state")
-    print(f"  unknown         {unknown / 3.6e6:.1f} h")
+    if not continuity_supported:
+        print("  LEGACY DATABASE: successful-reading continuity was not stored.")
+        print("  Recorded interval ends are not treated as proof the app was watching.")
+        return []
+    if not trustworthy:
+        legacy = sum(row.reason == "legacy" for row in intervals)
+        print(f"  {legacy} legacy intervals retained for display; 0 trainable intervals")
+        print("  Collection with the new build has not established coverage yet.")
+        return []
+    spans = observed_spans(intervals)
+    if not spans:
+        print("  no continuously confirmed target coverage yet")
+        return []
+    lo, hi = spans[0][0], spans[-1][1]
+    covered = sum(end - start for start, end in spans)
+    holes = [
+        (left[1], right[0])
+        for left, right in zip(spans, spans[1:])
+        if right[0] > left[1]
+    ]
+    print(
+        f"  window          {local(lo):%a %d %b %H:%M} -> "
+        f"{local(hi):%a %d %b %H:%M} local"
+    )
+    print(f"  elapsed         {(hi - lo) / 3.6e6:.1f} h")
+    print(
+        f"  confirmed       {covered / 3.6e6:.1f} h "
+        f"({100 * covered / max(hi - lo, 1):.0f}%)"
+    )
+    print(
+        f"  trainable rows  {len(trustworthy)} "
+        f"({sum(row.reason == 'legacy' for row in intervals)} legacy excluded)"
+    )
     if holes:
-        print(f"  GAPS            {len(holes)} — the app was not recording:")
+        print(f"  gaps            {len(holes)}; no outcomes are inferred across them")
         for start, end in holes[:5]:
-            print(f"                    {local(start):%d %b %H:%M} for {(end - start) / MINUTE:.0f} min")
-        print("  Gaps bias every rate below. Treat the numbers as provisional.")
+            print(
+                f"                  {local(start):%d %b %H:%M} "
+                f"for {(end - start) / MINUTE:.0f} min"
+            )
     else:
         print("  gaps            none")
-    return lo, hi
+    return spans
 
 
-def day_types(openings) -> dict[str, list[int]]:
-    kinds = defaultdict(list)
+def day_types(openings: list[int]):
+    kinds: dict[str, list[int]] = defaultdict(list)
     for opening in openings:
         kinds["weekend" if local(opening).weekday() >= 5 else "weekday"].append(opening)
     return kinds
 
 
-def clock_section(openings) -> None:
+def clock_section(openings: list[int]) -> None:
     print("\nCLOCK")
-    daytime = [o for o in openings if 7 <= local(o).hour < 19]
+    daytime = [opening for opening in openings if 7 <= local(opening).hour < 22]
     if len(daytime) < 8:
-        print(f"  only {len(daytime)} daytime openings — too few to judge")
+        print(f"  only {len(daytime)} clean daytime openings — too few to judge")
         return
-    offsets = sorted(clock_offset(o) for o in daytime)
-    print(f"  {len(daytime)} daytime openings")
+    offsets = sorted(clock_offset(opening) for opening in daytime)
+    print(f"  {len(daytime)} clean daytime openings")
     print(f"  {'window':<14}{'captured':>10}{'chance':>9}{'lift':>7}{'p':>10}")
-    for low, high, name in ((-5, 5, "+/-5 min"), (-10, 5, "-10..+5"), (-12, 5, "-12..+5")):
-        hits = sum(1 for o in offsets if low <= o <= high)
+    for low, high, name in (
+        (-5, 5, "+/-5 min"),
+        (-10, 5, "-10..+5"),
+        (-12, 5, "-12..+5"),
+    ):
+        hits = sum(low <= offset <= high for offset in offsets)
         chance = (high - low) * 2 / 60
         lift = (hits / len(offsets)) / chance if chance else 0
-        p = binomial_tail(hits, len(offsets), chance)
-        print(f"  {name:<14}{hits:>4}/{len(offsets):<5}{chance:>8.0%}{lift:>7.2f}{p:>10.4f}")
-    print("  The asymmetric window is the one to judge on: the tender lifts")
-    print("  ahead of the scheduled minute, so a centred window measures the")
-    print("  wrong thing and understates a real effect.")
+        p_value = binomial_tail(hits, len(offsets), chance)
+        print(
+            f"  {name:<14}{hits:>4}/{len(offsets):<5}{chance:>8.0%}"
+            f"{lift:>7.2f}{p_value:>10.4f}"
+        )
 
 
-def upstream_section(ups, openings, lo, hi) -> None:
+def covered_grid(spans: list[tuple[int, int]]) -> list[int]:
+    grid = []
+    horizon = HORIZON * MINUTE
+    for start, end in spans:
+        first = start - start % MINUTE + MINUTE
+        grid.extend(range(first, end - horizon + 1, MINUTE))
+    return sorted(set(grid))
+
+
+def upstream_section(ups, openings, spans) -> None:
     print("\nUPSTREAM")
-    grid = list(range(lo, hi - HORIZON * MINUTE, MINUTE))
-    if not grid:
-        print("  window too short")
+    grid = covered_grid(spans)
+    if len(grid) < 120:
+        print(f"  only {len(grid)} fully observed forecast minutes — too few to judge")
         return
 
     def opens(moment: int) -> bool:
-        return any(moment < t <= moment + HORIZON * MINUTE for t in openings)
+        return any(
+            moment < event <= moment + HORIZON * MINUTE for event in openings
+        )
 
-    base = sum(1 for m in grid if opens(m)) / len(grid)
-    print(f"  base rate       {base:.0%} of minutes precede an opening within {HORIZON} min")
-
+    base = sum(opens(moment) for moment in grid) / len(grid)
+    print(
+        f"  base rate       {base:.0%} of observed minutes precede an opening "
+        f"within {HORIZON} min"
+    )
     rank = {key: index for index, key in enumerate(RIVER)}
 
     def lifted(moment, window, keys):
-        return [k for k in keys if any(moment - window * MINUTE <= e <= moment for e in ups.get(k, []))]
+        return [
+            key
+            for key in keys
+            if any(
+                moment - window * MINUTE <= event <= moment
+                for event in ups.get(key, [])
+            )
+        ]
 
-    def ordered(moment, window) -> bool:
-        events = sorted((e, k) for k in RIVER for e in ups.get(k, []) if moment - window * MINUTE <= e <= moment)
+    def ordered(moment, window):
+        events = sorted(
+            (event, key)
+            for key in RIVER
+            for event in ups.get(key, [])
+            if moment - window * MINUTE <= event <= moment
+        )
         if len(events) < 2:
             return False
-        ranks = [rank[k] for _, k in events]
-        return all(b < a for a, b in zip(ranks, ranks[1:]))
+        ranks = [rank[key] for _, key in events]
+        return all(later < earlier for earlier, later in zip(ranks, ranks[1:]))
 
     print(f"  {'feature':<30}{'fires':>7}{'precision':>11}{'lift':>7}")
     results = {}
     for name, rule in (
-        ("ordered downstream run, 20m", lambda m: ordered(m, 20)),
-        ("ordered downstream run, 30m", lambda m: ordered(m, 30)),
-        ("any two upstream, 20m", lambda m: len(lifted(m, 20, RIVER)) >= 2),
-        ("any one upstream, 15m", lambda m: len(lifted(m, 15, RIVER)) >= 1),
+        ("ordered downstream run, 20m", lambda moment: ordered(moment, 20)),
+        ("ordered downstream run, 30m", lambda moment: ordered(moment, 30)),
+        (
+            "any two upstream, 20m",
+            lambda moment: len(lifted(moment, 20, RIVER)) >= 2,
+        ),
+        (
+            "any one upstream, 15m",
+            lambda moment: len(lifted(moment, 15, RIVER)) >= 1,
+        ),
     ):
-        fires = [m for m in grid if rule(m)]
-        precision = (sum(1 for m in fires if opens(m)) / len(fires)) if fires else 0
+        fires = [moment for moment in grid if rule(moment)]
+        precision = sum(opens(moment) for moment in fires) / len(fires) if fires else 0
         lift = precision / base if base else 0
         results[name] = lift
         print(f"  {name:<30}{len(fires):>7}{precision:>10.0%}{lift:>7.2f}")
 
-    print("\n  per-bridge, median minutes to the next opening after it lifts")
-    baseline = statistics.median(
-        [next((t - m) / MINUTE for t in openings if t > m) for m in grid if any(t > m for t in openings)]
+    best = max(
+        results["ordered downstream run, 20m"],
+        results["ordered downstream run, 30m"],
     )
-    print(f"  {'bridge':<14}{'lifts':>7}{'median wait':>13}{'vs base':>9}")
-    for key in RIVER:
-        events = ups.get(key, [])
-        waits = [next((t - e) / MINUTE for t in openings if t > e) for e in events if any(t > e for t in openings)]
-        if not waits:
-            continue
-        median = statistics.median(waits)
-        flag = "" if len(waits) >= 20 else "  (thin)"
-        print(f"  {key:<14}{len(events):>7}{median:>10.0f} min{median - baseline:>+8.0f}{flag}")
-
+    weekday = sum(local(opening).weekday() < 5 for opening in openings)
     print("\n  VERDICT (pre-registered)")
-    best_ordered = max(results["ordered downstream run, 20m"], results["ordered downstream run, 30m"])
-    if best_ordered < 1.2:
-        print(f"    ordered movement lift {best_ordered:.2f} < 1.20 — does not support its weight")
-        print("    in this window. Halve outbound_high/outbound_very_high only once")
-        print("    this holds across 100+ openings including a weekday sample.")
-    elif best_ordered > 2.0:
-        print(f"    ordered movement lift {best_ordered:.2f} > 2.00 — supports raising its weight")
+    if len(openings) < 100 or weekday == 0:
+        print(
+            f"    gate not met: {len(openings)}/100 clean openings, "
+            f"{weekday} weekday"
+        )
+        print(
+            f"    ordered lift is {best:.2f}; keep collecting and do not change weights"
+        )
+    elif best < 1.2:
+        print(
+            f"    ordered lift {best:.2f} < 1.20 with the evidence gate met: "
+            "halve both weights"
+        )
+    elif best > 2.0 and weekday >= 50:
+        print(
+            f"    ordered lift {best:.2f} > 2.00 with {weekday} weekday "
+            "openings: raise weights"
+        )
     else:
-        print(f"    ordered movement lift {best_ordered:.2f} — inconclusive, keep collecting")
+        print(f"    ordered lift {best:.2f} is inconclusive: keep current weights")
 
 
-def backtest(ups, openings, lo, hi) -> None:
-    print("\nHELD-OUT BACKTEST  (train on the first 60%, score the rest)")
-    grid = list(range(lo, hi - HORIZON * MINUTE, MINUTE))
-    split = lo + int((hi - lo) * 0.6)
-    test = [m for m in grid if m >= split]
-    if len(test) < 120:
-        print("  held-out tail too short to score")
+def transit_section(transits, openings) -> None:
+    print("\nRIVER TRANSITS")
+    if transits is None:
+        print("  no river_transits table")
         return
+    if not transits:
+        print("  no pilots-board movements recorded yet")
+        return
+    by_direction = defaultdict(list)
+    used_openings: set[int] = set()
+    for _vessel, _action, direction, scheduled, placeholder, _first, _last in transits:
+        following = [
+            event
+            for event in openings
+            if event not in used_openings
+            and scheduled < event <= scheduled + 180 * MINUTE
+        ]
+        if following:
+            matched = min(following)
+            used_openings.add(matched)
+            by_direction[direction or "unknown"].append(
+                ((matched - scheduled) / MINUTE, placeholder)
+            )
+    if not by_direction:
+        print(f"  {len(transits)} movements, none paired to a clean opening")
+        return
+    print(
+        f"  {'direction':<12}{'paired':>8}{'median':>9}"
+        f"{'IQR':>16}{'placeholder':>13}"
+    )
+    for direction, pairs in sorted(by_direction.items()):
+        offsets = sorted(pair[0] for pair in pairs)
+        placeholder = next(
+            (pair[1] for pair in pairs if pair[1] is not None), None
+        )
+        median = statistics.median(offsets)
+        quartiles = statistics.quantiles(offsets, n=4) if len(offsets) >= 4 else None
+        spread = (
+            f"{quartiles[0]:.0f} to {quartiles[2]:.0f} min"
+            if quartiles
+            else "--"
+        )
+        shown = f"{placeholder} min" if placeholder is not None else "--"
+        print(
+            f"  {direction:<12}{len(offsets):>8}{median:>6.0f} min"
+            f"{spread:>16}{shown:>13}"
+        )
+        if len(offsets) < 20:
+            print(f"    gate not met: need {20 - len(offsets)} more {direction} pairs")
+        elif quartiles and quartiles[2] - quartiles[0] <= 40:
+            print(
+                f"    supported: use {median:.0f} min and mark this direction calibrated"
+            )
+        else:
+            print(
+                "    sample is large enough but too dispersed to publish as a countdown"
+            )
 
-    def opens(moment: int) -> bool:
-        return any(moment < t <= moment + HORIZON * MINUTE for t in openings)
 
-    def measure(name, rule):
-        fires = [m for m in test if rule(m)]
-        hits = sum(1 for m in fires if opens(m))
-        misses = sum(1 for m in test if opens(m) and not rule(m))
-        precision = hits / len(fires) if fires else 0
-        recall = hits / (hits + misses) if hits + misses else 0
-        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0
-        print(f"  {name:<26}{precision:>7.0%}{recall:>9.0%}{f1:>7.2f}")
-        return f1
+def alert_episodes(
+    samples: list[Forecast],
+    openings: list[int],
+    up_spans: list[tuple[int, int]],
+) -> list[Forecast]:
+    episodes = []
+    previous: Forecast | None = None
+    active = False
+    for sample in samples:
+        gap = previous is None or sample.minute - previous.minute > 2 * MINUTE
+        changed_model = previous is not None and sample.model != previous.model
+        opening_since_previous = previous is not None and any(
+            previous.at < opening <= sample.at for opening in openings
+        )
+        bridge_is_up = any(start <= sample.at <= end for start, end in up_spans)
+        if gap or changed_model or opening_since_previous or bridge_is_up:
+            active = False
+        if bridge_is_up:
+            previous = sample
+            continue
+        if sample.state == "likely" and not active:
+            episodes.append(sample)
+            active = True
+        elif sample.state != "likely":
+            active = False
+        previous = sample
+    return episodes
 
-    def lifted(moment, window):
-        return sum(1 for k in RIVER if any(moment - window * MINUTE <= e <= moment for e in ups.get(k, [])))
 
-    print(f"  {'model':<26}{'prec':>7}{'recall':>9}{'F1':>7}")
-    floor = measure("always fire", lambda m: True)
-    measure("clock -10..+5", lambda m: -10 <= clock_offset(m) <= 5)
-    measure("any upstream, 15m", lambda m: lifted(m, 15) >= 1)
-    measure("clock or two upstream", lambda m: -10 <= clock_offset(m) <= 5 or lifted(m, 20) >= 2)
-    print(f"\n  Any model scoring at or below the 'always fire' floor of {floor:.2f} is")
-    print("  not a predictor. That floor is high because the bridge opens often.")
+def percentile(values: list[float], fraction: float) -> float:
+    if len(values) == 1:
+        return values[0]
+    position = (len(values) - 1) * fraction
+    low = math.floor(position)
+    high = math.ceil(position)
+    return values[low] + (values[high] - values[low]) * (position - low)
+
+
+def score_forecasts(
+    samples: list[Forecast],
+    openings: list[int],
+    up_spans: list[tuple[int, int]],
+    label: str,
+) -> None:
+    episodes = alert_episodes(samples, openings, up_spans)
+    sample_spans = merge_spans(
+        [
+            (sample.at, sample.at + 2 * MINUTE)
+            for sample in samples
+        ],
+        2 * MINUTE,
+    )
+    eligible = [
+        opening
+        for opening in openings
+        if any(start <= opening <= end for start, end in sample_spans)
+    ]
+    matched: list[tuple[Forecast, int]] = []
+    used: set[int] = set()
+    for episode in episodes:
+        candidate = next(
+            (
+                opening
+                for opening in eligible
+                if opening not in used
+                and episode.at < opening <= episode.at + HORIZON * MINUTE
+            ),
+            None,
+        )
+        if candidate is not None:
+            matched.append((episode, candidate))
+            used.add(candidate)
+    precision = len(matched) / len(episodes) if episodes else 0
+    recall = len(used) / len(eligible) if eligible else 0
+    false_alerts = len(episodes) - len(matched)
+    leads = sorted((opening - episode.at) / MINUTE for episode, opening in matched)
+    eta_pairs = [
+        (episode, opening)
+        for episode, opening in matched
+        if episode.eta_min is not None and episode.eta_max is not None
+    ]
+    eta_hits = sum(
+        episode.eta_min <= (opening - episode.at) / MINUTE <= episode.eta_max
+        for episode, opening in eta_pairs
+    )
+    print(
+        f"  {label:<17}{len(episodes):>7}{precision:>9.0%}"
+        f"{recall:>9.0%}{false_alerts:>8}",
+        end="",
+    )
+    print(f"{statistics.median(leads):>8.1f}m" if leads else f"{'--':>9}", end="")
+    print(f"{eta_hits / len(eta_pairs):>9.0%}" if eta_pairs else f"{'--':>9}")
+    if leads:
+        print(
+            f"    lead range: p25 {percentile(leads, .25):.1f}m · "
+            f"p75 {percentile(leads, .75):.1f}m"
+        )
+
+
+def forecast_section(samples, openings, up_spans) -> None:
+    print("\nFORECAST OUTCOMES  (one decision per alert episode)")
+    if samples is None:
+        print(
+            "  no bridge_forecast_samples table — this build predates forecast history"
+        )
+        return
+    if not samples:
+        print("  forecast sampling is enabled; no samples have accumulated yet")
+        return
+    print(
+        f"  {'sample':<17}{'alerts':>7}{'precision':>9}{'recall':>9}"
+        f"{'false':>8}{'lead':>9}{'ETA hit':>9}"
+    )
+    for model in sorted({sample.model for sample in samples}):
+        model_samples = [sample for sample in samples if sample.model == model]
+        score_forecasts(model_samples, openings, up_spans, model)
+        for mode in ("scheduled", "blackout", "on_signal"):
+            subset = [sample for sample in model_samples if sample.mode == mode]
+            if subset:
+                score_forecasts(subset, openings, up_spans, f"  {mode}")
+
+
+def vessel_section(path: Path) -> None:
+    print("\nVESSEL CATALOG")
+    connection = connect(path)
+    try:
+        if not table_exists(connection, "ais_vessel_ledger"):
+            print("  no AIS vessel ledger")
+            return
+        ledger_columns = columns(connection, "ais_vessel_ledger")
+
+        def optional(name: str, fallback: str = "NULL") -> str:
+            return name if name in ledger_columns else fallback
+
+        rows = connection.execute(
+            "SELECT l.mmsi, l.name, l.vessel_class, l.transits_opened, "
+            "l.transits_fits_under, l.first_seen_ms, l.last_seen_ms, "
+            f"{optional('call_sign')}, {optional('imo_number')}, "
+            f"{optional('length_meters')}, {optional('beam_meters')}, "
+            f"{optional('draught_meters')}, COUNT(f.observed_at_ms), "
+            "MIN(f.observed_at_ms), MAX(f.observed_at_ms) "
+            "FROM ais_vessel_ledger l LEFT JOIN ais_track_fixes f ON f.mmsi=l.mmsi "
+            "GROUP BY l.mmsi ORDER BY l.transits_opened DESC, l.last_seen_ms DESC"
+        ).fetchall()
+        transit_count = connection.execute(
+            "SELECT COUNT(*) FROM ais_transits"
+        ).fetchone()[0]
+        opener_offsets = connection.execute(
+            "SELECT f.branch, f.offset_meters FROM ais_track_fixes f "
+            "JOIN ais_vessel_ledger l ON l.mmsi=f.mmsi "
+            "WHERE l.transits_opened > 0 AND f.branch IS NOT NULL "
+            "AND f.offset_meters IS NOT NULL AND f.offset_meters >= 0 "
+            "AND COALESCE(f.speed_knots, 0) > 0.5 "
+            "AND COALESCE(f.posture, '') NOT IN ('moored', 'off_channel', 'deep_draft') "
+            "AND EXISTS (SELECT 1 FROM ais_transits t WHERE t.mmsi=f.mmsi "
+            "AND t.outcome='opened' "
+            "AND ABS(t.crossed_at_ms-f.observed_at_ms) <= 90 * 60000)"
+        ).fetchall()
+    finally:
+        connection.close()
+    openers = [row for row in rows if row[3] > 0]
+    known_outcomes = sum(row[3] + row[4] for row in rows)
+    print(
+        f"  {len(rows)} known hulls · {transit_count} crossings · "
+        f"{known_outcomes} labelled outcomes"
+    )
+    print(
+        f"  {len(openers)} vessels are confirmed bridge-openers; "
+        "their raw fixes are retained"
+    )
+    if not openers:
+        print("  no confirmed opener has been observed yet")
+        return
+    print(
+        f"  {'vessel':<23}{'MMSI':<11}{'class':<12}{'open':>5}"
+        f"{'under':>7}{'fixes':>8}{'track span':>13}"
+    )
+    for row in openers[:25]:
+        (
+            mmsi,
+            name,
+            vessel_class,
+            opened,
+            under,
+            _first,
+            _last,
+            _call,
+            _imo,
+            _length,
+            _beam,
+            _draught,
+            fixes,
+            first_fix,
+            last_fix,
+        ) = row
+        span = (last_fix - first_fix) / 3.6e6 if fixes and fixes > 1 else 0
+        print(
+            f"  {(name or 'Unnamed vessel')[:22]:<23}{mmsi:<11}"
+            f"{(vessel_class or 'unknown')[:11]:<12}{opened:>5}{under:>7}"
+            f"{fixes:>8}{span:>10.1f} h"
+        )
+
+    by_branch: dict[str, list[float]] = defaultdict(list)
+    for branch, offset in opener_offsets:
+        by_branch[branch].append(offset)
+    print("\n  KNOWN-OPENER CORRIDOR FIT")
+    if not by_branch:
+        print("    no projected opener fixes yet")
+        return
+    limits = {
+        "river": 120.0,
+        "north_approach": 150.0,
+        "government_cut": 220.0,
+        "south_approach": 150.0,
+    }
+    print(f"    {'branch':<20}{'fixes':>7}{'median':>10}{'p90':>10}{'inside':>10}")
+    for branch, offsets in sorted(by_branch.items()):
+        offsets.sort()
+        limit = limits.get(branch)
+        inside = (
+            sum(offset <= limit for offset in offsets) / len(offsets)
+            if limit is not None
+            else 0
+        )
+        print(
+            f"    {branch:<20}{len(offsets):>7}"
+            f"{statistics.median(offsets):>8.0f} m"
+            f"{percentile(offsets, .90):>8.0f} m{inside:>9.0%}"
+        )
+        if len(offsets) < 25:
+            print("      thin sample — retain the geometry and keep collecting")
 
 
 def main() -> int:
     path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_DB
-    rows = read(path)
-    lo, hi = completeness(rows)
+    intervals, continuity_supported = read_intervals(path)
+    spans = completeness(intervals, continuity_supported)
+    openings = clean_lifts(intervals, TARGET)
+    up_spans = merge_spans(
+        [
+            (row.started, row.confirmed)
+            for row in intervals
+            if row.key == TARGET
+            and row.relation == "target"
+            and row.state == "up"
+            and row.reason != "legacy"
+        ],
+        CONTINUITY_GAP,
+    )
+    ups = {key: clean_lifts(intervals, key) for key in RIVER}
 
-    ups = defaultdict(list)
-    for key, _relation, state, started, _ended in rows:
-        if state == "up":
-            ups[key].append(started)
-    for key in ups:
-        ups[key].sort()
-    openings = ups.get(TARGET, [])
-
-    print("\nDAY TYPE")
+    print("\nOUTCOME SET")
     kinds = day_types(openings)
-    for kind in ("weekday", "weekend"):
-        events = kinds.get(kind, [])
-        print(f"  {kind:<10}{len(events):>4} openings"
-              f"{'' if events else '   <- none recorded yet'}")
-    if not kinds.get("weekday"):
-        print("  The regulation makes weekdays a different bridge: scheduled")
-        print("  openings with rush-hour blackouts, against on-signal weekends.")
-        print("  Every weight in the table is still calibrated on weekends only.")
-    elif kinds.get("weekend"):
-        print("  Both present — re-run this per day type before tuning anything.")
-
+    print(f"  {len(openings)} clean Brickell down-to-up transitions")
+    print(f"  weekday        {len(kinds.get('weekday', []))}")
+    print(f"  weekend        {len(kinds.get('weekend', []))}")
     if len(openings) < 10:
-        print(f"\nonly {len(openings)} openings recorded; too few to calibrate on")
-        return 0
+        print("  fewer than 10 clean openings: all tuning verdicts remain locked")
 
-    clock_section(openings)
-    upstream_section(ups, openings, lo, hi)
-    transit_section(read_transits(path), openings)
-    backtest(ups, openings, lo, hi)
-    print("\nNothing was changed. Weights live in crates/policy/src/bridge.rs.")
+    vessel_section(path)
+    if openings:
+        clock_section(openings)
+        upstream_section(ups, openings, spans)
+        transit_section(read_transits(path), openings)
+    else:
+        print("\nCLOCK / UPSTREAM / RIVER TRANSITS")
+        print("  waiting for continuously observed Brickell openings")
+    forecast_section(read_forecasts(path), openings, up_spans)
+    print("\nNothing was changed. Model weights remain human-reviewed.")
     return 0
 
 

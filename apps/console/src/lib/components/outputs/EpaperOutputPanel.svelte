@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { invoke } from '@tauri-apps/api/core';
   import {
-    Activity,
     Bluetooth,
     BluetoothConnected,
     BluetoothSearching,
@@ -9,10 +9,8 @@
     Check,
     CircleDotDashed,
     MonitorUp,
-    Power,
     RefreshCw,
     Send,
-    ShieldAlert,
     Unplug,
     Usb
   } from '@lucide/svelte';
@@ -32,7 +30,8 @@
     type AppPreferences,
     type DisplayConnectionStatus,
     type DisplayDeviceCandidate,
-    type DisplaySettings
+    type DisplaySettings,
+    type FirmwareStatus
   } from '$lib/types';
 
   let { draft = $bindable() }: { draft: AppPreferences } = $props();
@@ -42,13 +41,33 @@
   let deviceStatus = $state<DisplayConnectionStatus>({
     state: 'disconnected',
     transport: null,
-    detail: 'Checking the local transport…'
+    detail: 'Checking the panel connection…'
   });
   let deviceCandidates = $state<DisplayDeviceCandidate[]>([]);
+  let firmware = $state<FirmwareStatus | null>(null);
+  let reflashingFirmware = $state(false);
+
+  const durableBleName = /^BrickellStatus [0-9A-F]{4}$/;
+
+  function isDurableBleName(name: string): boolean {
+    return durableBleName.test(name) && name !== 'BrickellStatus 0000';
+  }
+
+  function panelDisplayName(status: DisplayConnectionStatus): string {
+    if (status.transport === 'ble') {
+      return status.deviceName && isDurableBleName(status.deviceName)
+        ? status.deviceName
+        : 'BrickellStatus panel';
+    }
+    if (status.transport === 'usb') return 'USB panel';
+    return 'No panel connected';
+  }
 
   // Assume USB until the backend says otherwise, so the register never flickers
   // a smaller set of choices on a desktop that has them all.
   let usbDisplay = $state(true);
+  // Writing firmware needs a serial bootloader, which no phone can reach.
+  let flashingSupported = $state(true);
 
   const allTransports: Array<{
     id: DisplaySettings['transport'];
@@ -56,10 +75,10 @@
     detail: string;
     icon: typeof Cable;
   }> = [
-    { id: 'preview', label: 'Render only', detail: 'Render frames without opening hardware.', icon: MonitorUp },
-    { id: 'auto', label: 'Automatic', detail: 'Use a device you explicitly scan for and select.', icon: Cable },
-    { id: 'usb', label: 'USB only', detail: 'Native serial with INK1 acknowledgement.', icon: Usb },
-    { id: 'ble', label: 'Bluetooth only', detail: 'Direct in-app GATT connection.', icon: Bluetooth }
+    { id: 'preview', label: 'No panel', detail: 'Draw frames on screen only. Nothing is sent to hardware.', icon: MonitorUp },
+    { id: 'auto', label: 'Whichever works', detail: 'Use the panel you picked, over USB or Bluetooth.', icon: Cable },
+    { id: 'usb', label: 'USB cable', detail: 'Only talk to the panel over the cable.', icon: Usb },
+    { id: 'ble', label: 'Bluetooth', detail: 'Only talk to the panel over Bluetooth.', icon: Bluetooth }
   ];
 
   // On a phone there is no serial port to open, so "USB only" would be a
@@ -78,6 +97,18 @@
   const geometry = $derived(PANEL_GEOMETRY[panel]);
   const detected = $derived(Boolean(deviceStatus.panel));
 
+  // E213's two controller images are internal recovery candidates, not two
+  // panel choices. This single reflash action starts with the recommended image;
+  // the backend requires READY and tries the other E213 controller once when
+  // needed, without treating retained pixels as proof that firmware is alive.
+  const reflashBuild = $derived(
+    !flashingSupported || firmware?.requirement.state === 'deviceNewer'
+      ? null
+      : firmware?.variants.find((variant) => variant.id === firmware?.recommendedVariantId) ??
+        firmware?.variants.find((variant) => variant.panel === panel) ??
+        null
+  );
+
   const epaperOutput = $derived($snapshot?.outputs.find((output) => output.id === 'epaper'));
   const settingsDirty = $derived(
     Boolean($preferences && JSON.stringify(draft.display) !== JSON.stringify($preferences.display))
@@ -89,6 +120,7 @@
       .then((capabilities) => {
         if (disposed) return;
         usbDisplay = capabilities.usbDisplay;
+        flashingSupported = capabilities.firmwareFlashing;
         // A preference carried over from a desktop install would otherwise
         // leave the phone pointed at a transport it cannot open.
         if (!capabilities.usbDisplay && (draft.display.transport === 'usb' || draft.display.transport === 'auto')) {
@@ -113,7 +145,18 @@
         }
       }
     };
+    const refreshFirmware = async () => {
+      try {
+        const status = await invoke<FirmwareStatus>('get_firmware_status');
+        if (!disposed) firmware = status;
+      } catch {
+        // No Tauri bridge, or no bundled firmware: the reflash control simply
+        // does not appear rather than showing an error nobody can act on.
+        if (!disposed) firmware = null;
+      }
+    };
     void refresh();
+    void refreshFirmware();
     const timer = window.setInterval(() => void refresh(), 5_000);
     return () => {
       disposed = true;
@@ -139,26 +182,34 @@
     try {
       deviceCandidates = await scanDisplayDevices();
       if (!deviceCandidates.length) {
-        notice.set({ ok: false, message: 'No panel transport was discovered. Wake the board, allow Bluetooth, or connect USB and scan again.' });
+        notice.set({ ok: false, message: 'No panel found. Switch the board on, allow Bluetooth, or plug in the USB cable and look again.' });
       }
     } catch (error) {
-      notice.set({ ok: false, message: error instanceof Error ? error.message : 'Device scan failed.' });
+      notice.set({ ok: false, message: error instanceof Error ? error.message : 'The panel search failed.' });
     } finally {
       deviceBusy = null;
     }
   }
 
   async function connectDevice(device: DisplayDeviceCandidate) {
+    const remembersBleRoute = device.transport === 'ble' && isDurableBleName(device.name);
     deviceBusy = 'connect';
     deviceStatus = {
       state: 'connecting',
       transport: device.transport,
       deviceName: device.name,
-      detail: `Opening ${device.transport === 'ble' ? 'Bluetooth LE' : 'USB'} transport…`
+      detail: `Connecting over ${device.transport === 'ble' ? 'Bluetooth' : 'USB'}…`
     };
     try {
       draft.display.transport = device.transport;
-      if (device.transport === 'usb') draft.display.serialPort = device.id.replace(/^usb:/, '');
+      if (device.transport === 'usb') {
+        draft.display.serialPort = device.id.replace(/^usb:/, '');
+      } else {
+        // A platform peripheral ID is safe for this live app session. Only the
+        // firmware's board-specific name is safe after restart; old generic or
+        // missing names can identify a different panel on the same desk.
+        draft.display.bleName = remembersBleRoute ? device.name : '';
+      }
       const saved = await persistPreferences($state.snapshot(draft));
       if (!saved.ok) {
         deviceStatus = { state: 'error', transport: device.transport, deviceName: device.name, detail: saved.message };
@@ -167,7 +218,11 @@
       deviceStatus = await connectDisplayDevice(device.id, device.transport);
       notice.set({
         ok: deviceStatus.state === 'connected',
-        message: deviceStatus.state === 'connected' ? `${deviceStatus.detail} This device is now the saved display route.` : deviceStatus.detail
+        message: deviceStatus.state === 'connected'
+          ? remembersBleRoute || device.transport === 'usb'
+            ? `${deviceStatus.detail} This is now your saved panel.`
+            : `${deviceStatus.detail} Connected for this session. The panel does not provide a unique name, so the app cannot reconnect to it automatically.`
+          : deviceStatus.detail
       });
     } catch (error) {
       deviceStatus = {
@@ -179,6 +234,20 @@
       notice.set({ ok: false, message: deviceStatus.detail });
     } finally {
       deviceBusy = null;
+    }
+  }
+
+  async function reflashPanelFirmware() {
+    if (!firmware?.port || !reflashBuild) return;
+    reflashingFirmware = true;
+    try {
+      await invoke('flash_firmware', { variantId: reflashBuild.id, port: firmware.port });
+      firmware = await invoke<FirmwareStatus>('get_firmware_status');
+      notice.set({ ok: true, message: 'Panel firmware was written and verified. The saved connection now follows this panel.' });
+    } catch (error) {
+      notice.set({ ok: false, message: error instanceof Error ? error.message : 'Panel firmware could not be reflashed.' });
+    } finally {
+      reflashingFirmware = false;
     }
   }
 
@@ -216,7 +285,7 @@
   <div class="epaper-work">
     <div class="transport-work">
       <fieldset>
-        <legend>Connection strategy</legend>
+        <legend>How to connect</legend>
         <div class="transport-register">
           {#each transports as transport}
             {@const TransportIcon = transport.icon}
@@ -241,22 +310,24 @@
             {/if}
           </div>
           <div>
-            <span>Live device circuit</span>
             <h3 id="device-setup-heading">
               {deviceStatus.state === 'connected'
                 ? `${deviceStatus.transport === 'ble' ? 'Bluetooth LE' : 'USB'} connected`
                 : deviceStatus.state === 'connecting'
                   ? 'Opening connection'
                   : deviceStatus.state === 'unavailable'
-                    ? 'Transport unavailable'
+                    ? 'Connection unavailable'
                     : deviceStatus.state === 'error'
-                      ? 'Connection needs attention'
-                      : 'Ready to discover'}
+                      ? "Can't reach the panel"
+                      : 'Not connected'}
             </h3>
             <p>{deviceStatus.detail}</p>
           </div>
           <div class="status-facts">
-            <span>{deviceStatus.deviceName ?? `InkDock ${geometry.label}`}</span>
+            <!-- The picker may expose a legacy advertisement so it can be
+                 selected by exact session ID. Once connected, only the current
+                 board-specific identity deserves to become user-facing copy. -->
+            <span>{panelDisplayName(deviceStatus)}</span>
             <strong>{deviceStatus.transport?.toUpperCase() ?? 'NO LINK'}</strong>
             {#if deviceStatus.lastAckAt}<small>Last ACK {new Date(deviceStatus.lastAckAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</small>{/if}
           </div>
@@ -265,27 +336,21 @@
           {/if}
         </header>
 
-        <ol class="pairing-steps">
-          <li><span>01</span><Power size={20} strokeWidth={1.45} aria-hidden="true" /><div><strong>Power the board</strong><small>It should show <code>READY / USB + BLE</code>.</small></div></li>
-          <li class:complete={deviceCandidates.length > 0 || deviceStatus.state === 'connected'}>
-            <span>02</span><BluetoothSearching size={20} strokeWidth={1.45} aria-hidden="true" />
-            <div><strong>Discover a route</strong><small>Choose and save a hardware mode, then scan.</small></div>
-            <button class="scan-action" onclick={scanDevices} disabled={deviceBusy !== null || draft.display.transport === 'preview' || settingsDirty}>
-              <RefreshCw size={16} class={deviceBusy === 'scan' ? 'spinning' : undefined} aria-hidden="true" />
-              {deviceBusy === 'scan' ? 'Scanning' : settingsDirty ? 'Save settings first' : 'Scan nearby'}
-            </button>
-          </li>
-          <li class:complete={deviceStatus.state === 'connected' && Boolean(deviceStatus.lastAckAt)}><span>03</span><Activity size={20} strokeWidth={1.45} aria-hidden="true" /><div><strong>Prove the screen</strong><small>Only an <code>ACK INK1</code> marks the route healthy.</small></div></li>
-        </ol>
+        <div class="find-panel">
+          <p>Plug the panel in or switch it on, then look for it. Each board shows its own four-character code on screen, so you can tell two of them apart.</p>
+          <button class="scan-action" onclick={scanDevices} disabled={deviceBusy !== null || draft.display.transport === 'preview' || settingsDirty}>
+            <RefreshCw size={16} class={deviceBusy === 'scan' ? 'spinning' : undefined} aria-hidden="true" />
+            {deviceBusy === 'scan' ? 'Looking' : settingsDirty ? 'Applying changes…' : 'Find my panel'}
+          </button>
+        </div>
 
-        <aside class="ble-boundary" aria-labelledby="ble-boundary-heading">
-          <ShieldAlert size={22} strokeWidth={1.45} aria-hidden="true" />
-          <div><h4 id="ble-boundary-heading">Bluetooth frame writes are not authenticated</h4><p>INK1 does not authenticate GATT clients. <code>ACK INK1</code> confirms a complete frame; it does not prove who sent it.</p></div>
-        </aside>
 
         {#if deviceCandidates.length}
           <div class="device-candidates" aria-label="Discovered display devices">
-            <header><span>Discovered now</span><strong>{deviceCandidates.length.toString().padStart(2, '0')}</strong></header>
+            <header>
+              <span>Panels found — match the code on the screen</span>
+              <strong>{deviceCandidates.length.toString().padStart(2, '0')}</strong>
+            </header>
             {#each deviceCandidates as device (device.id)}
               <article>
                 <div class="candidate-transport">{#if device.transport === 'ble'}<Bluetooth size={20} strokeWidth={1.45} aria-hidden="true" />{:else}<Usb size={20} strokeWidth={1.45} aria-hidden="true" />{/if}<span>{device.transport === 'ble' ? 'BLE' : 'USB'}</span></div>
@@ -296,20 +361,9 @@
           </div>
         {/if}
 
-        <details class="advanced-transport">
-          <summary>Advanced transport selectors</summary>
-          <div class="connection-fields">
-            <label class="field"><span>USB serial port</span><input bind:value={draft.display.serialPort} placeholder="auto" maxlength="180" disabled={draft.display.transport === 'ble' || draft.display.transport === 'preview'} /><small class="field-note">Use <code>auto</code> to discover the Espressif interface.</small></label>
-            <label class="field"><span>Bluetooth device name</span><input bind:value={draft.display.bleName} maxlength="64" disabled={draft.display.transport === 'usb' || draft.display.transport === 'preview'} /><small class="field-note">Any board advertising the INK1 service is found whatever it is named; this only pins discovery to one of them.</small></label>
-          </div>
-        </details>
       </section>
 
-      <div class="timing-register">
-        <label class="field"><span>Routine dwell</span><input type="number" min="10" max="180" bind:value={draft.display.dwellSeconds} /><small class="field-note">Seconds per normal frame.</small></label>
-        <label class="field"><span>Return home after</span><input type="number" min="1" max="20" bind:value={draft.display.returnHomeAfter} /><small class="field-note">Routine frames before home.</small></label>
-        <label class="field"><span>Full refresh cadence</span><input type="number" min="1" max="100" bind:value={draft.display.fullRefreshEvery} /><small class="field-note">Frames between ghost-clearing refreshes.</small></label>
-      </div>
+      <p class="automatic-cadence">Current items advance automatically. Urgent notices move to the front, and the panel handles full refreshes as maintenance.</p>
 
       <!-- Which way up the board is screwed down. The preview stays upright
            either way: it shows what the reader sees, and the reader is looking
@@ -317,7 +371,7 @@
       <fieldset class="orientation">
         <legend>Which way up</legend>
         <div role="radiogroup" aria-label="Panel orientation">
-          {#each [{ id: 'upright', label: 'Upright', hint: 'Cable on the left' }, { id: 'inverted', label: 'Inverted', hint: 'Cable on the right' }] as option (option.id)}
+          {#each [{ id: 'upright', label: 'Upright' }, { id: 'inverted', label: 'Upside down' }] as option (option.id)}
             <button
               type="button"
               role="radio"
@@ -326,16 +380,27 @@
               onclick={() => (draft.display.orientation = option.id as 'upright' | 'inverted')}
             >
               <b>{option.label}</b>
-              <span>{option.hint}</span>
             </button>
           {/each}
         </div>
-        <small class="field-note">Turn the frame over when the board is mounted the other way round. The panel is bonded to the board, so this is the only rotation it can sit at.</small>
+        <small class="field-note">Pick whichever matches the panel in front of you.</small>
       </fieldset>
 
+      {#if reflashBuild && firmware?.port}
+        <div class="panel-rescue">
+          <div>
+            <strong>Panel firmware</strong>
+            <span>Reinstall and verify the firmware bundled with this app. E213 controller selection is automatic.</span>
+          </div>
+          <button class="secondary-action" onclick={reflashPanelFirmware} disabled={reflashingFirmware}>
+            {reflashingFirmware ? 'Reflashing…' : 'Reflash firmware'}
+          </button>
+        </div>
+      {/if}
+
       <div class="test-line">
-        <div><strong>{deviceStatus.state === 'connected' ? 'Ready for a physical proof' : (epaperOutput?.detail ?? 'No device report')}</strong><span>A test succeeds only after the board acknowledges the complete frame.</span></div>
-        <button class="secondary-action action-with-icon" onclick={sendFrame} disabled={displayBusy || deviceStatus.state !== 'connected' || settingsDirty}><Send size={16} aria-hidden="true" /> {displayBusy ? 'Sending frame' : 'Send current frame'}</button>
+        <div><strong>{deviceStatus.state === 'connected' ? 'Connected and ready to test' : (epaperOutput?.detail ?? 'No panel connected')}</strong><span>The test passes only once the panel confirms it got the whole frame.</span></div>
+        <button class="secondary-action action-with-icon" onclick={sendFrame} disabled={displayBusy || deviceStatus.state !== 'connected' || settingsDirty}><Send size={16} aria-hidden="true" /> {displayBusy ? 'Sending' : 'Send a test frame'}</button>
       </div>
     </div>
 
@@ -349,7 +414,7 @@
           {panel}
         />
       {:else}
-        <div class="empty-sheet" role="status"><h3>No live frame yet</h3><p>Refresh the real sources before rendering a frame.</p></div>
+        <div class="empty-sheet" role="status"><h3>No live frame yet</h3><p>No current data is available for a test frame.</p></div>
       {/if}
     </aside>
   </div>

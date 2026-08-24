@@ -6,7 +6,7 @@
   const tabs = [
     { href: '/system', label: 'Health' },
     { href: '/system/outputs', label: 'Outputs' },
-    { href: '/system/log', label: 'Log' }
+    { href: '/system/log', label: 'History' }
   ];
 
   const current = $derived($page.url.pathname.replace(/\/$/, '') || '/system');

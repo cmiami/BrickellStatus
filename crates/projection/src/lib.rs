@@ -18,7 +18,7 @@ use brickellstatus_eink::{
 };
 use brickellstatus_runtime::{
     AppPreferences, AppSnapshot, AvailabilityDto, BridgeStateDto, ChannelKindDto, ChannelSnapshot,
-    InterruptPreset, UrgencyDto,
+    UrgencyDto,
 };
 use jiff::{Timestamp, tz::TimeZone};
 use std::collections::BTreeMap;
@@ -84,11 +84,20 @@ pub fn channel_card(
     } else {
         "NO MATERIAL CHANGE"
     };
+    // A news card already says NEWS in its header. Give its subject row to the
+    // publisher, then spend the lower half on a multi-line synopsis rather than
+    // putting the publisher in a large action box and cutting the story to one
+    // small line.
+    let title = if channel.active && channel.kind == ChannelKindDto::News {
+        signal.map_or(channel.title.as_str(), |signal| signal.action.as_str())
+    } else {
+        channel.title.as_str()
+    };
     ChannelCard::new(
         kind,
         urgency,
         availability,
-        bounded_text(&channel.title, 96),
+        bounded_text(title, 96),
         bounded_text(headline, 160),
         bounded_text(detail, 240),
         bounded_text(action, 160),
@@ -109,7 +118,6 @@ pub fn bounded_text(value: &str, maximum: usize) -> String {
 pub fn display_snapshot(snapshot: &AppSnapshot) -> LiveSnapshot {
     let state = match snapshot.decision.state {
         BridgeStateDto::Clear => SnapshotState::Clear,
-        BridgeStateDto::Possible => SnapshotState::Watch,
         BridgeStateDto::Likely => SnapshotState::Likely,
         BridgeStateDto::Open => SnapshotState::Open,
     };
@@ -256,51 +264,8 @@ pub fn bps_to_percent(bps: u16) -> u8 {
 /// accident.
 pub fn interrupt_allows(
     channel: &ChannelSnapshot,
-    preferences: &AppPreferences,
-    snapshot: &AppSnapshot,
+    _preferences: &AppPreferences,
+    _snapshot: &AppSnapshot,
 ) -> bool {
-    if !channel.enabled || !channel.active {
-        return false;
-    }
-    match channel.interrupt_preset {
-        InterruptPreset::Off | InterruptPreset::Custom => false,
-        InterruptPreset::Meaningful => !matches!(
-            channel.kind,
-            ChannelKindDto::System | ChannelKindDto::Sports
-        ),
-        InterruptPreset::Recommended => match channel.kind {
-            ChannelKindDto::Bridge => matches!(
-                snapshot.decision.state,
-                BridgeStateDto::Likely | BridgeStateDto::Open
-            ),
-            ChannelKindDto::News => preferences
-                .profile
-                .channels
-                .iter()
-                .find(|preference| preference.id == channel.id)
-                .and_then(|preference| preference.scope.get("breakingOnly"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-            // No score, trade, or draft pick is worth taking over the screen,
-            // whatever the preset. Sports earns its rotation slot and stops
-            // there.
-            ChannelKindDto::System | ChannelKindDto::Sports => false,
-            ChannelKindDto::Weather
-            | ChannelKindDto::Official
-            | ChannelKindDto::Hurricane
-            | ChannelKindDto::Earthquake
-            | ChannelKindDto::Markets => true,
-        },
-        InterruptPreset::ConfirmedOnly => match channel.kind {
-            ChannelKindDto::Bridge => snapshot.decision.state == BridgeStateDto::Open,
-            ChannelKindDto::Official | ChannelKindDto::Hurricane | ChannelKindDto::Earthquake => {
-                true
-            }
-            ChannelKindDto::Weather
-            | ChannelKindDto::News
-            | ChannelKindDto::Sports
-            | ChannelKindDto::Markets
-            | ChannelKindDto::System => false,
-        },
-    }
+    channel.enabled && channel.active && !matches!(channel.priority.urgency, UrgencyDto::Routine)
 }

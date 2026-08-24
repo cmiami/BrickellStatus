@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::Mutex,
     time::{sleep, timeout},
 };
@@ -12,7 +12,7 @@ use tokio_serial::{
 
 use super::{
     DeviceReply, PacketTransport, TransportError, TransportKind, TransportReceipt, device_reply,
-    validate_for_transport,
+    safe_device_text, validate_for_transport,
 };
 
 /// One Espressif-compatible native USB serial interface discovered on the host.
@@ -142,7 +142,7 @@ impl UsbTransport {
             .map_err(|error| usb_io(error.to_string()))?;
 
         sleep(self.config.startup_delay).await;
-        let banner = probe_ready(&mut stream, self.config.ready_timeout).await?;
+        let banner = request_identity(&mut stream, self.config.ready_timeout).await?;
         Ok((stream, banner, port_name))
     }
 
@@ -176,6 +176,24 @@ impl UsbTransport {
         })
     }
 
+    /// Asks an already-open panel for its current READY banner without drawing
+    /// or refreshing the e-paper glass.
+    ///
+    /// Current firmware uses this lightweight identity query to expose a fresh
+    /// battery reading. A legacy panel that ignores the query returns `None`.
+    pub async fn read_banner(&self) -> Result<Option<String>, TransportError> {
+        let mut state = self.state.lock().await;
+        let Some(stream) = state.stream.as_mut() else {
+            return Ok(None);
+        };
+        let banner = request_identity(stream, self.config.ready_timeout).await?;
+        if let Some(banner) = banner.as_ref() {
+            state.ready_observed = true;
+            state.banner = Some(banner.clone());
+        }
+        Ok(banner)
+    }
+
     /// Closes the retained serial interface without sending data.
     pub async fn disconnect(&self) {
         let mut state = self.state.lock().await;
@@ -188,7 +206,7 @@ impl UsbTransport {
         &self,
         stream: &mut SerialStream,
         packet: &[u8],
-    ) -> Result<(), TransportError> {
+    ) -> Result<String, TransportError> {
         let chunk_size = self.config.chunk_size.max(1);
         for chunk in packet.chunks(chunk_size) {
             stream
@@ -225,10 +243,10 @@ impl PacketTransport for UsbTransport {
             .send_on_stream(state.stream.as_mut().expect("connected above"), packet)
             .await;
         match result {
-            Ok(()) => Ok(TransportReceipt {
+            Ok(acknowledgement) => Ok(TransportReceipt {
                 transport: TransportKind::Usb,
                 ready_observed: state.ready_observed,
-                acknowledgement: "ACK INK1".into(),
+                acknowledgement,
             }),
             Err(error) => {
                 state.stream = None;
@@ -247,6 +265,29 @@ pub async fn discover_espressif_port() -> Result<Option<String>, TransportError>
         .into_iter()
         .next()
         .map(|device| device.port))
+}
+
+/// Drops the `/dev/tty.*` twin of a device that also offers `/dev/cu.*`.
+///
+/// macOS exposes one USB serial device under two nodes. They are the same
+/// hardware, so listing both offered a picker with each board in it twice, and
+/// the two entries did not behave alike: opening `cu` returns immediately,
+/// while opening `tty` blocks waiting for carrier detect that a CDC device
+/// never asserts, so choosing the wrong twin sat there and then timed out.
+///
+/// `cu` is the outbound node and the one to open. A `tty` entry is kept only
+/// when nothing offers the matching `cu`, so a platform that names things
+/// differently still lists its devices.
+fn prefer_callout_nodes(devices: &mut Vec<UsbDeviceInfo>) {
+    let callouts: std::collections::HashSet<String> = devices
+        .iter()
+        .filter_map(|device| device.port.strip_prefix("/dev/cu."))
+        .map(str::to_owned)
+        .collect();
+    devices.retain(|device| match device.port.strip_prefix("/dev/tty.") {
+        Some(suffix) => !callouts.contains(suffix),
+        None => true,
+    });
 }
 
 /// Lists compatible Espressif USB serial interfaces without opening them.
@@ -290,6 +331,7 @@ pub async fn discover_espressif_devices() -> Result<Vec<UsbDeviceInfo>, Transpor
                 _ => None,
             })
             .collect::<Vec<_>>();
+        prefer_callout_nodes(&mut devices);
         devices.sort_by(|left, right| left.port.cmp(&right.port));
         Ok(devices)
     })
@@ -302,10 +344,38 @@ pub async fn discover_espressif_devices() -> Result<Vec<UsbDeviceInfo>, Transpor
 /// The banner names the build on the board. Returning only "did it speak"
 /// discarded that, which is why a device running exactly the bundled firmware
 /// still reported an unknown build.
-async fn probe_ready(
-    stream: &mut SerialStream,
+/// Asks running BrickellStatus firmware to repeat its identity before waiting.
+///
+/// The boot banner remains compatible with older firmware, but it is a
+/// one-time line and USB re-enumeration can happen after it was printed. The
+/// one-byte query makes a freshly flashed image verifiable at any point. Older
+/// firmware ignores the byte, while a wrong E213 controller image is blocked
+/// before its decoder loop and remains objectively silent.
+async fn request_identity<Stream>(
+    stream: &mut Stream,
     duration: Duration,
-) -> Result<Option<String>, TransportError> {
+) -> Result<Option<String>, TransportError>
+where
+    Stream: AsyncRead + AsyncWrite + Unpin,
+{
+    stream
+        .write_all(b"?")
+        .await
+        .map_err(|error| usb_io(error.to_string()))?;
+    stream
+        .flush()
+        .await
+        .map_err(|error| usb_io(error.to_string()))?;
+    probe_ready(stream, duration).await
+}
+
+async fn probe_ready<Stream>(
+    stream: &mut Stream,
+    duration: Duration,
+) -> Result<Option<String>, TransportError>
+where
+    Stream: AsyncRead + Unpin,
+{
     let mut received = Vec::new();
     let outcome = timeout(duration, async {
         let mut chunk = [0_u8; 256];
@@ -320,9 +390,14 @@ async fn probe_ready(
             }
             received.extend_from_slice(&chunk[..count]);
             match device_reply(&received) {
-                Some(DeviceReply::Ready(banner)) => return Ok(Some(banner)),
-                Some(DeviceReply::Nack(message)) => return Err(TransportError::Nack(message)),
+                Some(DeviceReply::Ready(banner)) if serial_line_complete(&received, "READY") => {
+                    return Ok(Some(banner));
+                }
+                Some(DeviceReply::Nack(message)) if serial_line_complete(&received, "NACK") => {
+                    return Err(TransportError::Nack(message));
+                }
                 Some(DeviceReply::Ack) | None => {}
+                Some(DeviceReply::Ready(_) | DeviceReply::Nack(_)) => {}
             }
         }
     })
@@ -333,7 +408,10 @@ async fn probe_ready(
     }
 }
 
-async fn wait_for_ack(stream: &mut SerialStream, duration: Duration) -> Result<(), TransportError> {
+async fn wait_for_ack(
+    stream: &mut SerialStream,
+    duration: Duration,
+) -> Result<String, TransportError> {
     let mut received = Vec::new();
     timeout(duration, async {
         let mut chunk = [0_u8; 256];
@@ -348,9 +426,17 @@ async fn wait_for_ack(stream: &mut SerialStream, duration: Duration) -> Result<(
             }
             received.extend_from_slice(&chunk[..count]);
             match device_reply(&received) {
-                Some(DeviceReply::Ack) => return Ok(()),
-                Some(DeviceReply::Nack(message)) => return Err(TransportError::Nack(message)),
-                Some(DeviceReply::Ready(_)) | None => {}
+                Some(DeviceReply::Ack) if serial_line_complete(&received, "ACK INK1") => {
+                    let text = String::from_utf8_lossy(&received);
+                    let start = text.find("ACK INK1").expect("reply matched ACK above");
+                    return Ok(safe_device_text(
+                        text[start..].lines().next().unwrap_or("ACK INK1"),
+                    ));
+                }
+                Some(DeviceReply::Nack(message)) if serial_line_complete(&received, "NACK") => {
+                    return Err(TransportError::Nack(message));
+                }
+                Some(DeviceReply::Ack | DeviceReply::Ready(_) | DeviceReply::Nack(_)) | None => {}
             }
         }
     })
@@ -361,9 +447,88 @@ async fn wait_for_ack(stream: &mut SerialStream, duration: Duration) -> Result<(
     })?
 }
 
+/// Serial reads may split one firmware reply at any byte. Wait for the CR/LF
+/// written by `Serial.println` before parsing it; otherwise a long READY banner
+/// can be cached before its trailing `FW<n>` version reaches the host.
+fn serial_line_complete(bytes: &[u8], marker: &str) -> bool {
+    let text = String::from_utf8_lossy(bytes);
+    text.find(marker).is_some_and(|start| {
+        text[start..]
+            .bytes()
+            .any(|byte| matches!(byte, b'\r' | b'\n'))
+    })
+}
+
 fn usb_io(message: String) -> TransportError {
     TransportError::Io {
         transport: TransportKind::Usb,
         message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::duplex;
+
+    #[tokio::test]
+    async fn identity_query_recovers_a_repeatable_ready_banner() {
+        let (mut host, mut device) = duplex(256);
+        let responder = tokio::spawn(async move {
+            let mut query = [0_u8; 1];
+            device.read_exact(&mut query).await.unwrap();
+            assert_eq!(query, [b'?']);
+            device
+                .write_all(b"READY INK1 250x122 3904 abc1234 E213 26B4\n")
+                .await
+                .unwrap();
+        });
+
+        let banner = request_identity(&mut host, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            banner.as_deref(),
+            Some("READY INK1 250x122 3904 abc1234 E213 26B4")
+        );
+        responder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn identity_query_waits_for_a_fragmented_versioned_banner() {
+        let (mut host, mut device) = duplex(256);
+        let responder = tokio::spawn(async move {
+            let mut query = [0_u8; 1];
+            device.read_exact(&mut query).await.unwrap();
+            assert_eq!(query, [b'?']);
+            device
+                .write_all(
+                    b"PROBE attempt=0 pin1=driven pin6=floating\r\nREADY INK1 250x122 3904 e0f6a4d-dirty-261db27dbf0f E213 26B4",
+                )
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            device.write_all(b" FW4 BAT4270\r\n").await.unwrap();
+        });
+
+        let banner = request_identity(&mut host, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            banner.as_deref(),
+            Some("READY INK1 250x122 3904 e0f6a4d-dirty-261db27dbf0f E213 26B4 FW4 BAT4270")
+        );
+        responder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn identity_query_has_a_bounded_silent_result() {
+        let (mut host, _silent_device) = duplex(16);
+        assert_eq!(
+            request_identity(&mut host, Duration::from_millis(1))
+                .await
+                .unwrap(),
+            None
+        );
     }
 }
