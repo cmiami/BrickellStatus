@@ -21,7 +21,10 @@ use chrono::{DateTime, TimeDelta, Utc};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::{sync::RwLock, time::timeout};
+use tokio::{
+    sync::RwLock,
+    time::{Instant, timeout},
+};
 use tokio_tungstenite::{
     connect_async_with_config,
     tungstenite::{Message, protocol::WebSocketConfig},
@@ -40,6 +43,15 @@ use crate::{
 const AISSTREAM_ENDPOINT: &str = "wss://stream.aisstream.io/v0/stream";
 const AISSTREAM_SOURCE_URL: &str = "https://aisstream.io/documentation.html";
 const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 128 * 1024;
+const SUBSCRIPTION_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(10);
+const PONG_TIMEOUT: Duration = Duration::from_secs(10);
+const AISSTREAM_MESSAGE_TYPES: [&str; 5] = [
+    "PositionReport",
+    "StandardClassBPositionReport",
+    "ExtendedClassBPositionReport",
+    "ShipStaticData",
+    "StaticDataReport",
+];
 const MAX_TRACKED_VESSELS: usize = 512;
 const MAX_EXPOSED_TRACKS: usize = 3;
 const MAX_HISTORY_TRACKS: usize = 64;
@@ -900,6 +912,7 @@ async fn run_stream(
             state.health = HealthState::Degraded;
             state.failure = Some(match result {
                 ConnectionExit::Rejected => StreamFailure::Rejected,
+                ConnectionExit::Unconfirmed => StreamFailure::Unconfirmed,
                 ConnectionExit::Unavailable => StreamFailure::Unavailable,
                 ConnectionExit::Cancelled => unreachable!(),
             });
@@ -919,6 +932,7 @@ async fn run_stream(
 enum ConnectionExit {
     Cancelled,
     Rejected,
+    Unconfirmed,
     Unavailable,
 }
 
@@ -926,6 +940,7 @@ enum ConnectionExit {
 enum StreamFailure {
     Starting,
     Rejected,
+    Unconfirmed,
     Unavailable,
 }
 
@@ -934,6 +949,7 @@ impl StreamFailure {
         match self {
             Self::Starting => "AISStream connection is starting",
             Self::Rejected => "AISStream rejected the subscription",
+            Self::Unconfirmed => "AISStream did not confirm the subscription",
             Self::Unavailable => "AISStream connection is unavailable",
         }
     }
@@ -970,13 +986,7 @@ async fn run_connection(
     let subscription = WireSubscription {
         api_key: config.api_key.expose(),
         bounding_boxes: config.subscription.bounding_boxes(),
-        filter_message_types: &[
-            "PositionReport",
-            "StandardClassBPositionReport",
-            "ExtendedClassBPositionReport",
-            "ShipStaticData",
-            "StaticDataReport",
-        ],
+        filter_message_types: &AISSTREAM_MESSAGE_TYPES,
     };
     let Ok(payload) = serde_json::to_string(&subscription) else {
         return ConnectionExit::Unavailable;
@@ -988,32 +998,75 @@ async fn run_connection(
     if !matches!(send, Ok(Ok(()))) {
         return ConnectionExit::Unavailable;
     }
-    {
-        let mut state = state.write().await;
-        state.health = HealthState::Healthy;
-        state.failure = None;
-    }
+    let confirmation_deadline = Instant::now() + SUBSCRIPTION_CONFIRMATION_TIMEOUT;
+    let mut confirmed = false;
+    let mut awaiting_pong = false;
 
     loop {
+        let read_timeout = if confirmed {
+            if awaiting_pong {
+                PONG_TIMEOUT
+            } else {
+                config.idle_timeout
+            }
+        } else {
+            confirmation_deadline.saturating_duration_since(Instant::now())
+        };
         let incoming = tokio::select! {
             () = cancellation.cancelled() => {
                 let _ = timeout(Duration::from_secs(1), websocket.close(None)).await;
                 return ConnectionExit::Cancelled;
             }
-            result = timeout(config.idle_timeout, websocket.next()) => result,
+            result = timeout(read_timeout, websocket.next()) => result,
         };
-        let Ok(Some(Ok(message))) = incoming else {
-            return ConnectionExit::Unavailable;
+        let message = match incoming {
+            Ok(Some(Ok(message))) => message,
+            Err(_) if !confirmed => return ConnectionExit::Unconfirmed,
+            Err(_) if awaiting_pong => return ConnectionExit::Unavailable,
+            Err(_) => {
+                // AIS is event-driven: an empty bridge area can be quiet for
+                // longer than a Class B reporting interval. Probe WebSocket
+                // liveness instead of tearing down a healthy subscription.
+                let ping = tokio::select! {
+                    () = cancellation.cancelled() => return ConnectionExit::Cancelled,
+                    result = timeout(
+                        Duration::from_secs(2),
+                        websocket.send(Message::Ping(Vec::new().into())),
+                    ) => result,
+                };
+                if !matches!(ping, Ok(Ok(()))) {
+                    return ConnectionExit::Unavailable;
+                }
+                awaiting_pong = true;
+                continue;
+            }
+            Ok(None | Some(Err(_))) if confirmed => return ConnectionExit::Unavailable,
+            Ok(None | Some(Err(_))) => return ConnectionExit::Unconfirmed,
         };
+        awaiting_pong = false;
         match message {
             Message::Text(text) => {
+                let confirmation = is_subscription_confirmation(text.as_bytes());
                 if let Err(exit) = handle_payload(text.as_bytes(), config, state).await {
                     return exit;
                 }
+                if confirmation && !confirmed {
+                    confirmed = true;
+                    let mut state = state.write().await;
+                    state.health = HealthState::Healthy;
+                    state.failure = None;
+                }
             }
             Message::Binary(bytes) => {
+                let confirmation = is_subscription_confirmation(&bytes);
                 if let Err(exit) = handle_payload(&bytes, config, state).await {
                     return exit;
+                }
+                if confirmation && !confirmed {
+                    confirmed = true;
+                    let mut state = state.write().await;
+                    state.health = HealthState::Healthy;
+                    state.failure = None;
                 }
             }
             Message::Ping(payload) => {
@@ -1031,10 +1084,19 @@ async fn run_connection(
                     return ConnectionExit::Unavailable;
                 }
             }
-            Message::Close(_) => return ConnectionExit::Unavailable,
+            Message::Close(_) if confirmed => return ConnectionExit::Unavailable,
+            Message::Close(_) => return ConnectionExit::Unconfirmed,
             Message::Pong(_) | Message::Frame(_) => {}
         }
     }
+}
+
+fn is_subscription_confirmation(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .is_some_and(|root| {
+            root.get("MessageType").and_then(Value::as_str) == Some("SubscriptionConfirmation")
+        })
 }
 
 async fn handle_payload(
@@ -1388,11 +1450,12 @@ fn plausible_corridor_crossing(previous: TrackPoint, current: TrackPoint) -> boo
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "PascalCase")]
 struct WireSubscription<'a> {
     #[serde(rename = "APIKey")]
     api_key: &'a str,
+    #[serde(rename = "BoundingBoxes")]
     bounding_boxes: &'a [[[f64; 2]; 2]],
+    #[serde(rename = "FilterMessageTypes")]
     filter_message_types: &'a [&'a str],
 }
 
@@ -2326,6 +2389,32 @@ mod tests {
         let elsewhere =
             AisStreamSubscription::for_bridge("Las Olas", 26.119, -80.119, 12.0).expect("valid");
         assert_eq!(elsewhere.bounding_boxes().len(), 1);
+    }
+
+    #[test]
+    fn subscription_wire_contract_and_confirmation_match_provider_protocol() {
+        let config = config();
+        let wire = WireSubscription {
+            api_key: "fixture-secret-key",
+            bounding_boxes: config.subscription.bounding_boxes(),
+            filter_message_types: &AISSTREAM_MESSAGE_TYPES,
+        };
+        let value = serde_json::to_value(wire).expect("wire subscription JSON");
+        let object = value.as_object().expect("subscription object");
+
+        assert_eq!(object.len(), 3);
+        assert_eq!(object["APIKey"], json!("fixture-secret-key"));
+        assert!(object.contains_key("BoundingBoxes"));
+        assert_eq!(object["FilterMessageTypes"], json!(AISSTREAM_MESSAGE_TYPES));
+        assert!(!object.contains_key("bounding_boxes"));
+        assert!(!object.contains_key("filter_message_types"));
+
+        assert!(is_subscription_confirmation(
+            br#"{"MessageType":"SubscriptionConfirmation","Message":{"CompressionEnabled":false}}"#
+        ));
+        assert!(!is_subscription_confirmation(
+            br#"{"MessageType":"PositionReport"}"#
+        ));
     }
 
     #[test]

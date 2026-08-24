@@ -1,7 +1,12 @@
 import { derived, get, writable } from 'svelte/store';
 
-import { getPreferences, getSnapshot, savePreferences } from './api';
-import type { AppPreferences, AppSnapshot, MutationResult } from './types';
+import { getDisplayStatus, getPreferences, getSnapshot, savePreferences } from './api';
+import type {
+  AppPreferences,
+  AppSnapshot,
+  DisplayConnectionStatus,
+  MutationResult
+} from './types';
 
 export const snapshot = writable<AppSnapshot | null>(null);
 export const preferences = writable<AppPreferences | null>(null);
@@ -9,12 +14,14 @@ export const loading = writable(true);
 export const loadError = writable<string | null>(null);
 export const saving = writable(false);
 export const notice = writable<MutationResult | null>(null);
+export const displayStatus = writable<DisplayConnectionStatus | null>(null);
 
 export const activeChannels = derived(snapshot, ($snapshot) =>
   $snapshot?.channels.filter((channel) => channel.enabled) ?? []
 );
 
 let refreshTimer: ReturnType<typeof setInterval> | undefined;
+let displayStatusTimer: ReturnType<typeof setInterval> | undefined;
 
 export async function loadApp(): Promise<void> {
   loading.set(true);
@@ -45,6 +52,26 @@ export function startSnapshotRefresh(intervalMs = 10_000): void {
 export function stopSnapshotRefresh(): void {
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = undefined;
+}
+
+export async function loadDisplayStatus(): Promise<void> {
+  try {
+    displayStatus.set(await getDisplayStatus());
+  } catch {
+    // Browser previews have no hardware bridge. The live board simply omits
+    // the ON PANEL mark there rather than treating that as a console failure.
+    displayStatus.set(null);
+  }
+}
+
+export function startDisplayStatusRefresh(intervalMs = 5_000): void {
+  stopDisplayStatusRefresh();
+  displayStatusTimer = setInterval(() => void loadDisplayStatus(), intervalMs);
+}
+
+export function stopDisplayStatusRefresh(): void {
+  if (displayStatusTimer) clearInterval(displayStatusTimer);
+  displayStatusTimer = undefined;
 }
 
 export async function persistPreferences(next: AppPreferences): Promise<MutationResult> {

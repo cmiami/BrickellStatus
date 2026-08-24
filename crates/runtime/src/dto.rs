@@ -259,6 +259,10 @@ pub struct ChannelSignalDto {
 pub struct ChannelNoticeDto {
     /// Stable identity from the collector item and channel subscription.
     pub key: String,
+    /// The provider-owned page or document behind this slide, when the
+    /// collector supplied one. Surfaces may link to it but must not invent one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
     pub signal: ChannelSignalDto,
     /// Item-level ranking used when notices from different channels interleave.
     pub priority: ChannelPriorityDto,

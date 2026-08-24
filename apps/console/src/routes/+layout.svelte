@@ -7,7 +7,17 @@
   import FirmwarePrompt from '$lib/components/FirmwarePrompt.svelte';
   import TopBar from '$lib/components/TopBar.svelte';
   import { openExternalUrl } from '$lib/api';
-  import { loadApp, startSnapshotRefresh, stopSnapshotRefresh, loadError, notice } from '$lib/state';
+  import {
+    displayStatus,
+    loadApp,
+    loadDisplayStatus,
+    loadError,
+    notice,
+    startDisplayStatusRefresh,
+    startSnapshotRefresh,
+    stopDisplayStatusRefresh,
+    stopSnapshotRefresh
+  } from '$lib/state';
 
   let { children } = $props();
 
@@ -42,11 +52,23 @@
 
   onMount(() => {
     void loadApp();
+    void loadDisplayStatus();
     startSnapshotRefresh();
+    startDisplayStatusRefresh();
     document.addEventListener('click', openExternalLink);
+    const statusListener = import('@tauri-apps/api/event')
+      .then(({ listen }) =>
+        listen<import('$lib/types').DisplayConnectionStatus>(
+          'display-connection-status',
+          (event) => displayStatus.set(event.payload)
+        )
+      )
+      .catch(() => () => {});
     return () => {
       stopSnapshotRefresh();
+      stopDisplayStatusRefresh();
       document.removeEventListener('click', openExternalLink);
+      void statusListener.then((unlisten) => unlisten());
     };
   });
 </script>

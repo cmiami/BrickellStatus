@@ -3,6 +3,7 @@
     BellRing,
     ChartNoAxesCombined,
     CloudRain,
+    ExternalLink,
     Landmark,
     Newspaper,
     Trophy,
@@ -11,6 +12,7 @@
   import { onMount } from 'svelte';
 
   import type { ChannelPriority, ChannelSignal, ChannelSnapshot } from '$lib/types';
+  import { displayStatus } from '$lib/state';
 
   let { channels, generatedAt }: { channels: ChannelSnapshot[]; generatedAt: string } = $props();
   let noticeRail = $state<HTMLDivElement>();
@@ -20,6 +22,7 @@
     channel: ChannelSnapshot;
     signal: ChannelSignal;
     priority: ChannelPriority;
+    sourceUrl?: string;
   }
 
   const generatedAtMs = $derived(Date.parse(generatedAt));
@@ -116,24 +119,44 @@
     const page = Math.max(noticeRail.clientWidth * 0.8, 280);
     noticeRail.scrollBy({ left: page * direction, behavior: 'smooth' });
   }
+
+  function isOnPanel(notice: CurrentNotice): boolean {
+    return (
+      $displayStatus?.state === 'connected' &&
+      Boolean($displayStatus.lastAckAt) &&
+      $displayStatus.activeChannelId === notice.channel.id &&
+      $displayStatus.activeNoticeKey === notice.key
+    );
+  }
+
+  function sourceHref(notice: CurrentNotice): string {
+    if (notice.sourceUrl) {
+      try {
+        const source = new URL(notice.sourceUrl);
+        if (source.protocol === 'https:') return source.href;
+      } catch {
+        // A malformed provider URL is not allowed to become a broken external
+        // navigation target. The channel remains a useful inspectable fallback.
+      }
+    }
+    return `/channels?channel=${encodeURIComponent(notice.channel.id)}`;
+  }
+
+  function hasExternalSource(notice: CurrentNotice): boolean {
+    return sourceHref(notice).startsWith('https://');
+  }
 </script>
 
 {#if current.length}
   <section
     class="signal-board"
-    aria-label={`${current.length} current ${current.length === 1 ? 'notice' : 'notices'}, highest priority first`}
+    aria-label={`${current.length} active ${current.length === 1 ? 'alert' : 'alerts'}, highest priority first`}
     aria-live="polite"
     aria-relevant="additions text"
   >
     <header class="board-heading">
-      <h2>Current notices</h2>
-      <p>{current.length} active · urgent first</p>
-      {#if current.length > 1}
-        <div class="rail-controls" aria-label="Scroll current notices">
-          <button type="button" aria-label="Previous notices" aria-controls="current-notice-rail" onclick={() => moveNoticeRail(-1)}>←</button>
-          <button type="button" aria-label="Next notices" aria-controls="current-notice-rail" onclick={() => moveNoticeRail(1)}>→</button>
-        </div>
-      {/if}
+      <h2>Alerts</h2>
+      <p>{current.length}</p>
     </header>
 
     <div
@@ -141,42 +164,65 @@
       bind:this={noticeRail}
       class="notice-rail"
       role="region"
-      aria-label="Current notices, horizontally scrollable"
+      aria-label="Active alerts, horizontally scrollable"
     >
       {#each current as notice, index (`${notice.channel.id}:${notice.key}`)}
         {@const Icon = iconFor(notice.channel.kind)}
+        {@const onPanel = isOnPanel(notice)}
+        {@const external = hasExternalSource(notice)}
         <article
           class="notice"
           data-urgency={notice.priority.urgency}
           data-leading={index === 0 && commandsAttention(notice)}
+          data-on-panel={onPanel}
         >
-          <header>
-            <span class="notice-channel"><Icon size={16} strokeWidth={1.7} aria-hidden="true" />{notice.channel.title}</span>
-            <strong class="notice-state">{stateLabel(notice)}</strong>
-          </header>
-          <p class="notice-headline">{notice.signal.headline}</p>
-          <p class="notice-detail">{notice.signal.detail}</p>
+          <a
+            class="notice-link"
+            href={sourceHref(notice)}
+            target={external ? '_blank' : undefined}
+            rel={external ? 'noopener noreferrer' : undefined}
+            aria-current={onPanel ? 'true' : undefined}
+            aria-label={`${onPanel ? 'On panel. ' : ''}${notice.channel.title}: ${notice.signal.headline}. ${external ? 'Open source content' : 'Open channel'}`}
+            title={notice.signal.headline}
+          >
+            <span class="notice-channel"><Icon size={15} strokeWidth={1.8} aria-hidden="true" />{notice.channel.title}</span>
+            <strong class="notice-headline">{notice.signal.headline}</strong>
+            <span class="notice-state">{onPanel ? 'On panel' : stateLabel(notice)}</span>
+            {#if external}<ExternalLink class="source-mark" size={13} strokeWidth={1.8} aria-hidden="true" />{/if}
+          </a>
         </article>
       {/each}
     </div>
+
+    {#if current.length > 1}
+      <div class="rail-controls" aria-label="Scroll active alerts">
+        <button type="button" aria-label="Previous alerts" aria-controls="current-notice-rail" onclick={() => moveNoticeRail(-1)}>←</button>
+        <button type="button" aria-label="Next alerts" aria-controls="current-notice-rail" onclick={() => moveNoticeRail(1)}>→</button>
+      </div>
+    {/if}
   </section>
 {/if}
 
 <style>
   .signal-board {
     display: grid;
-    grid-template-columns: minmax(150px, 0.55fr) minmax(0, 4fr);
+    height: 52px;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     min-width: 0;
     background: var(--frost);
     border-top: 1px solid var(--rule-strong);
+    border-bottom: 1px solid var(--rule-strong);
   }
 
   .board-heading {
-    display: grid;
-    align-content: center;
-    gap: 5px;
-    padding: 14px clamp(16px, 2vw, 26px);
-    background: var(--paper);
+    display: flex;
+    min-width: 78px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 0 12px;
+    color: var(--marine);
+    background: var(--frost);
     border-inline-end: 1px solid var(--rule-strong);
   }
 
@@ -186,97 +232,81 @@
   }
 
   .board-heading h2 {
-    color: var(--marine);
-    font-size: var(--type-title);
+    font-size: var(--type-label);
     line-height: 1;
+    letter-spacing: 0.075em;
     text-transform: uppercase;
-  }
-
-  .rail-controls {
-    display: flex;
-    gap: 6px;
-    margin-top: 4px;
-  }
-
-  .rail-controls button {
-    display: grid;
-    width: 30px;
-    height: 28px;
-    place-items: center;
-    color: var(--marine);
-    background: var(--white);
-    border: 1px solid var(--rule-strong);
-    font-family: var(--font-instrument);
-    font-size: var(--type-body);
-    line-height: 1;
-    cursor: pointer;
   }
 
   .board-heading p {
-    color: var(--muted);
+    min-width: 19px;
+    padding: 3px 5px;
+    color: var(--white);
+    background: var(--marine);
     font-family: var(--font-instrument);
     font-size: var(--type-micro);
-    font-weight: 600;
-    letter-spacing: 0.055em;
-    text-transform: uppercase;
+    font-weight: 700;
+    line-height: 1;
+    text-align: center;
   }
 
   .notice-rail {
     display: grid;
     min-width: 0;
-    grid-auto-columns: minmax(270px, 1fr);
+    grid-auto-columns: minmax(230px, 1fr);
     grid-auto-flow: column;
     overflow-x: auto;
+    overflow-y: hidden;
     overscroll-behavior-inline: contain;
-    scrollbar-color: var(--steel) var(--frost);
-    scrollbar-width: thin;
+    scroll-snap-type: inline proximity;
+    scrollbar-width: none;
   }
 
   .notice-rail::-webkit-scrollbar {
-    height: 8px;
-  }
-
-  .notice-rail::-webkit-scrollbar-track {
-    background: var(--frost);
-  }
-
-  .notice-rail::-webkit-scrollbar-thumb {
-    background: var(--steel);
-    border: 2px solid var(--frost);
+    display: none;
   }
 
   .notice {
-    display: grid;
     min-width: 0;
-    align-content: center;
-    gap: 5px;
-    padding: 12px 16px 13px;
+    scroll-snap-align: start;
     background: var(--white);
     border-inline-end: 1px solid var(--rule);
   }
 
-  .notice > header,
-  .notice-channel {
-    display: flex;
+  .notice-link {
+    display: grid;
+    height: 50px;
+    min-width: 0;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
     align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    color: var(--graphite);
+    text-decoration: none;
+    transition:
+      color 120ms ease-out,
+      background-color 120ms ease-out;
   }
 
-  .notice > header {
-    min-width: 0;
-    justify-content: space-between;
-    gap: 12px;
+  .notice-link:hover {
+    background: var(--paper);
+  }
+
+  .notice-link[aria-current='true'] {
+    color: var(--white);
+    background: var(--marine);
+    box-shadow: inset 0 -1px 0 var(--white);
   }
 
   .notice-channel {
-    min-width: 0;
-    gap: 7px;
-    overflow: hidden;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     color: var(--muted);
     font-family: var(--font-instrument);
-    font-size: var(--type-caption);
+    font-size: var(--type-micro);
     font-weight: 600;
     letter-spacing: 0.055em;
-    text-overflow: ellipsis;
     text-transform: uppercase;
     white-space: nowrap;
   }
@@ -285,78 +315,104 @@
     flex: 0 0 auto;
   }
 
+  .notice-link[aria-current='true'] .notice-channel {
+    color: var(--nav-muted);
+  }
+
   .notice-state {
-    flex: 0 0 auto;
-    padding: 3px 6px;
+    white-space: nowrap;
     color: var(--marine);
-    background: var(--frost);
-    border: 1px solid var(--rule);
     font-family: var(--font-instrument);
     font-size: var(--type-micro);
+    font-weight: 700;
     letter-spacing: 0.045em;
     line-height: 1;
     text-transform: uppercase;
-    white-space: nowrap;
   }
 
-  .notice[data-leading='true'] .notice-state {
-    color: var(--graphite);
-    background: var(--amber);
-    border-color: var(--amber-ink);
+  .notice[data-leading='true'] .notice-link:not([aria-current='true']) .notice-state {
+    color: var(--amber-ink);
   }
 
-  .notice[data-leading='true'][data-urgency='emergency'] .notice-state {
-    color: var(--white);
-    background: var(--danger);
-    border-color: var(--danger);
+  .notice[data-leading='true'][data-urgency='emergency'] .notice-link:not([aria-current='true']) .notice-state {
+    color: var(--danger);
   }
 
   .notice-headline {
-    margin: 0;
-    color: var(--graphite);
+    min-width: 0;
+    overflow: hidden;
+    font-family: var(--font-instrument);
+    font-size: var(--type-body-small);
+    font-weight: 700;
+    line-height: 1;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .notice-link :global(.source-mark) {
+    flex: 0 0 auto;
+    color: var(--channel);
+  }
+
+  .notice-link[aria-current='true'] .notice-state,
+  .notice-link[aria-current='true'] :global(.source-mark) {
+    color: var(--white);
+  }
+
+  .rail-controls {
+    display: flex;
+    background: var(--frost);
+    border-inline-start: 1px solid var(--rule-strong);
+  }
+
+  .rail-controls button {
+    display: grid;
+    width: 44px;
+    height: 50px;
+    place-items: center;
+    color: var(--marine);
+    background: transparent;
     font-family: var(--font-instrument);
     font-size: var(--type-body);
     font-weight: 700;
-    line-height: 1.12;
-    overflow-wrap: anywhere;
+    line-height: 1;
+    cursor: pointer;
   }
 
-  .notice-detail {
-    margin: 0;
-    color: var(--muted);
-    font-size: var(--type-caption);
-    line-height: 1.35;
-    overflow-wrap: anywhere;
+  .rail-controls button + button {
+    border-inline-start: 1px solid var(--rule);
+  }
+
+  .rail-controls button:hover {
+    background: var(--paper);
   }
 
   @media (max-width: 720px) {
-    .signal-board {
-      grid-template-columns: 1fr;
-    }
-
     .board-heading {
-      border-inline-end: 0;
-      border-bottom: 1px solid var(--rule-strong);
+      min-width: 62px;
+      padding-inline: 9px;
     }
 
-    .rail-controls {
-      display: none;
+    .board-heading h2 {
+      font-size: var(--type-micro);
     }
 
     .notice-rail {
-      grid-auto-flow: row;
-      grid-auto-columns: auto;
-      overflow-x: visible;
+      grid-auto-columns: minmax(220px, 82vw);
     }
 
-    .notice {
-      border-inline-end: 0;
-      border-bottom: 1px solid var(--rule);
+    .notice-link {
+      padding-inline: 10px;
     }
 
-    .notice:last-child {
-      border-bottom: 0;
+    .notice-channel {
+      max-width: 74px;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
+    .rail-controls button {
+      width: 44px;
+    }
   }
 </style>

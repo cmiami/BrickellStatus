@@ -6,7 +6,7 @@ vi.mock('$lib/components/LiveDeck.svelte', async () => {
   return { default: Stub };
 });
 
-import { loading, snapshot } from '$lib/state';
+import { displayStatus, loading, snapshot } from '$lib/state';
 import type { AppSnapshot, ChannelSnapshot } from '$lib/types';
 import LivePage from './+page.svelte';
 
@@ -42,6 +42,7 @@ afterEach(() => {
   vi.useRealTimers();
   cleanup();
   snapshot.set(null);
+  displayStatus.set(null);
   loading.set(true);
 });
 
@@ -63,7 +64,7 @@ describe('Live page current notices', () => {
     render(LivePage);
 
     expect(screen.getByTestId('live-deck-stub')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Current notices' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Alerts' })).toBeInTheDocument();
     expect(screen.getByText('Rain in 8 minutes')).toBeInTheDocument();
     expect(screen.queryByText('Expired earthquake')).toBeNull();
   });

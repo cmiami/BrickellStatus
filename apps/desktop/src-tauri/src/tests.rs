@@ -74,6 +74,8 @@ fn display_status_contract_matches_frontend() {
         detail: "ACK INK1".into(),
         last_frame_at: Some("2026-08-14T15:04:05Z".into()),
         last_ack_at: Some("2026-08-14T15:04:05Z".into()),
+        active_channel_id: Some("news.local".into()),
+        active_notice_key: Some("notice:story-42".into()),
         panel: Some(PanelModel::E290),
     };
     let value = serde_json::to_value(status).unwrap();
@@ -81,6 +83,8 @@ fn display_status_contract_matches_frontend() {
     assert_eq!(value["transport"], "ble");
     assert_eq!(value["deviceName"], "BrickellStatus 26B4");
     assert_eq!(value["lastAckAt"], "2026-08-14T15:04:05Z");
+    assert_eq!(value["activeChannelId"], "news.local");
+    assert_eq!(value["activeNoticeKey"], "notice:story-42");
     // The panel travels with the status so the interface can name what was
     // detected instead of naming the board this project started with.
     assert_eq!(value["panel"], "e290");
@@ -904,6 +908,7 @@ fn earthquake_notice(
 ) -> brickellstatus_runtime::ChannelNoticeDto {
     brickellstatus_runtime::ChannelNoticeDto {
         key: key.into(),
+        source_url: None,
         signal: brickellstatus_runtime::ChannelSignalDto {
             headline: headline.into(),
             detail: format!("Details for {headline}."),
@@ -2219,6 +2224,7 @@ mod panel {
     fn notice(key: &str, headline: &str, band: Option<&str>, score: u16) -> ChannelNoticeDto {
         ChannelNoticeDto {
             key: key.into(),
+            source_url: None,
             signal: ChannelSignalDto {
                 headline: headline.into(),
                 detail: format!("{headline} detail"),
@@ -2262,6 +2268,7 @@ mod panel {
         weather.notices = vec![
             ChannelNoticeDto {
                 key: "rain-soon".into(),
+                source_url: None,
                 signal: signal("Rain in 8 minutes"),
                 priority: ChannelPriorityDto {
                     score: 500,
@@ -2272,6 +2279,7 @@ mod panel {
             },
             ChannelNoticeDto {
                 key: "wind-later".into(),
+                source_url: None,
                 signal: signal("Strong wind later"),
                 priority: ChannelPriorityDto {
                     score: 300,

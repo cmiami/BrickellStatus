@@ -2792,6 +2792,11 @@ fn every_current_item_becomes_a_notice_regardless_of_the_legacy_slide_cap() {
     assert_eq!(news.notices[1].priority.urgency, UrgencyDto::Routine);
     assert_eq!(news.signal.as_ref(), Some(&news.notices[0].signal));
     assert_ne!(news.notices[0].key, news.notices[1].key);
+    assert!(
+        news.notices
+            .iter()
+            .all(|notice| { notice.source_url.as_deref() == Some("https://example.com/feed.xml") })
+    );
 }
 
 #[test]

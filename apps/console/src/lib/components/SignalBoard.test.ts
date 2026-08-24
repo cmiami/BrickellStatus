@@ -2,6 +2,7 @@ import { render } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import SignalBoard from './SignalBoard.svelte';
+import { displayStatus } from '$lib/state';
 import type { ChannelPriority, ChannelSignal, ChannelSnapshot } from '$lib/types';
 
 const GENERATED_AT = '2026-08-23T16:00:00Z';
@@ -12,6 +13,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  displayStatus.set(null);
   vi.useRealTimers();
 });
 
@@ -136,16 +138,55 @@ describe('SignalBoard', () => {
       ]
     });
 
-    const rail = getByRole('region', { name: 'Current notices, horizontally scrollable' });
+    const rail = getByRole('region', { name: 'Active alerts, horizontally scrollable' });
     expect(rail).toHaveAttribute('id', 'current-notice-rail');
-    expect(getByRole('button', { name: 'Previous notices' })).toHaveAttribute(
+    expect(getByRole('button', { name: 'Previous alerts' })).toHaveAttribute(
       'aria-controls',
       'current-notice-rail'
     );
-    expect(getByRole('button', { name: 'Next notices' })).toHaveAttribute(
+    expect(getByRole('button', { name: 'Next alerts' })).toHaveAttribute(
       'aria-controls',
       'current-notice-rail'
     );
+  });
+
+  it('links a notice to its provider content and marks only the acknowledged panel slide', () => {
+    const news = channel('news.local', 'news', 'First headline', { score: 600 });
+    news.notices = [
+      {
+        key: 'first-story',
+        sourceUrl: 'https://example.com/first-story',
+        signal: news.signal!,
+        priority: news.priority
+      },
+      {
+        key: 'second-story',
+        sourceUrl: 'https://example.com/second-story',
+        signal: { ...news.signal!, headline: 'Second headline' },
+        priority: { ...news.priority, score: 500 }
+      }
+    ];
+    displayStatus.set({
+      state: 'connected',
+      transport: 'ble',
+      detail: 'Panel connected',
+      lastAckAt: GENERATED_AT,
+      activeChannelId: news.id,
+      activeNoticeKey: 'second-story'
+    });
+
+    const { getByRole } = render(SignalBoard, {
+      generatedAt: GENERATED_AT,
+      channels: [news]
+    });
+
+    const first = getByRole('link', { name: /First headline/ });
+    const second = getByRole('link', { name: /On panel.*Second headline/ });
+    expect(first).toHaveAttribute('href', 'https://example.com/first-story');
+    expect(first).not.toHaveAttribute('aria-current');
+    expect(second).toHaveAttribute('href', 'https://example.com/second-story');
+    expect(second).toHaveAttribute('aria-current', 'true');
+    expect(second).toHaveTextContent('On panel');
   });
 
   it('shows every enabled active non-bridge signal', () => {

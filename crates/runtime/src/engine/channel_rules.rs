@@ -378,6 +378,7 @@ fn channel_notices(
         let priority = channel_priority(kind, Some(&signal), decision, is_anchor);
         return vec![ChannelNoticeDto {
             key: channel_weather_notice_key(channel),
+            source_url: usable_items.iter().find_map(|item| item_source_url(item)),
             signal,
             priority,
         }];
@@ -390,6 +391,7 @@ fn channel_notices(
             let priority = channel_priority(kind, Some(&signal), decision, is_anchor);
             Some(ChannelNoticeDto {
                 key: channel_notice_key(channel, item),
+                source_url: item_source_url(item),
                 signal,
                 priority,
             })
@@ -402,6 +404,10 @@ fn channel_notices(
             .cmp(&left.priority.score)
     });
     notices
+}
+
+fn item_source_url(item: &CollectorItem) -> Option<String> {
+    item.source.url.as_ref().map(ToString::to_string)
 }
 
 #[cfg(test)]

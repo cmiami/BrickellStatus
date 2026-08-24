@@ -69,6 +69,8 @@ export interface ChannelPriority {
 
 export interface ChannelNotice {
   key: string;
+  /** Provider-owned source content for this individual slide. */
+  sourceUrl?: string;
   signal: ChannelSignal;
   priority: ChannelPriority;
 }
@@ -434,6 +436,9 @@ export interface DisplayConnectionStatus {
   detail: string;
   lastFrameAt?: string;
   lastAckAt?: string;
+  /** The exact acknowledged panel slide, absent before a frame is confirmed. */
+  activeChannelId?: string;
+  activeNoticeKey?: string;
   /** The panel the connected board reported. Absent until one has spoken. */
   panel?: PanelModel;
 }

@@ -120,6 +120,12 @@ pub struct DisplayConnectionStatus {
     pub last_frame_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_ack_at: Option<String>,
+    /// Exact slide identity after the panel acknowledges a frame. The channel
+    /// alone is insufficient because one channel may carry several notices.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_channel_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_notice_key: Option<String>,
     /// Which panel the connected board reports carrying. Absent until a board
     /// has said, because this is a fact read off the device and never a
     /// setting: the interface names what was detected, or names nothing.
@@ -143,6 +149,8 @@ impl Default for DisplayConnectionStatus {
             detail: "No display connected. Scan for USB or Bluetooth Low Energy devices.".into(),
             last_frame_at: None,
             last_ack_at: None,
+            active_channel_id: None,
+            active_notice_key: None,
             panel: None,
         }
     }
@@ -2237,6 +2245,8 @@ async fn scan_display_devices(
                 detail: "Scanning USB and Bluetooth Low Energy for an INK1 display…".into(),
                 last_frame_at: previous.last_frame_at.clone(),
                 last_ack_at: previous.last_ack_at.clone(),
+                active_channel_id: None,
+                active_notice_key: None,
                 panel: None,
             },
         );
@@ -2256,6 +2266,8 @@ async fn scan_display_devices(
                 },
                 last_frame_at: previous.last_frame_at,
                 last_ack_at: previous.last_ack_at,
+                active_channel_id: None,
+                active_notice_key: None,
                 panel: None,
             }
         } else {
@@ -2270,6 +2282,8 @@ async fn scan_display_devices(
                 ),
                 last_frame_at: previous.last_frame_at,
                 last_ack_at: previous.last_ack_at,
+                active_channel_id: None,
+                active_notice_key: None,
                 panel: None,
             }
         };
@@ -2302,6 +2316,8 @@ async fn connect_display_device(
             },
             last_frame_at: previous.last_frame_at,
             last_ack_at: previous.last_ack_at,
+            active_channel_id: None,
+            active_notice_key: None,
             panel: None,
         },
     );
@@ -2587,7 +2603,7 @@ async fn send_snapshot_to_display(
         Ok(frame) => frame,
         Err(error) => return mutation_error(format!("Frame render failed: {error}")),
     };
-    send_rendered_frame_to_display(app, display, &frame, preferences, force).await
+    send_rendered_frame_to_display(app, display, &frame, preferences, force, None).await
 }
 
 async fn send_rotating_snapshot_to_display(
@@ -2675,7 +2691,15 @@ async fn send_rotating_snapshot_to_display(
         }
     };
     (
-        send_rendered_frame_to_display(app, display, &frame, preferences, false).await,
+        send_rendered_frame_to_display(
+            app,
+            display,
+            &frame,
+            preferences,
+            false,
+            Some((channel.id.as_str(), notice_key)),
+        )
+        .await,
         Some(channel.id.clone()),
     )
 }
@@ -2686,6 +2710,7 @@ async fn send_rendered_frame_to_display(
     frame: &MonoFrame,
     preferences: &AppPreferences,
     force: bool,
+    slide: Option<(&str, Option<&str>)>,
 ) -> MutationResult {
     if !force && !display.delivery_armed() {
         return MutationResult {
@@ -2705,6 +2730,8 @@ async fn send_rendered_frame_to_display(
                 detail: "Connecting to the configured e-paper panel…".into(),
                 last_frame_at: None,
                 last_ack_at: None,
+                active_channel_id: None,
+                active_notice_key: None,
                 panel: None,
             },
         );
@@ -2727,7 +2754,9 @@ async fn send_rendered_frame_to_display(
                 detail,
                 last_frame_at: Some(at.clone()),
                 last_ack_at: Some(at),
-                panel: None,
+                active_channel_id: slide.map(|(channel_id, _)| channel_id.to_owned()),
+                active_notice_key: slide.and_then(|(_, notice_key)| notice_key.map(str::to_owned)),
+                panel: Some(display.panel()),
             };
             set_e213_transport_status(app, status);
             MutationResult {
@@ -2821,6 +2850,8 @@ fn connected_status(
         detail: detail.into(),
         last_frame_at,
         last_ack_at,
+        active_channel_id: None,
+        active_notice_key: None,
         panel,
     }
 }
@@ -2836,6 +2867,8 @@ fn error_status(
         detail: error.into(),
         last_frame_at: None,
         last_ack_at: None,
+        active_channel_id: None,
+        active_notice_key: None,
         panel: None,
     }
 }
@@ -2860,6 +2893,8 @@ fn unavailable_or_error_status(
         detail: format!("{error} · retrying in {retry_seconds}s"),
         last_frame_at: None,
         last_ack_at: None,
+        active_channel_id: None,
+        active_notice_key: None,
         panel: None,
     }
 }
@@ -3258,6 +3293,8 @@ async fn run_display_worker(
                         .into(),
                     last_frame_at: None,
                     last_ack_at: None,
+                    active_channel_id: None,
+                    active_notice_key: None,
                     panel: None,
                 },
             );
