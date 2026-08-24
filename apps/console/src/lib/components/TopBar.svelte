@@ -121,7 +121,10 @@
     align-items: stretch;
     margin-left: 104px;
     color: var(--graphite);
-    background: rgba(244, 247, 249, 0.97);
+    /* Opaque. There is no backdrop-filter anywhere in this app, so the missing
+       three percent bought no blur -- it only let whatever was scrolling past
+       ghost through the bar. */
+    background: var(--frost);
     border-bottom: 1px solid var(--rule-strong);
   }
 
@@ -290,7 +293,12 @@
   @media (max-width: 720px) {
     .top-bar {
       min-height: calc(58px + env(safe-area-inset-top));
-      grid-template-columns: 1fr auto;
+      /* One column per surviving child. The clock is hidden from 1020px down,
+         which leaves three -- and two columns sent the third to an implicit
+         second row, putting the refresh button on a line of its own and making
+         the bar taller than the min-height every other layout here measures
+         against. */
+      grid-template-columns: 1fr auto auto;
       margin-left: 0;
     }
 

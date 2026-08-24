@@ -1522,6 +1522,43 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     }
   }
 
+  /* After the 1180px rules so these win. A phone gets the corridor whole rather
+     than a window onto it. The schematic is a fixed 1320x640 projection and the
+     SVG already fits whatever box it is given -- which is what the desktop
+     layout relies on. The wide-canvas rules above trade that away for detail at
+     tablet width, and on a phone the trade leaves the span clipped at both ends
+     with no way to see it at once. */
+  @media (max-width: 720px) {
+    .schematic-scroll {
+      /* The drawing's own proportions, so the box holds the corridor and not a
+         letterboxed band of dead space the reader can still scroll through. */
+      aspect-ratio: 1320 / 640;
+      height: auto;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .schematic-plot {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      min-width: 0;
+      height: 100%;
+    }
+
+    .map-pan-controls {
+      display: none;
+    }
+
+    /* Callouts are authored at a fixed 8-15px inside a 1320px space, so at the
+       width a phone can give them they land at three or four pixels: present,
+       unreadable, and covering the vessels they name. The manifest below the
+       map lists every one of them at a size meant to be read. */
+    .vessel-callout {
+      display: none;
+    }
+  }
+
   @media (max-width: 560px) {
     .manifest li > button {
       grid-template-columns: 26px 46px minmax(0, 1fr);

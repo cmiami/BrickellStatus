@@ -154,8 +154,7 @@ FORM: Brickell Interchange remains the anchor; one ruled notice rail gives activ
 
   @media (max-width: 720px) {
     .live-console {
-      min-height: calc(100vh - 134px);
-      padding-bottom: 76px;
+      min-height: 100%;
     }
 
     .live-loading {

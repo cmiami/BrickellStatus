@@ -150,7 +150,12 @@
     nav {
       display: grid;
       height: 76px;
-      grid-template-columns: repeat(7, minmax(0, 1fr));
+      /* One column per tab. Seven was left over from a longer nav, so the four
+         that remain crowded into the left four-sevenths and the rest of the bar
+         was empty marine -- visible on anything wider than 430px, where the
+         rule below stops covering for it. */
+      grid-auto-flow: column;
+      grid-auto-columns: minmax(0, 1fr);
       align-content: stretch;
       padding: 0;
     }
