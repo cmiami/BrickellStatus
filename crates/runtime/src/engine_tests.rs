@@ -2621,6 +2621,180 @@ fn news_signal_exposes_publisher_content_and_replacement_identity() {
 }
 
 #[test]
+fn authored_notices_publish_their_automatic_expiration_without_a_provider_end() {
+    let now_ms = 1_786_741_200_000;
+    let preferences = AppPreferences::default();
+    let observed_ms = now_ms - 15 * 60_000;
+
+    let news_channel = preferences
+        .profile
+        .channels
+        .iter()
+        .find(|channel| channel.kind == ChannelKindDto::News)
+        .unwrap();
+    let news = news_item("news:expiry", "Miami transportation update", observed_ms);
+    let news_signal = channel_signal(
+        ChannelKindDto::News,
+        news_channel,
+        &[&news],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(
+        news_signal.expires_at.as_deref(),
+        Some(
+            iso_timestamp(observed_ms + i64::from(news_channel.max_age_minutes) * 60_000)
+                .unwrap()
+                .as_str()
+        )
+    );
+
+    let sports_channel = preferences
+        .profile
+        .channels
+        .iter()
+        .find(|channel| channel.kind == ChannelKindDto::Sports)
+        .unwrap();
+    let sports = news_item("sports:expiry", "Miami team roster update", observed_ms);
+    let sports_signal = channel_signal(
+        ChannelKindDto::Sports,
+        sports_channel,
+        &[&sports],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(
+        sports_signal.expires_at.as_deref(),
+        Some(
+            iso_timestamp(observed_ms + i64::from(sports_channel.max_age_minutes) * 60_000)
+                .unwrap()
+                .as_str()
+        )
+    );
+
+    let earthquake_channel = preferences
+        .profile
+        .channels
+        .iter()
+        .find(|channel| channel.kind == ChannelKindDto::Earthquake)
+        .unwrap();
+    let earthquake = earthquake_item("usgs:expiry", observed_ms);
+    let earthquake_signal = channel_signal(
+        ChannelKindDto::Earthquake,
+        earthquake_channel,
+        &[&earthquake],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(
+        earthquake_signal.expires_at.as_deref(),
+        Some(
+            iso_timestamp(observed_ms + 1_440 * 60_000)
+                .unwrap()
+                .as_str()
+        )
+    );
+
+    for (kind, mut item) in [
+        (ChannelKindDto::Hurricane, tropical_item("al01")),
+        (ChannelKindDto::Markets, market_quote_item(6.5, None)),
+    ] {
+        item.observed_at = chrono::DateTime::from_timestamp_millis(observed_ms);
+        let channel = preferences
+            .profile
+            .channels
+            .iter()
+            .find(|channel| channel.kind == kind)
+            .unwrap();
+        let signal =
+            channel_signal(kind, channel, &[&item], true, now_ms, UnitSystem::Imperial).unwrap();
+        assert_eq!(
+            signal.expires_at.as_deref(),
+            Some(
+                iso_timestamp(observed_ms + i64::from(channel.max_age_minutes) * 60_000)
+                    .unwrap()
+                    .as_str()
+            )
+        );
+    }
+
+    let mut provider_bounded = news;
+    provider_bounded.ends_at = chrono::DateTime::from_timestamp_millis(now_ms + 10 * 60_000);
+    let provider_bounded = channel_signal(
+        ChannelKindDto::News,
+        news_channel,
+        &[&provider_bounded],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(
+        provider_bounded.expires_at.as_deref(),
+        Some(iso_timestamp(now_ms + 10 * 60_000).unwrap().as_str()),
+        "a provider end remains authoritative"
+    );
+}
+
+#[test]
+fn every_current_item_becomes_a_notice_regardless_of_the_legacy_slide_cap() {
+    let now_ms = 1_786_741_200_000;
+    let mut preferences = AppPreferences::default();
+    let news = preferences
+        .profile
+        .channels
+        .iter_mut()
+        .find(|channel| channel.id == "news.local")
+        .unwrap();
+    // Stored profiles may still carry this retired control. It must no longer
+    // decide how many current items survive into the slide set.
+    news.max_items = 1;
+
+    let routine = news_item("news:routine", "Miami transportation update", now_ms);
+    let breaking = news_item(
+        "news:breaking",
+        "Breaking Miami transportation closure",
+        now_ms,
+    );
+    let mut state = PersistedRuntimeState {
+        active_sources: BTreeMap::from([("rss.local".into(), "news.local".into())]),
+        ..PersistedRuntimeState::default()
+    };
+    state.sources.insert(
+        "rss.local".into(),
+        healthy_source_state("news.local", routine, now_ms),
+    );
+    state
+        .sources
+        .get_mut("rss.local")
+        .unwrap()
+        .items
+        .push(breaking);
+
+    let snapshots = channel_snapshots(&preferences, &state, &clear_decision(), now_ms);
+    let news = snapshots
+        .iter()
+        .find(|channel| channel.id == "news.local")
+        .unwrap();
+
+    assert_eq!(news.notices.len(), 2);
+    assert_eq!(
+        news.notices[0].signal.headline,
+        "Breaking Miami transportation closure"
+    );
+    assert_eq!(news.notices[0].priority.urgency, UrgencyDto::HeadsUp);
+    assert_eq!(news.notices[1].priority.urgency, UrgencyDto::Routine);
+    assert_eq!(news.signal.as_ref(), Some(&news.notices[0].signal));
+    assert_ne!(news.notices[0].key, news.notices[1].key);
+}
+
+#[test]
 fn syndicated_signal_uses_new_context_instead_of_repeating_the_headline() {
     let now_ms = 1_786_741_200_000;
     let channel = &AppPreferences::default().profile.channels[4];
@@ -3119,6 +3293,34 @@ fn weather_minutely_item(now_ms: i64, millimetres: f64, starts_in_minutes: i64) 
     }
 }
 
+fn weather_current_item(now_ms: i64, millimetres: f64, observed_minutes_ago: i64) -> CollectorItem {
+    CollectorItem {
+        id: format!("open-meteo:current:{observed_minutes_ago}"),
+        kind: ItemKind::WeatherCurrent,
+        title: "Current weather".into(),
+        summary: Some(format!("{millimetres} mm in the current period")),
+        observed_at: Some(
+            chrono::DateTime::from_timestamp_millis(now_ms - observed_minutes_ago * 60_000)
+                .unwrap(),
+        ),
+        starts_at: None,
+        ends_at: None,
+        location: Some(Location::point(25.7617, -80.1918)),
+        source: SourceLink {
+            name: "Open-Meteo".into(),
+            url: Some(Url::parse("https://open-meteo.com/").unwrap()),
+        },
+        attributes: BTreeMap::from([
+            ("precipitation".into(), json!(millimetres)),
+            ("rain".into(), json!(millimetres)),
+            (
+                "units".into(),
+                json!({"precipitation": "mm", "rain": "mm", "showers": "mm"}),
+            ),
+        ]),
+    }
+}
+
 /// An hourly bucket answers "some time in the next hour". A 15-minute bin
 /// answers "in eight minutes". Only the second is worth interrupting someone
 /// for, so when both are available the bin has to be the one that speaks.
@@ -3136,9 +3338,9 @@ fn a_measured_quarter_hour_speaks_over_an_hourly_probability() {
         now_ms,
     );
     assert!(active);
-    assert!(summary.contains("mm expected"), "{summary}");
+    assert!(summary.contains("mm forecast"), "{summary}");
     assert!(!summary.contains("chance"), "{summary}");
-    assert!(summary.contains("within 8 min"), "{summary}");
+    assert!(summary.contains("beginning in 8 min"), "{summary}");
 }
 
 /// The amount rule reads only its own bin, so there is no path by which a
@@ -3178,10 +3380,10 @@ fn the_amount_rule_fails_closed_outside_its_window_and_units() {
     assert!(summary.contains("chance"), "{summary}");
 }
 
-/// The band and the ETA come from the same fact, so a bin in progress reads as
-/// rain now rather than as a forecast, and its rule is named.
+/// A forecast bin already in progress remains a forecast. It may rank at zero
+/// lead, but neither its headline nor severity may claim an observation.
 #[test]
-fn rain_falling_now_reports_zero_lead_and_an_amount_band() {
+fn a_current_quarter_hour_forecast_does_not_claim_rain_is_observed() {
     let now_ms = 1_786_741_200_000;
     let channel = AppPreferences::default().profile.channels[1].clone();
     let falling = weather_minutely_item(now_ms, 1.4, 0);
@@ -3189,7 +3391,16 @@ fn rain_falling_now_reports_zero_lead_and_an_amount_band() {
 
     assert_eq!(signal.imminence_minutes, Some(0));
     assert_eq!(signal.band.as_deref(), Some("rain-amount:0-5:moderate"));
-    assert!(signal.detail.contains("Rain now"), "{}", signal.detail);
+    assert_eq!(signal.headline, "Rain expected soon");
+    assert_eq!(signal.severity, "Imminent");
+    assert!(
+        signal
+            .detail
+            .contains("forecast in the current 15-minute period"),
+        "{}",
+        signal.detail
+    );
+    assert!(!signal.detail.contains("observed"), "{}", signal.detail);
 
     // Heavier rain in the same bin is a different band, so it re-alerts.
     let heavier = weather_minutely_item(now_ms, 4.0, 0);
@@ -3199,16 +3410,265 @@ fn rain_falling_now_reports_zero_lead_and_an_amount_band() {
     );
 }
 
-/// An hourly probability must never be dressed up as an ETA. It is the term
-/// that outranks every other channel, and a bucket does not know the answer.
+/// A strong hourly chance whose bucket is about to begin earns the imminence
+/// ordering bonus, while its copy honestly continues to describe an hour.
 #[test]
-fn an_hourly_probability_never_reports_an_imminence() {
+fn high_confidence_near_hourly_rain_is_imminent_without_claiming_an_onset() {
     let now_ms = 1_786_741_200_000;
     let channel = AppPreferences::default().profile.channels[1].clone();
-    let hourly = weather_hourly_item(now_ms, 95.0, 10.0);
+    let mut near = weather_hourly_item(now_ms, 80.0, 10.0);
+    near.starts_at = Some(chrono::DateTime::from_timestamp_millis(now_ms + 15 * 60_000).unwrap());
+    let near_signal = channel_signal(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&near],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+
+    assert_eq!(near_signal.imminence_minutes, Some(15));
+    assert_eq!(near_signal.headline, "Rain likely soon");
+    assert_eq!(near_signal.severity.as_deref(), Some("Imminent"));
     assert_eq!(
-        weather_signal(&hourly, &channel, now_ms, UnitSystem::Imperial).imminence_minutes,
+        near_signal.detail,
+        "80% chance of rain in the hour beginning in 15 min."
+    );
+    assert_eq!(
+        near_signal.expires_at.as_deref(),
+        Some(iso_timestamp(now_ms + 75 * 60_000).unwrap().as_str())
+    );
+
+    // The actionable hourly bucket must not be hidden by a narrower forecast
+    // that does not begin until after the 15-minute decision window.
+    let farther_amount = weather_minutely_item(now_ms, 0.6, 20);
+    let selected = channel_signal(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&farther_amount, &near],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(selected.headline, "Rain likely soon");
+    assert_eq!(selected.imminence_minutes, Some(15));
+
+    let mut lower_confidence = near.clone();
+    lower_confidence
+        .attributes
+        .insert("precipitation_probability".into(), json!(79.0));
+    let lower_confidence =
+        weather_signal(&lower_confidence, &channel, now_ms, UnitSystem::Imperial);
+    assert_eq!(lower_confidence.imminence_minutes, None);
+
+    let mut later = near.clone();
+    later.starts_at = Some(chrono::DateTime::from_timestamp_millis(now_ms + 16 * 60_000).unwrap());
+    let later_signal = channel_signal(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&later],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(later_signal.imminence_minutes, None);
+
+    let mut just_over_boundary = near.clone();
+    just_over_boundary.starts_at =
+        Some(chrono::DateTime::from_timestamp_millis(now_ms + 15 * 60_000 + 1).unwrap());
+    assert_eq!(
+        weather_signal(&just_over_boundary, &channel, now_ms, UnitSystem::Imperial,)
+            .imminence_minutes,
         None
+    );
+    assert!(
+        channel_priority(
+            ChannelKindDto::Weather,
+            Some(&near_signal),
+            &clear_decision(),
+            false,
+        )
+        .score
+            > channel_priority(
+                ChannelKindDto::Weather,
+                Some(&later_signal),
+                &clear_decision(),
+                false,
+            )
+            .score
+    );
+}
+
+/// Current precipitation remains actionable even if every future period is
+/// dry, and expires at the end of the current provider interval.
+#[test]
+fn observed_current_precipitation_keeps_rain_active_until_its_bin_ends() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let current = weather_current_item(now_ms, 0.4, 5);
+    let dry_minutely = weather_minutely_item(now_ms, 0.0, 8);
+    let dry_hourly = weather_hourly_item(now_ms, 10.0, 10.0);
+
+    let (summary, active) = weather_activation(
+        &channel,
+        &[&current, &dry_minutely, &dry_hourly],
+        AvailabilityDto::Fresh,
+        now_ms,
+    );
+    assert!(active);
+    assert!(summary.contains("observed in the current 15-minute period"));
+
+    let signal = channel_signal(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&current, &dry_minutely, &dry_hourly],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+    assert_eq!(signal.headline, "Rain is falling now");
+    assert_eq!(signal.severity.as_deref(), Some("Falling now"));
+    assert_eq!(signal.imminence_minutes, Some(0));
+    assert_eq!(
+        signal.expires_at.as_deref(),
+        Some(iso_timestamp(now_ms + 10 * 60_000).unwrap().as_str())
+    );
+
+    assert!(
+        !weather_activation(
+            &channel,
+            &[&current],
+            AvailabilityDto::Fresh,
+            now_ms + 10 * 60_000,
+        )
+        .1
+    );
+    assert!(
+        !weather_activation(
+            &channel,
+            &[&current],
+            AvailabilityDto::Fresh,
+            now_ms + 10 * 60_000 + 1,
+        )
+        .1
+    );
+}
+
+#[test]
+fn overlapping_weather_bins_compose_one_current_notice() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let current = weather_current_item(now_ms, 0.4, 5);
+    let minutely = weather_minutely_item(now_ms, 0.8, 8);
+    let hourly = weather_hourly_item(now_ms, 90.0, 10.0);
+
+    let notices = channel_notices(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&current, &minutely, &hourly],
+        now_ms,
+        UnitSystem::Imperial,
+        &clear_decision(),
+        false,
+    );
+
+    assert_eq!(notices.len(), 1, "forecast bins are evidence, not slides");
+    assert_eq!(notices[0].signal.headline, "Rain is falling now");
+}
+
+#[test]
+fn separate_rain_and_wind_rows_compose_one_imminent_weather_notice() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let current_rain = weather_current_item(now_ms, 0.4, 5);
+    let mut near_wind = weather_hourly_item(now_ms, 10.0, 65.0);
+    near_wind.id = "open-meteo:hourly:near-wind".into();
+    near_wind.starts_at =
+        Some(chrono::DateTime::from_timestamp_millis(now_ms + 5 * 60_000).unwrap());
+    let mut farther_stronger_wind = weather_hourly_item(now_ms, 10.0, 95.0);
+    farther_stronger_wind.id = "open-meteo:hourly:farther-wind".into();
+    farther_stronger_wind.starts_at =
+        Some(chrono::DateTime::from_timestamp_millis(now_ms + 40 * 60_000).unwrap());
+
+    let notices = channel_notices(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&farther_stronger_wind, &current_rain, &near_wind],
+        now_ms,
+        UnitSystem::Imperial,
+        &clear_decision(),
+        false,
+    );
+
+    assert_eq!(notices.len(), 1, "weather rows compose one live state");
+    let notice = &notices[0];
+    assert_eq!(notice.signal.headline, "Rain now; strong gusts expected");
+    assert!(notice.signal.detail.contains("observed"));
+    assert!(notice.signal.detail.contains("Gusts 40 mph in 5 min"));
+    assert!(!notice.signal.detail.contains("59 mph in 40 min"));
+    assert_eq!(notice.signal.imminence_minutes, Some(0));
+    assert_eq!(notice.priority.imminence_minutes, Some(0));
+    assert!(
+        notice
+            .signal
+            .band
+            .as_deref()
+            .is_some_and(|band| band.contains("rain-amount") && band.contains("wind-gust"))
+    );
+    assert_eq!(
+        notice.signal.expires_at.as_deref(),
+        Some(iso_timestamp(now_ms + 10 * 60_000).unwrap().as_str()),
+        "combined copy expires when its first supporting fact does"
+    );
+}
+
+#[test]
+fn wind_only_notice_carries_imminence_into_its_priority() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let mut wind = weather_hourly_item(now_ms, 10.0, 80.0);
+    wind.starts_at = Some(chrono::DateTime::from_timestamp_millis(now_ms + 12 * 60_000).unwrap());
+
+    let notices = channel_notices(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&wind],
+        now_ms,
+        UnitSystem::Imperial,
+        &clear_decision(),
+        false,
+    );
+
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].signal.headline, "Strong gusts expected");
+    assert_eq!(notices[0].signal.imminence_minutes, Some(12));
+    assert_eq!(notices[0].priority.imminence_minutes, Some(12));
+    assert_eq!(notices[0].signal.severity.as_deref(), Some("Imminent"));
+}
+
+#[test]
+fn quarter_hour_weather_signal_expires_at_the_end_of_its_forecast_bin() {
+    let now_ms = 1_786_741_200_000;
+    let channel = AppPreferences::default().profile.channels[1].clone();
+    let minutely = weather_minutely_item(now_ms, 0.6, 8);
+    let signal = channel_signal(
+        ChannelKindDto::Weather,
+        &channel,
+        &[&minutely],
+        true,
+        now_ms,
+        UnitSystem::Imperial,
+    )
+    .unwrap();
+
+    assert_eq!(signal.headline, "Rain expected soon");
+    assert_eq!(
+        signal.expires_at.as_deref(),
+        Some(iso_timestamp(now_ms + 23 * 60_000).unwrap().as_str())
     );
 }
 

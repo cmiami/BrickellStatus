@@ -340,7 +340,7 @@
           <p>Plug the panel in or switch it on, then look for it. Each board shows its own four-character code on screen, so you can tell two of them apart.</p>
           <button class="scan-action" onclick={scanDevices} disabled={deviceBusy !== null || draft.display.transport === 'preview' || settingsDirty}>
             <RefreshCw size={16} class={deviceBusy === 'scan' ? 'spinning' : undefined} aria-hidden="true" />
-            {deviceBusy === 'scan' ? 'Looking' : settingsDirty ? 'Save your changes first' : 'Find my panel'}
+            {deviceBusy === 'scan' ? 'Looking' : settingsDirty ? 'Applying changes…' : 'Find my panel'}
           </button>
         </div>
 
@@ -363,10 +363,7 @@
 
       </section>
 
-      <div class="timing-register">
-        <label class="field"><span>Seconds per frame</span><input type="number" min="10" max="180" bind:value={draft.display.dwellSeconds} /><small class="field-note">How long each frame stays up.</small></label>
-        <label class="field"><span>Full refresh every</span><input type="number" min="1" max="100" bind:value={draft.display.fullRefreshEvery} /><small class="field-note">Frames between full wipes that clear ghosting.</small></label>
-      </div>
+      <p class="automatic-cadence">Current items advance automatically. Urgent notices move to the front, and the panel handles full refreshes as maintenance.</p>
 
       <!-- Which way up the board is screwed down. The preview stays upright
            either way: it shows what the reader sees, and the reader is looking

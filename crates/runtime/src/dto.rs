@@ -249,6 +249,21 @@ pub struct ChannelSignalDto {
     pub previous_close: Option<f64>,
 }
 
+/// One independently current item within a channel.
+///
+/// A channel is a subscription and a notice is one slide. Keeping that
+/// distinction in the snapshot means two earthquakes or two headlines do not
+/// collapse into a count while only the first one reaches the screen.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelNoticeDto {
+    /// Stable identity from the collector item and channel subscription.
+    pub key: String,
+    pub signal: ChannelSignalDto,
+    /// Item-level ranking used when notices from different channels interleave.
+    pub priority: ChannelPriorityDto,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelSnapshot {
@@ -271,6 +286,10 @@ pub struct ChannelSnapshot {
     pub material_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signal: Option<ChannelSignalDto>,
+    /// Every current item, highest priority first. `signal` remains the first
+    /// notice as a compatibility view for existing consumers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices: Vec<ChannelNoticeDto>,
     /// Cross-channel ranking. See [`ChannelPriorityDto`].
     #[serde(default)]
     pub priority: ChannelPriorityDto,
@@ -654,6 +673,8 @@ pub struct ChannelPreference {
     pub kind: ChannelKindDto,
     pub title: String,
     pub enabled: bool,
+    /// Retained for stored-profile compatibility. The runtime normalizes these
+    /// former alert/carousel controls to one automatic policy on load and save.
     pub presence: SurfacePresence,
     pub interrupt_preset: InterruptPreset,
     pub destinations: Vec<DestinationIdDto>,

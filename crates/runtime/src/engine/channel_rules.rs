@@ -34,17 +34,24 @@ fn channel_urgency(
                 _ => UrgencyDto::HeadsUp,
             }
         }
-        // Breaking news was Action, which put it above imminent rain. It is
-        // worth showing, not worth stepping in front of weather you are about
-        // to walk into.
-        ChannelKindDto::News => UrgencyDto::HeadsUp,
+        // An ordinary headline belongs in the current set but never interrupts.
+        // A publisher-authored breaking label raises it one band; even then an
+        // imminent bridge or rain event still carries the time advantage.
+        ChannelKindDto::News => {
+            if severity.as_deref() == Some("breaking") {
+                UrgencyDto::HeadsUp
+            } else {
+                UrgencyDto::Routine
+            }
+        }
         // A trade, a draft pick, or a final score is worth a rotation slot and
         // nothing more. Sports never interrupts.
         ChannelKindDto::Sports => UrgencyDto::Routine,
-        // Rain already falling in this quarter-hour changes a decision you are
-        // about to make; rain later today does not.
+        // Only a current precipitation observation proves rain is falling.
+        // Forecast windows can still earn an imminence boost below, but must
+        // not turn a likely hourly bucket into an observed condition.
         ChannelKindDto::Weather => {
-            if signal.and_then(|signal| signal.imminence_minutes) == Some(0) {
+            if severity.as_deref() == Some("falling now") {
                 UrgencyDto::Action
             } else {
                 UrgencyDto::HeadsUp
@@ -92,6 +99,16 @@ const DEFAULT_RAIN_AMOUNT_MM: f64 = 0.05;
 const DEFAULT_RAIN_WINDOW_MINUTES: f64 = 30.0;
 /// One 15-minute bin, in milliseconds.
 const MINUTELY_BIN_MS: i64 = 15 * 60 * 1_000;
+/// Open-Meteo's `current` values are resolved from the same 15-minute model
+/// intervals as its minutely feed. A non-zero current amount is useful through
+/// the end of that interval, not merely until the next forecast response.
+const CURRENT_WEATHER_BIN_MS: i64 = MINUTELY_BIN_MS;
+const MAX_WEATHER_CLOCK_SKEW_MS: i64 = 5 * 60 * 1_000;
+/// An hourly chance this strong, whose bucket is about to begin, is actionable
+/// enough to take the same ordering path as a named 15-minute forecast. The
+/// copy still describes the bucket rather than pretending this is an onset ETA.
+const HIGH_CONFIDENCE_RAIN_PERCENT: f64 = 80.0;
+const IMMINENT_WEATHER_WINDOW_MINUTES: i64 = 15;
 /// How near a tropical cyclone has to be before it is this reader's problem.
 ///
 /// Tropical-storm-force wind fields rarely reach beyond about 500 km, so 700
@@ -126,7 +143,18 @@ fn channel_priority(
 ) -> ChannelPriorityDto {
     let urgency = channel_urgency(kind, signal, decision);
     let imminence_minutes = channel_imminence_minutes(kind, signal, decision);
-    let confirmed = matches!(kind, ChannelKindDto::Bridge) && decision.state == BridgeStateDto::Open;
+    let confirmed = match kind {
+        ChannelKindDto::Bridge => decision.state == BridgeStateDto::Open,
+        ChannelKindDto::Weather => signal.and_then(|signal| signal.severity.as_deref())
+            == Some("Falling now"),
+        ChannelKindDto::Official
+        | ChannelKindDto::Hurricane
+        | ChannelKindDto::News
+        | ChannelKindDto::Sports
+        | ChannelKindDto::Earthquake
+        | ChannelKindDto::Markets => signal.is_some(),
+        ChannelKindDto::System => false,
+    };
     let score = brickellstatus_policy::priority_score(brickellstatus_policy::PriorityInput {
         urgency: match urgency {
             UrgencyDto::Routine => brickellstatus_policy::Urgency::Routine,
@@ -182,23 +210,34 @@ fn channel_snapshots(
             );
             let material_key =
                 channel_material_key(kind, channel, &items, decision, active, now_ms);
-            let signal = channel_signal(
-                kind,
-                channel,
-                &items,
-                active,
-                now_ms,
-                preferences.unit_system,
-            );
+            let notices = if active {
+                channel_notices(
+                    kind,
+                    channel,
+                    &items,
+                    now_ms,
+                    preferences.unit_system,
+                    decision,
+                    channel.id == preferences.profile.home_channel_id,
+                )
+            } else {
+                Vec::new()
+            };
+            let signal = notices.first().map(|notice| notice.signal.clone());
             let coverage_complete = coverage.total_sources > 0
                 && coverage.usable_sources == coverage.total_sources
                 && (kind != ChannelKindDto::Bridge
                     || bridge_resolution_confirmed(channel, state, now_ms));
-            let priority = channel_priority(
-                kind,
-                signal.as_ref(),
-                decision,
-                channel.id == preferences.profile.home_channel_id,
+            let priority = notices.first().map_or_else(
+                || {
+                    channel_priority(
+                        kind,
+                        signal.as_ref(),
+                        decision,
+                        channel.id == preferences.profile.home_channel_id,
+                    )
+                },
+                |notice| notice.priority,
             );
             ChannelSnapshot {
                 priority,
@@ -212,6 +251,7 @@ fn channel_snapshots(
                 summary,
                 material_key,
                 signal,
+                notices,
                 enabled: channel.enabled,
                 active,
                 presence: channel.presence,
@@ -314,6 +354,57 @@ fn channel_material_key(
     format!("material:{}", hex_digest(&hasher.finalize()))
 }
 
+fn channel_notices(
+    kind: ChannelKindDto,
+    channel: &ChannelPreference,
+    usable_items: &[&CollectorItem],
+    now_ms: i64,
+    unit_system: UnitSystem,
+    decision: &DecisionSnapshot,
+    is_anchor: bool,
+) -> Vec<ChannelNoticeDto> {
+    if matches!(kind, ChannelKindDto::Bridge | ChannelKindDto::System) {
+        return Vec::new();
+    }
+    if kind == ChannelKindDto::Weather {
+        // Provider rows are evidence about one current weather state, not
+        // separate authored events. Pick rain and wind independently so a
+        // precise rain bin cannot hide a qualifying gust in another row, then
+        // publish the composed state as exactly one notice.
+        let (rain, wind) = best_weather_facts(channel, usable_items, now_ms);
+        let Some(signal) = weather_channel_signal(rain, wind, unit_system) else {
+            return Vec::new();
+        };
+        let priority = channel_priority(kind, Some(&signal), decision, is_anchor);
+        return vec![ChannelNoticeDto {
+            key: channel_weather_notice_key(channel),
+            signal,
+            priority,
+        }];
+    }
+
+    let mut notices = matching_channel_items(kind, channel, usable_items, now_ms)
+        .into_iter()
+        .filter_map(|item| {
+            let signal = channel_signal_from_item(kind, channel, item, now_ms, unit_system)?;
+            let priority = channel_priority(kind, Some(&signal), decision, is_anchor);
+            Some(ChannelNoticeDto {
+                key: channel_notice_key(channel, item),
+                signal,
+                priority,
+            })
+        })
+        .collect::<Vec<_>>();
+    notices.sort_by(|left, right| {
+        right
+            .priority
+            .score
+            .cmp(&left.priority.score)
+    });
+    notices
+}
+
+#[cfg(test)]
 fn channel_signal(
     kind: ChannelKindDto,
     channel: &ChannelPreference,
@@ -325,35 +416,63 @@ fn channel_signal(
     if !active || matches!(kind, ChannelKindDto::Bridge | ChannelKindDto::System) {
         return None;
     }
+    if kind == ChannelKindDto::Weather {
+        let (rain, wind) = best_weather_facts(channel, usable_items, now_ms);
+        return weather_channel_signal(rain, wind, unit_system);
+    }
     let item = matching_channel_items(kind, channel, usable_items, now_ms)
         .into_iter()
         .next()?;
+    channel_signal_from_item(kind, channel, item, now_ms, unit_system)
+}
+
+fn channel_notice_key(channel: &ChannelPreference, item: &CollectorItem) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"channel-notice\0");
+    hasher.update(channel.id.as_bytes());
+    hasher.update([0]);
+    hasher.update(item.id.as_bytes());
+    format!("notice:{}", hex_digest(&hasher.finalize()))
+}
+
+fn channel_weather_notice_key(channel: &ChannelPreference) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"channel-weather-notice\0");
+    hasher.update(channel.id.as_bytes());
+    format!("notice:{}", hex_digest(&hasher.finalize()))
+}
+
+fn channel_signal_from_item(
+    kind: ChannelKindDto,
+    channel: &ChannelPreference,
+    item: &CollectorItem,
+    now_ms: i64,
+    unit_system: UnitSystem,
+) -> Option<ChannelSignalDto> {
+    if kind == ChannelKindDto::Weather {
+        return weather_channel_signal(
+            rain_activation_fact(item, channel, now_ms),
+            wind_activation_fact(item, channel, now_ms),
+            unit_system,
+        );
+    }
+
+    let headline = signal_text(Some(&item.title), &channel.title, 160);
     let expires_at = item
         .ends_at
         .as_ref()
-        .and_then(|value| iso_timestamp(value.timestamp_millis()).ok());
+        .map(|value| value.timestamp_millis())
+        .or_else(|| authored_item_expiration_ms(kind, channel, item))
+        .and_then(|value| iso_timestamp(value).ok());
 
     // Set only by the kinds whose material is a measurement. The rest are
     // authored events and already have a stable identity of their own.
     let mut band = None;
-    let mut imminence_minutes = None;
+    let imminence_minutes = None;
     let mut series = Vec::new();
     let mut previous_close = None;
     let (detail, action, severity): (String, String, Option<String>) = match kind {
-        ChannelKindDto::Weather => {
-            let weather = weather_signal(item, channel, now_ms, unit_system);
-            band = weather.band;
-            imminence_minutes = weather.imminence_minutes;
-            (
-                weather.detail,
-                "Expect wet roads and slower traffic.".into(),
-                Some(if imminence_minutes == Some(0) {
-                    "Falling now".into()
-                } else {
-                    "Heads-up".into()
-                }),
-            )
-        }
+        ChannelKindDto::Weather => unreachable!("weather returns before authored composition"),
         ChannelKindDto::Official => (
             signal_text(
                 item.summary.as_deref(),
@@ -455,7 +574,7 @@ fn channel_signal(
     };
 
     Some(ChannelSignalDto {
-        headline: signal_text(Some(&item.title), &channel.title, 160),
+        headline,
         detail,
         action: bounded_signal_text(&action, 240),
         severity,
@@ -465,6 +584,34 @@ fn channel_signal(
         series,
         previous_close,
     })
+}
+
+/// Authored items without a provider end time still need an absolute end for
+/// clients that are holding a snapshot between runtime refreshes. These are the
+/// same automatic age windows used by each kind's relevance matcher.
+fn authored_item_expiration_ms(
+    kind: ChannelKindDto,
+    channel: &ChannelPreference,
+    item: &CollectorItem,
+) -> Option<i64> {
+    let observed_ms = item.observed_at.as_ref()?.timestamp_millis();
+    let minutes = match kind {
+        ChannelKindDto::Hurricane
+        | ChannelKindDto::News
+        | ChannelKindDto::Sports
+        | ChannelKindDto::Markets => f64::from(channel.max_age_minutes),
+        ChannelKindDto::Earthquake => scope_f64(
+            channel,
+            "eventAgeMinutes",
+            f64::from(channel.max_age_minutes),
+        ),
+        _ => return None,
+    };
+    if !minutes.is_finite() || minutes < 0.0 {
+        return None;
+    }
+    let duration_ms = (minutes * 60_000.0).round().clamp(0.0, i64::MAX as f64) as i64;
+    Some(observed_ms.saturating_add(duration_ms))
 }
 
 fn matching_channel_items<'a>(
@@ -484,7 +631,7 @@ fn matching_channel_items<'a>(
             .then_with(|| item_time_ms(right).cmp(&item_time_ms(left)))
             .then_with(|| left.id.cmp(&right.id))
     });
-    matching.truncate(channel.max_items);
+    matching.truncate(crate::preferences::AUTOMATIC_ITEM_LIMIT);
     matching
 }
 
@@ -844,6 +991,19 @@ fn sports_item_is_transaction(item: &CollectorItem) -> bool {
 struct RainActivationFact {
     lead_minutes: i64,
     measure: RainMeasure,
+    evidence: RainEvidence,
+    valid_until_ms: i64,
+    supports_priority_imminence: bool,
+}
+
+/// What the provider actually knows about this rain period. This distinction
+/// is part of the product truth: a current amount may say rain is falling, a
+/// forecast amount names a quarter-hour, and a probability only names an hour.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RainEvidence {
+    CurrentObservation,
+    QuarterHourForecast,
+    HourlyForecast,
 }
 
 /// Which rule armed the rain heads-up, and the number that armed it.
@@ -859,7 +1019,7 @@ enum RainMeasure {
     /// this" constant rather than something the reader chose.
     Amount { millimetres: f64 },
     /// Percent chance across an hourly bucket.
-    Probability { percent: f64, threshold: f64 },
+    Probability { percent: f64 },
 }
 
 impl RainMeasure {
@@ -875,17 +1035,7 @@ impl RainMeasure {
     fn band(self) -> &'static str {
         match self {
             Self::Amount { millimetres } => amount_band(millimetres),
-            Self::Probability { percent, .. } => probability_band(percent),
-        }
-    }
-
-    /// The parenthetical that tells the reader which question was answered.
-    fn describe(self) -> String {
-        match self {
-            Self::Amount { millimetres } => format!("{millimetres:.2} mm expected"),
-            Self::Probability {
-                percent, threshold, ..
-            } => format!("{percent:.0}% chance, threshold {threshold:.0}%"),
+            Self::Probability { percent } => probability_band(percent),
         }
     }
 
@@ -893,12 +1043,65 @@ impl RainMeasure {
     fn magnitude(self) -> f64 {
         match self {
             Self::Amount { millimetres } => millimetres,
-            Self::Probability { percent, .. } => percent,
+            Self::Probability { percent } => percent,
         }
     }
 
     fn is_amount(self) -> bool {
         matches!(self, Self::Amount { .. })
+    }
+}
+
+impl RainActivationFact {
+    fn priority_imminence_minutes(self) -> Option<u16> {
+        self.supports_priority_imminence
+            .then_some(self.lead_minutes.clamp(0, i64::from(u16::MAX)) as u16)
+    }
+
+    fn headline(self) -> &'static str {
+        match self.evidence {
+            RainEvidence::CurrentObservation => "Rain is falling now",
+            RainEvidence::QuarterHourForecast if self.lead_minutes <= 15 => "Rain expected soon",
+            RainEvidence::QuarterHourForecast => "Rain expected later",
+            RainEvidence::HourlyForecast if self.priority_imminence_minutes().is_some() => {
+                "Rain likely soon"
+            }
+            RainEvidence::HourlyForecast => "Chance of rain",
+        }
+    }
+
+    fn detail(self) -> String {
+        match (self.evidence, self.measure) {
+            (RainEvidence::CurrentObservation, RainMeasure::Amount { millimetres }) => {
+                format!("{millimetres:.2} mm observed in the current 15-minute period.")
+            }
+            (RainEvidence::QuarterHourForecast, RainMeasure::Amount { millimetres })
+                if self.lead_minutes == 0 =>
+            {
+                format!("{millimetres:.2} mm forecast in the current 15-minute period.")
+            }
+            (RainEvidence::QuarterHourForecast, RainMeasure::Amount { millimetres }) => format!(
+                "{millimetres:.2} mm forecast for the 15-minute period beginning in {} min.",
+                self.lead_minutes
+            ),
+            (RainEvidence::HourlyForecast, RainMeasure::Probability { percent })
+                if self.lead_minutes == 0 =>
+            {
+                format!("{percent:.0}% chance of rain this hour.")
+            }
+            (RainEvidence::HourlyForecast, RainMeasure::Probability { percent }) => format!(
+                "{percent:.0}% chance of rain in the hour beginning in {} min.",
+                self.lead_minutes
+            ),
+            // Constructors keep these combinations impossible. Retain a
+            // truthful fallback so malformed future data cannot invent copy.
+            (_, RainMeasure::Amount { millimetres }) => {
+                format!("{millimetres:.2} mm of precipitation reported.")
+            }
+            (_, RainMeasure::Probability { percent }) => {
+                format!("{percent:.0}% chance of rain.")
+            }
+        }
     }
 }
 
@@ -919,6 +1122,13 @@ struct WindActivationFact {
     lead_minutes: i64,
     mph: f64,
     threshold: f64,
+    valid_until_ms: i64,
+}
+
+impl WindActivationFact {
+    fn priority_imminence_minutes(self) -> u16 {
+        self.lead_minutes.clamp(0, i64::from(u16::MAX)) as u16
+    }
 }
 
 fn rain_activation_fact(
@@ -930,36 +1140,39 @@ fn rain_activation_fact(
         return None;
     }
     match item.kind {
+        ItemKind::WeatherCurrent => rain_current_fact(item, channel, now_ms),
         ItemKind::WeatherMinutely => rain_amount_fact(item, channel, now_ms),
         ItemKind::WeatherHourly => rain_probability_fact(item, channel, now_ms),
         _ => None,
     }
 }
 
-/// The preferred rule: a named quarter-hour with measured millimetres in it.
-///
-/// Deliberately narrow. It reads only its own bin, so a bin that does not reach
-/// the window simply does not arm — there is no path by which a coarser bucket
-/// can be reported as a 15-minute answer.
-fn rain_amount_fact(
+/// A non-zero current amount is direct evidence that the active weather bin is
+/// wet. Keeping it alongside forecasts prevents a revised future bin from
+/// clearing rain that the provider still reports in the current period.
+fn rain_current_fact(
     item: &CollectorItem,
     channel: &ChannelPreference,
     now_ms: i64,
 ) -> Option<RainActivationFact> {
+    let observed_ms = item.observed_at.as_ref()?.timestamp_millis();
+    let valid_until_ms = observed_ms.saturating_add(CURRENT_WEATHER_BIN_MS);
+    if observed_ms > now_ms.saturating_add(MAX_WEATHER_CLOCK_SKEW_MS) || valid_until_ms <= now_ms {
+        return None;
+    }
+    let millimetres = qualifying_rain_amount(item, channel)?;
+    Some(RainActivationFact {
+        lead_minutes: 0,
+        measure: RainMeasure::Amount { millimetres },
+        evidence: RainEvidence::CurrentObservation,
+        valid_until_ms,
+        supports_priority_imminence: true,
+    })
+}
+
+fn qualifying_rain_amount(item: &CollectorItem, channel: &ChannelPreference) -> Option<f64> {
     let threshold = scope_f64(channel, "rainAmountMm", DEFAULT_RAIN_AMOUNT_MM);
     if !threshold.is_finite() || threshold <= 0.0 {
-        return None;
-    }
-    let window_minutes = scope_f64(channel, "rainWindowMinutes", DEFAULT_RAIN_WINDOW_MINUTES)
-        .round()
-        .clamp(0.0, 180.0) as i64;
-    let starts_ms = item.starts_at.as_ref()?.timestamp_millis();
-    // A bin describes its own quarter-hour, so the one in progress stays useful
-    // until it ends.
-    if starts_ms.saturating_add(MINUTELY_BIN_MS) < now_ms {
-        return None;
-    }
-    if starts_ms.saturating_sub(now_ms).max(0) / 60_000 > window_minutes {
         return None;
     }
     let millimetres = item
@@ -978,10 +1191,41 @@ fn rain_amount_fact(
     {
         return None;
     }
-    (millimetres >= threshold).then_some(RainActivationFact {
-        // A bin already in progress is rain now, not rain later.
+    (millimetres >= threshold).then_some(millimetres)
+}
+
+/// The preferred rule: a named quarter-hour with measured millimetres in it.
+///
+/// Deliberately narrow. It reads only its own bin, so a bin that does not reach
+/// the window simply does not arm — there is no path by which a coarser bucket
+/// can be reported as a 15-minute answer.
+fn rain_amount_fact(
+    item: &CollectorItem,
+    channel: &ChannelPreference,
+    now_ms: i64,
+) -> Option<RainActivationFact> {
+    let window_minutes = scope_f64(channel, "rainWindowMinutes", DEFAULT_RAIN_WINDOW_MINUTES)
+        .round()
+        .clamp(0.0, 180.0) as i64;
+    let starts_ms = item.starts_at.as_ref()?.timestamp_millis();
+    let valid_until_ms = starts_ms.saturating_add(MINUTELY_BIN_MS);
+    // A bin describes its own quarter-hour, so the one in progress stays useful
+    // until it ends.
+    if valid_until_ms <= now_ms {
+        return None;
+    }
+    if starts_ms.saturating_sub(now_ms).max(0) / 60_000 > window_minutes {
+        return None;
+    }
+    let millimetres = qualifying_rain_amount(item, channel)?;
+    Some(RainActivationFact {
+        // A forecast period already in progress has zero lead, but remains a
+        // forecast rather than being promoted to an observation.
         lead_minutes: starts_ms.saturating_sub(now_ms).max(0) / 60_000,
         measure: RainMeasure::Amount { millimetres },
+        evidence: RainEvidence::QuarterHourForecast,
+        valid_until_ms,
+        supports_priority_imminence: true,
     })
 }
 
@@ -1000,7 +1244,7 @@ fn rain_probability_fact(
     let starts_ms = item.starts_at.as_ref()?.timestamp_millis();
     // Hourly precipitation describes the complete bucket, so the current
     // bucket remains useful through the end of its hour.
-    if starts_ms.saturating_add(60 * 60 * 1_000) < now_ms {
+    if starts_ms.saturating_add(60 * 60 * 1_000) <= now_ms {
         return None;
     }
     let lead_minutes = starts_ms.saturating_sub(now_ms).max(0) / 60_000;
@@ -1027,8 +1271,13 @@ fn rain_probability_fact(
         lead_minutes,
         measure: RainMeasure::Probability {
             percent: probability,
-            threshold,
         },
+        evidence: RainEvidence::HourlyForecast,
+        valid_until_ms: starts_ms.saturating_add(60 * 60 * 1_000),
+        supports_priority_imminence: probability >= HIGH_CONFIDENCE_RAIN_PERCENT
+            && starts_ms >= now_ms
+            && starts_ms.saturating_sub(now_ms)
+                <= IMMINENT_WEATHER_WINDOW_MINUTES.saturating_mul(60_000),
     })
 }
 
@@ -1045,21 +1294,20 @@ fn wind_activation_fact(
         .get("windGustMph")?
         .as_f64()
         .filter(|value| value.is_finite())?;
-    const MAX_CLOCK_SKEW_MS: i64 = 5 * 60 * 1_000;
-    let lead_minutes = match item.kind {
+    let (lead_minutes, valid_until_ms) = match item.kind {
         ItemKind::WeatherCurrent => {
             let observed_ms = item.observed_at.as_ref()?.timestamp_millis();
             let maximum_age_ms = i64::from(channel.max_age_minutes).saturating_mul(60 * 1_000);
-            if observed_ms > now_ms.saturating_add(MAX_CLOCK_SKEW_MS)
-                || now_ms.saturating_sub(observed_ms).max(0) > maximum_age_ms
+            if observed_ms > now_ms.saturating_add(MAX_WEATHER_CLOCK_SKEW_MS)
+                || observed_ms.saturating_add(maximum_age_ms) <= now_ms
             {
                 return None;
             }
-            0
+            (0, observed_ms.saturating_add(maximum_age_ms))
         }
         ItemKind::WeatherHourly => {
             let starts_ms = item.starts_at.as_ref()?.timestamp_millis();
-            if starts_ms.saturating_add(60 * 60 * 1_000) < now_ms {
+            if starts_ms.saturating_add(60 * 60 * 1_000) <= now_ms {
                 return None;
             }
             let lead_minutes = starts_ms.saturating_sub(now_ms).max(0) / 60_000;
@@ -1076,7 +1324,7 @@ fn wind_activation_fact(
             if lead_minutes > lead_limit {
                 return None;
             }
-            lead_minutes
+            (lead_minutes, starts_ms.saturating_add(60 * 60 * 1_000))
         }
         _ => return None,
     };
@@ -1103,6 +1351,7 @@ fn wind_activation_fact(
         lead_minutes,
         mph,
         threshold,
+        valid_until_ms,
     })
 }
 
@@ -1111,23 +1360,55 @@ fn weather_item_activation_score(
     channel: &ChannelPreference,
     now_ms: i64,
 ) -> Option<f64> {
-    let rain = rain_activation_fact(item, channel, now_ms).map(|fact| {
-        // Amount sits a band above probability so a measured quarter-hour is
-        // always the item chosen to speak, even when an hourly bucket claims a
-        // shorter lead.
-        let rule_floor = if fact.measure.is_amount() {
-            30_000.0
-        } else {
-            20_000.0
-        };
-        rule_floor - fact.lead_minutes as f64 + fact.measure.magnitude() / 1_000.0
-    });
-    let wind = wind_activation_fact(item, channel, now_ms).map(|fact| 10_000.0 + fact.mph);
+    let rain = rain_activation_fact(item, channel, now_ms).map(rain_activation_score);
+    let wind = wind_activation_fact(item, channel, now_ms).map(wind_activation_score);
     match (rain, wind) {
         (Some(rain), Some(wind)) => Some(rain.max(wind)),
         (Some(score), None) | (None, Some(score)) => Some(score),
         (None, None) => None,
     }
+}
+
+fn wind_activation_score(fact: WindActivationFact) -> f64 {
+    // A threshold-crossing gust that affects the reader sooner is the better
+    // representative of the current channel state. Strength breaks equal-lead
+    // ties without allowing a distant, slightly stronger bucket to hide it.
+    10_000.0 - fact.lead_minutes as f64 + fact.mph / 1_000.0
+}
+
+fn best_weather_facts(
+    channel: &ChannelPreference,
+    items: &[&CollectorItem],
+    now_ms: i64,
+) -> (Option<RainActivationFact>, Option<WindActivationFact>) {
+    let rain = items
+        .iter()
+        .filter_map(|item| rain_activation_fact(item, channel, now_ms))
+        .max_by(|left, right| {
+            rain_activation_score(*left).total_cmp(&rain_activation_score(*right))
+        });
+    let wind = items
+        .iter()
+        .filter_map(|item| wind_activation_fact(item, channel, now_ms))
+        .max_by(|left, right| {
+            wind_activation_score(*left).total_cmp(&wind_activation_score(*right))
+        });
+    (rain, wind)
+}
+
+fn rain_activation_score(fact: RainActivationFact) -> f64 {
+    // Current evidence speaks first. Inside the 15-minute action window, a
+    // named quarter-hour remains more precise than an hourly chance at the same
+    // lead; either outranks a more distant amount forecast. Outside that window
+    // the narrower amount rule remains the preferred source of copy.
+    let rule_floor = match (fact.evidence, fact.priority_imminence_minutes()) {
+        (RainEvidence::CurrentObservation, _) => 40_000.0,
+        (RainEvidence::QuarterHourForecast, Some(minutes)) if minutes <= 15 => 36_000.0,
+        (RainEvidence::HourlyForecast, Some(_)) => 35_000.0,
+        (_, _) if fact.measure.is_amount() => 30_000.0,
+        _ => 20_000.0,
+    };
+    rule_floor - fact.lead_minutes as f64 + fact.measure.magnitude() / 1_000.0
 }
 
 /// The weather signal's prose and its banded identity, derived together.
@@ -1136,14 +1417,19 @@ fn weather_item_activation_score(
 /// sentence it summarizes is worse than no band, because dedupe would then
 /// suppress a message whose text had genuinely changed.
 struct WeatherSignal {
+    headline: String,
     detail: String,
+    action: String,
+    severity: String,
+    expires_at: Option<String>,
     band: Option<String>,
-    /// Set only by the amount rule. An hourly probability describes a bucket,
-    /// not a moment, so reporting it as an ETA would be a guess wearing a
-    /// number — and it is the term that outranks every other channel.
+    /// A 15-minute amount names its forecast period. A high-confidence hourly
+    /// chance may use the beginning of its bucket for ordering only when that
+    /// bucket is within 15 minutes; its copy continues to call it an hour.
     imminence_minutes: Option<u16>,
 }
 
+#[cfg(test)]
 fn weather_signal(
     item: &CollectorItem,
     channel: &ChannelPreference,
@@ -1152,14 +1438,37 @@ fn weather_signal(
 ) -> WeatherSignal {
     let rain_fact = rain_activation_fact(item, channel, now_ms);
     let wind_fact = wind_activation_fact(item, channel, now_ms);
-    let rain = rain_fact.map(|fact| {
-        let timing = if fact.lead_minutes == 0 {
-            "now".into()
-        } else {
-            format!("in {} min", fact.lead_minutes)
-        };
-        format!("Rain {timing} ({})", fact.measure.describe())
-    });
+    weather_signal_from_facts(rain_fact, wind_fact, unit_system)
+}
+
+fn weather_channel_signal(
+    rain_fact: Option<RainActivationFact>,
+    wind_fact: Option<WindActivationFact>,
+    unit_system: UnitSystem,
+) -> Option<ChannelSignalDto> {
+    if rain_fact.is_none() && wind_fact.is_none() {
+        return None;
+    }
+    let weather = weather_signal_from_facts(rain_fact, wind_fact, unit_system);
+    Some(ChannelSignalDto {
+        headline: weather.headline,
+        detail: weather.detail,
+        action: bounded_signal_text(&weather.action, 240),
+        severity: Some(weather.severity),
+        expires_at: weather.expires_at,
+        band: weather.band,
+        imminence_minutes: weather.imminence_minutes,
+        series: Vec::new(),
+        previous_close: None,
+    })
+}
+
+fn weather_signal_from_facts(
+    rain_fact: Option<RainActivationFact>,
+    wind_fact: Option<WindActivationFact>,
+    unit_system: UnitSystem,
+) -> WeatherSignal {
+    let rain = rain_fact.map(RainActivationFact::detail);
     let wind = wind_fact.map(|fact| {
         let timing = if fact.lead_minutes == 0 {
             "now".into()
@@ -1173,8 +1482,50 @@ fn weather_signal(
     let detail = match (rain, wind) {
         (Some(rain), Some(wind)) => format!("{rain} · {wind}"),
         (Some(detail), None) | (None, Some(detail)) => detail,
-        (None, None) => "A configured personal weather threshold was crossed.".into(),
+        (None, None) => "Current weather conditions need attention.".into(),
     };
+
+    let headline = match (rain_fact, wind_fact) {
+        (Some(rain), Some(wind))
+            if rain.evidence == RainEvidence::CurrentObservation && wind.lead_minutes == 0 =>
+        {
+            "Rain and strong gusts now"
+        }
+        (Some(rain), Some(_)) if rain.evidence == RainEvidence::CurrentObservation => {
+            "Rain now; strong gusts expected"
+        }
+        (Some(_), Some(wind)) if wind.lead_minutes == 0 => {
+            "Strong gusts now; rain expected"
+        }
+        (Some(_), Some(_)) => "Rain and strong gusts expected",
+        (Some(rain), None) => rain.headline(),
+        (None, Some(wind)) if wind.lead_minutes == 0 => "Strong gusts now",
+        (None, Some(_)) => "Strong gusts expected",
+        (None, None) => "Weather update",
+    };
+    let severity = match (rain_fact, wind_fact) {
+        (Some(fact), _) if fact.evidence == RainEvidence::CurrentObservation => "Falling now",
+        (Some(fact), _) if fact.priority_imminence_minutes().is_some() => "Imminent",
+        (_, Some(fact)) if fact.lead_minutes <= IMMINENT_WEATHER_WINDOW_MINUTES => "Imminent",
+        _ => "Heads-up",
+    };
+    let action = match (rain_fact.is_some(), wind_fact.is_some()) {
+        (true, true) => "Plan for wet roads and secure loose outdoor items.",
+        (true, false) => "Plan for wet roads and slower traffic.",
+        (false, true) => "Use caution around exposed roads and walkways.",
+        (false, false) => "Review current conditions before heading out.",
+    };
+
+    // A combined card is valid only while every fact printed on it is valid.
+    // A later refresh may replace it with the surviving rain-only or wind-only
+    // card, but a consumer holding this snapshot must never outlive its copy.
+    let valid_until_ms = [
+        rain_fact.map(|fact| fact.valid_until_ms),
+        wind_fact.map(|fact| fact.valid_until_ms),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
 
     // The rule is named in the band so a future amount-based rain rule can never
     // be mistaken for a probability one that happened to land in the same bins.
@@ -1198,11 +1549,19 @@ fn weather_signal(
     }
 
     WeatherSignal {
+        headline: headline.into(),
         detail: bounded_signal_text(&detail, 360),
+        action: action.into(),
+        severity: severity.into(),
+        expires_at: valid_until_ms.and_then(|value| iso_timestamp(value).ok()),
         band: (!parts.is_empty()).then(|| parts.join("+")),
-        imminence_minutes: rain_fact
-            .filter(|fact| fact.measure.is_amount())
-            .map(|fact| fact.lead_minutes.clamp(0, i64::from(u16::MAX)) as u16),
+        imminence_minutes: [
+            rain_fact.and_then(RainActivationFact::priority_imminence_minutes),
+            wind_fact.map(WindActivationFact::priority_imminence_minutes),
+        ]
+        .into_iter()
+        .flatten()
+        .min(),
     }
 }
 
@@ -1954,8 +2313,10 @@ fn channel_summary(
                 .count();
             if count == 0 {
                 ("Nothing new".into(), false)
+            } else if count == 1 {
+                ("1 current headline".into(), true)
             } else {
-                (format!("{count} recent item(s) in rotation"), true)
+                (format!("{count} current headlines"), true)
             }
         }
         ChannelKindDto::Sports => {
@@ -1969,9 +2330,14 @@ fn channel_summary(
                 .count();
             match (matching.len(), moves) {
                 (0, _) => ("Nothing new".into(), false),
-                (total, 0) => (format!("{total} recent item(s) in rotation"), true),
+                (1, 0) => ("1 current sports item".into(), true),
+                (total, 0) => (format!("{total} current sports items"), true),
+                (1, 1) => ("1 current sports item · 1 roster move".into(), true),
                 (total, moves) => (
-                    format!("{total} recent item(s) in rotation · {moves} roster move(s)"),
+                    format!(
+                        "{total} current sports items · {moves} roster {}",
+                        if moves == 1 { "move" } else { "moves" }
+                    ),
                     true,
                 ),
             }
@@ -1981,11 +2347,13 @@ fn channel_summary(
                 .iter()
                 .filter(|item| earthquake_matches_scope(item, channel, now_ms))
                 .count()
-                .min(channel.max_items);
+                .min(crate::preferences::AUTOMATIC_ITEM_LIMIT);
             if count == 0 {
-                ("No significant earthquake".into(), false)
+                ("No current earthquakes".into(), false)
+            } else if count == 1 {
+                ("1 current earthquake".into(), true)
             } else {
-                (format!("{count} significant earthquake(s)"), true)
+                (format!("{count} current earthquakes"), true)
             }
         }
         ChannelKindDto::Markets => market_activation(channel, items, availability),
@@ -2298,7 +2666,7 @@ fn market_activation(
     let crossed = quotes
         .iter()
         .any(|quote| quote.change_percent.abs() >= threshold);
-    let quote_count = channel.max_items.clamp(1, 3);
+    let quote_count = 3;
     let quote_summary = quotes
         .iter()
         .take(quote_count)
@@ -2472,14 +2840,8 @@ fn evaluate_weather_activation(
     )
 }
 
-/// "now" for a bin already in progress, "in N min" otherwise. The amount rule
-/// can legitimately report zero lead; the probability rule effectively cannot.
-fn rain_timing(fact: &RainActivationFact) -> String {
-    if fact.lead_minutes == 0 {
-        "now".into()
-    } else {
-        format!("within {} min", fact.lead_minutes)
-    }
+fn rain_status(fact: RainActivationFact) -> String {
+    fact.detail().trim_end_matches('.').to_owned()
 }
 
 fn evaluate_weather_activation_with_units(
@@ -2521,15 +2883,8 @@ fn evaluate_weather_activation_with_units(
                 )
             })
         })
-        .min_by(|(left, _), (right, _)| {
-            // Amount first: an hourly bucket must never speak over a measured
-            // quarter-hour, however short its nominal lead.
-            right
-                .measure
-                .is_amount()
-                .cmp(&left.measure.is_amount())
-                .then_with(|| left.lead_minutes.cmp(&right.lead_minutes))
-                .then_with(|| right.measure.magnitude().total_cmp(&left.measure.magnitude()))
+        .max_by(|(left, _), (right, _)| {
+            rain_activation_score(*left).total_cmp(&rain_activation_score(*right))
         });
 
     let wind = items
@@ -2542,7 +2897,9 @@ fn evaluate_weather_activation_with_units(
                 )
             })
         })
-        .max_by(|(left, _), (right, _)| left.mph.total_cmp(&right.mph));
+        .max_by(|(left, _), (right, _)| {
+            wind_activation_score(*left).total_cmp(&wind_activation_score(*right))
+        });
 
     let delayed_suffix = if availability == AvailabilityDto::Delayed {
         " · source response delayed"
@@ -2556,9 +2913,8 @@ fn evaluate_weather_activation_with_units(
             WeatherActivation {
                 state: PersonalWeatherState::RainAndWindHeadsUp,
                 summary: format!(
-                    "Personal weather heads-up · {rain_area}: rain {} ({}) · {wind_area}: gusts {gust:.0} {label} in {} min (≥{threshold:.0} {label}){delayed_suffix}",
-                    rain_timing(&rain),
-                    rain.measure.describe(),
+                    "Personal weather heads-up · {rain_area}: {} · {wind_area}: gusts {gust:.0} {label} in {} min (≥{threshold:.0} {label}){delayed_suffix}",
+                    rain_status(rain),
                     wind.lead_minutes,
                 ),
             }
@@ -2566,9 +2922,8 @@ fn evaluate_weather_activation_with_units(
         (Some((rain, area)), None) => WeatherActivation {
             state: PersonalWeatherState::RainHeadsUp,
             summary: format!(
-                "Personal rain heads-up · {area}: {} ({}){delayed_suffix}",
-                rain_timing(&rain),
-                rain.measure.describe(),
+                "Personal rain heads-up · {area}: {}{delayed_suffix}",
+                rain_status(rain),
             ),
         },
         (None, Some((wind, area))) => {

@@ -49,7 +49,7 @@
   const iconForOutput = (id: OutputSnapshot['id']) => (id === 'epaper' ? MonitorUp : Send);
 </script>
 
-<aside class="ledger" class:compact aria-label="Enabled channels and destinations">
+<aside class="ledger" class:compact aria-label="Enabled channels and outputs">
   <section>
     <header class="ruled-header">
       <div>
@@ -82,8 +82,8 @@
   <section class="outputs">
     <header class="ruled-header">
       <div>
-        <p class="registration-label">Alerts</p>
-        <h2>Destinations</h2>
+        <p class="registration-label">Outputs</p>
+        <h2>Connections</h2>
       </div>
       <a href="/system/outputs">Edit</a>
     </header>

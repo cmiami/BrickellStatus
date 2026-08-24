@@ -20,6 +20,7 @@ pub enum UsgsWindow {
     Week,
     Month,
     Magnitude45Hour,
+    Magnitude45Day,
 }
 
 impl UsgsWindow {
@@ -30,6 +31,7 @@ impl UsgsWindow {
             Self::Week => "significant_week",
             Self::Month => "significant_month",
             Self::Magnitude45Hour => "4.5_hour",
+            Self::Magnitude45Day => "4.5_day",
         };
         Url::parse(&format!(
             "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/{feed}.geojson"
@@ -336,6 +338,10 @@ mod tests {
         assert_eq!(
             UsgsWindow::Magnitude45Hour.url().as_str(),
             "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_hour.geojson"
+        );
+        assert_eq!(
+            UsgsWindow::Magnitude45Day.url().as_str(),
+            "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_day.geojson"
         );
         assert_eq!(
             UsgsWindow::Hour.url().as_str(),

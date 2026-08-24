@@ -67,6 +67,12 @@ export interface ChannelPriority {
   confirmed: boolean;
 }
 
+export interface ChannelNotice {
+  key: string;
+  signal: ChannelSignal;
+  priority: ChannelPriority;
+}
+
 export interface ChannelSnapshot {
   id: string;
   kind:
@@ -87,6 +93,7 @@ export interface ChannelSnapshot {
   summary: string;
   materialKey: string;
   signal?: ChannelSignal;
+  notices?: ChannelNotice[];
   priority: ChannelPriority;
   enabled: boolean;
   active: boolean;
@@ -317,6 +324,7 @@ export interface ChannelPreference {
   kind: ChannelSnapshot['kind'];
   title: string;
   enabled: boolean;
+  /** Legacy wire fields. The runtime normalizes them; they are not user controls. */
   presence: SurfacePresence;
   interruptPreset: InterruptPreset;
   destinations: DestinationId[];

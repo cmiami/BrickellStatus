@@ -18,7 +18,7 @@ use brickellstatus_eink::{
 };
 use brickellstatus_runtime::{
     AppPreferences, AppSnapshot, AvailabilityDto, BridgeStateDto, ChannelKindDto, ChannelSnapshot,
-    InterruptPreset, UrgencyDto,
+    UrgencyDto,
 };
 use jiff::{Timestamp, tz::TimeZone};
 use std::collections::BTreeMap;
@@ -264,51 +264,8 @@ pub fn bps_to_percent(bps: u16) -> u8 {
 /// accident.
 pub fn interrupt_allows(
     channel: &ChannelSnapshot,
-    preferences: &AppPreferences,
-    snapshot: &AppSnapshot,
+    _preferences: &AppPreferences,
+    _snapshot: &AppSnapshot,
 ) -> bool {
-    if !channel.enabled || !channel.active {
-        return false;
-    }
-    match channel.interrupt_preset {
-        InterruptPreset::Off | InterruptPreset::Custom => false,
-        InterruptPreset::Meaningful => !matches!(
-            channel.kind,
-            ChannelKindDto::System | ChannelKindDto::Sports
-        ),
-        InterruptPreset::Recommended => match channel.kind {
-            ChannelKindDto::Bridge => matches!(
-                snapshot.decision.state,
-                BridgeStateDto::Likely | BridgeStateDto::Open
-            ),
-            ChannelKindDto::News => preferences
-                .profile
-                .channels
-                .iter()
-                .find(|preference| preference.id == channel.id)
-                .and_then(|preference| preference.scope.get("breakingOnly"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-            // No score, trade, or draft pick is worth taking over the screen,
-            // whatever the preset. Sports earns its rotation slot and stops
-            // there.
-            ChannelKindDto::System | ChannelKindDto::Sports => false,
-            ChannelKindDto::Weather
-            | ChannelKindDto::Official
-            | ChannelKindDto::Hurricane
-            | ChannelKindDto::Earthquake
-            | ChannelKindDto::Markets => true,
-        },
-        InterruptPreset::ConfirmedOnly => match channel.kind {
-            ChannelKindDto::Bridge => snapshot.decision.state == BridgeStateDto::Open,
-            ChannelKindDto::Official | ChannelKindDto::Hurricane | ChannelKindDto::Earthquake => {
-                true
-            }
-            ChannelKindDto::Weather
-            | ChannelKindDto::News
-            | ChannelKindDto::Sports
-            | ChannelKindDto::Markets
-            | ChannelKindDto::System => false,
-        },
-    }
+    channel.enabled && channel.active && !matches!(channel.priority.urgency, UrgencyDto::Routine)
 }

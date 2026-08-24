@@ -66,9 +66,7 @@ async fn test_whatsapp(state: State<'_, DesktopState>) -> Result<MutationResult,
     let token = match state.secret_store.whatsapp_token().await {
         Ok(Some(token)) => token,
         Ok(None) => {
-            return Ok(mutation_error(
-                "No Meta access token is stored locally.",
-            ));
+            return Ok(mutation_error("No Meta access token is stored locally."));
         }
         Err(error) => return Ok(mutation_error(error)),
     };
@@ -153,7 +151,7 @@ fn delivery_test_request(preferences: &AppPreferences, _snapshot: &AppSnapshot) 
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WhatsAppDispatchTracker {
     /// Binds dispatch state to the exact recipient, consent record, sender,
@@ -162,7 +160,7 @@ struct WhatsAppDispatchTracker {
     channels: BTreeMap<String, ChannelDispatchState>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChannelDispatchState {
     incident_id: Option<Uuid>,
@@ -170,6 +168,224 @@ struct ChannelDispatchState {
     last_material: Option<String>,
     active: bool,
     announced: bool,
+    /// Retained so an item-level all-clear can name the item that disappeared.
+    /// Older tracker JSON has neither field and continues to deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signal: Option<brickellstatus_runtime::ChannelSignalDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    priority: Option<brickellstatus_runtime::ChannelPriorityDto>,
+}
+
+const NOTICE_TRACKER_SEPARATOR: &str = "::notice::";
+
+#[derive(Clone, Debug)]
+struct ChannelDispatchTarget {
+    tracker_key: String,
+    signal: Option<brickellstatus_runtime::ChannelSignalDto>,
+    priority: brickellstatus_runtime::ChannelPriorityDto,
+    item_level: bool,
+}
+
+fn notice_tracker_key(channel_id: &str, notice_key: &str) -> String {
+    format!("{channel_id}{NOTICE_TRACKER_SEPARATOR}{notice_key}")
+}
+
+fn tracker_key_belongs_to_channel(key: &str, channel_id: &str) -> bool {
+    key == channel_id
+        || key
+            .strip_prefix(channel_id)
+            .is_some_and(|suffix| suffix.starts_with(NOTICE_TRACKER_SEPARATOR))
+}
+
+fn channel_dispatch_view(
+    channel: &ChannelSnapshot,
+    target: &ChannelDispatchTarget,
+    active: bool,
+) -> ChannelSnapshot {
+    let mut view = channel.clone();
+    view.active = active;
+    view.signal.clone_from(&target.signal);
+    view.priority = target.priority;
+    view.notices.clear();
+    view
+}
+
+fn current_channel_dispatch_targets(
+    channel: &ChannelSnapshot,
+    preferences: &AppPreferences,
+    snapshot: &AppSnapshot,
+) -> Vec<ChannelDispatchTarget> {
+    if !channel.enabled || !channel.active {
+        return Vec::new();
+    }
+
+    if channel.notices.is_empty() {
+        let target = ChannelDispatchTarget {
+            tracker_key: channel.id.clone(),
+            signal: channel.signal.clone(),
+            priority: channel.priority,
+            item_level: false,
+        };
+        return interrupt_allows(
+            &channel_dispatch_view(channel, &target, true),
+            preferences,
+            snapshot,
+        )
+        .then_some(target)
+        .into_iter()
+        .collect();
+    }
+
+    channel
+        .notices
+        .iter()
+        .map(|notice| ChannelDispatchTarget {
+            tracker_key: notice_tracker_key(&channel.id, &notice.key),
+            signal: Some(notice.signal.clone()),
+            priority: notice.priority,
+            item_level: true,
+        })
+        .filter(|target| {
+            interrupt_allows(
+                &channel_dispatch_view(channel, target, true),
+                preferences,
+                snapshot,
+            )
+        })
+        .collect()
+}
+
+fn dispatch_material(
+    channel: &ChannelSnapshot,
+    snapshot: &AppSnapshot,
+    target: &ChannelDispatchTarget,
+) -> String {
+    if !target.item_level {
+        return material_channel_state(&channel_dispatch_view(channel, target, true), snapshot);
+    }
+
+    let Some(signal) = target.signal.as_ref() else {
+        return "active:unknown".into();
+    };
+    match channel.kind {
+        ChannelKindDto::Weather | ChannelKindDto::Markets => signal.band.as_deref().map_or_else(
+            || format!("active:{}", normalize_material_text(&signal.detail)),
+            |band| format!("active:{band}"),
+        ),
+        _ => {
+            let serialized = serde_json::to_vec(&serde_json::json!({
+                "signal": signal,
+                "sourceLabel": channel.source_label,
+            }))
+            .unwrap_or_else(|_| signal.headline.as_bytes().to_vec());
+            format!("active:{:x}", Sha256::digest(serialized))
+        }
+    }
+}
+
+fn migrate_legacy_channel_tracker(
+    tracker: &mut WhatsAppDispatchTracker,
+    channel: &ChannelSnapshot,
+    snapshot: &AppSnapshot,
+    targets: &[ChannelDispatchTarget],
+) -> bool {
+    if channel.notices.is_empty() || targets.is_empty() {
+        return false;
+    }
+    let Some(mut legacy) = tracker.channels.remove(&channel.id) else {
+        return false;
+    };
+    if !legacy.active {
+        return true;
+    }
+
+    let target = &targets[0];
+    legacy.last_material = legacy
+        .last_material
+        .as_ref()
+        .map(|_| dispatch_material(channel, snapshot, target));
+    legacy.signal.clone_from(&target.signal);
+    legacy.priority = Some(target.priority);
+    tracker
+        .channels
+        .entry(target.tracker_key.clone())
+        .or_insert(legacy);
+    true
+}
+
+fn dispatch_state_keys(tracker: &WhatsAppDispatchTracker, channel_id: &str) -> Vec<String> {
+    tracker
+        .channels
+        .keys()
+        .filter(|key| tracker_key_belongs_to_channel(key, channel_id))
+        .cloned()
+        .collect()
+}
+
+fn tracker_state_for_request<'a>(
+    tracker: &'a WhatsAppDispatchTracker,
+    request: &DeliveryRequest,
+) -> Option<(&'a str, &'a ChannelDispatchState)> {
+    tracker
+        .channels
+        .iter()
+        .find(|(_, state)| {
+            state.incident_id == Some(request.incident_id)
+                && state.revision == request.material_revision
+        })
+        .map(|(key, state)| (key.as_str(), state))
+}
+
+fn current_target_for_key(
+    channel: &ChannelSnapshot,
+    preferences: &AppPreferences,
+    snapshot: &AppSnapshot,
+    tracker_key: &str,
+) -> Option<ChannelDispatchTarget> {
+    current_channel_dispatch_targets(channel, preferences, snapshot)
+        .into_iter()
+        .find(|target| target.tracker_key == tracker_key)
+}
+
+fn desktop_notification_material_if_due(
+    tracker: &WhatsAppDispatchTracker,
+    channel: &ChannelSnapshot,
+    snapshot: &AppSnapshot,
+    target: &ChannelDispatchTarget,
+) -> Option<String> {
+    let material = dispatch_material(channel, snapshot, target);
+    let unchanged = tracker
+        .channels
+        .get(&target.tracker_key)
+        .is_some_and(|state| {
+            state.active && state.last_material.as_deref() == Some(material.as_str())
+        });
+    (!unchanged).then_some(material)
+}
+
+fn record_desktop_notification(
+    tracker: &mut WhatsAppDispatchTracker,
+    target: &ChannelDispatchTarget,
+    material: String,
+) {
+    let revision = tracker
+        .channels
+        .get(&target.tracker_key)
+        .map_or(1, |state| state.revision.saturating_add(1));
+    tracker.channels.insert(
+        target.tracker_key.clone(),
+        ChannelDispatchState {
+            incident_id: None,
+            revision,
+            last_material: Some(material),
+            active: true,
+            // The pinned desktop notification plugin only confirms that it
+            // spawned an OS task, not that the OS displayed it.
+            announced: false,
+            signal: target.signal.clone(),
+            priority: Some(target.priority),
+        },
+    );
 }
 
 async fn enqueue_material_whatsapp_updates(
@@ -185,8 +401,7 @@ async fn enqueue_material_whatsapp_updates(
     let now_ms = Timestamp::now().as_millisecond();
     let now = iso_at(now_ms)?;
 
-    let route_fingerprint = whatsapp_route_fingerprint(preferences);
-    let Some(route_fingerprint) = route_fingerprint else {
+    let Some(route_fingerprint) = whatsapp_route_fingerprint(preferences) else {
         if stored.is_some() && (!tracker.channels.is_empty() || tracker.route_fingerprint.is_some())
         {
             tracker.channels.clear();
@@ -201,176 +416,208 @@ async fn enqueue_material_whatsapp_updates(
 
     let mut changed = false;
     if tracker.route_fingerprint.as_deref() != Some(route_fingerprint.as_str()) {
-        // Never let a new recipient inherit "already announced" state or an
-        // all-clear from a previous route. This also repairs a preference save
-        // whose best-effort route cleanup was interrupted after persistence.
         tracker.channels.clear();
         tracker.route_fingerprint = Some(route_fingerprint);
         changed = true;
     }
 
     for channel in &snapshot.channels {
-        let mut previous = tracker
-            .channels
-            .get(&channel.id)
-            .cloned()
-            .unwrap_or_default();
         if !whatsapp_route_configured(channel) {
-            if previous != ChannelDispatchState::default() {
-                tracker
-                    .channels
-                    .insert(channel.id.clone(), ChannelDispatchState::default());
+            for key in dispatch_state_keys(&tracker, &channel.id) {
+                tracker.channels.remove(&key);
                 changed = true;
             }
             continue;
         }
-        if previous.active
-            && !previous.announced
-            && let Some(incident_id) = previous.incident_id
-            && store
-                .outbox_revision_was_accepted(
-                    WHATSAPP_ROUTE_ID,
-                    incident_id,
-                    i64::from(previous.revision),
-                )
-                .await
-                .map_err(|error| error.to_string())?
-        {
-            // Recover the narrow crash boundary between Meta accepting
-            // a warning and an older build recording that acceptance
-            // in the dispatch tracker. Only an accepted/delivered row
-            // for this exact incident revision can promote it.
-            previous.announced = true;
-            tracker
-                .channels
-                .insert(channel.id.clone(), previous.clone());
-            changed = true;
-        }
+
         let trustworthy = matches!(
             channel.availability,
             AvailabilityDto::Fresh | AvailabilityDto::Delayed
         );
-        let active = trustworthy && interrupt_allows(channel, preferences, snapshot);
-        // Partial usable coverage may raise a positive signal, but absence is
-        // only authoritative when every configured source is fresh. Otherwise
-        // one healthy sibling could falsely clear an alert-bearing source that
-        // merely went offline.
-        let resolution_trustworthy = trustworthy && channel.coverage_complete;
-        let became_inactive = previous.active && !active && resolution_trustworthy;
-        let resolved = became_inactive && previous.announced;
-        if became_inactive && !previous.announced {
-            tracker.channels.insert(
-                channel.id.clone(),
-                ChannelDispatchState {
-                    incident_id: previous.incident_id,
-                    revision: previous.revision,
-                    last_material: Some("resolved".into()),
-                    active: false,
-                    announced: false,
-                },
-            );
-            changed = true;
-            continue;
-        }
-        if !active && !resolved {
-            continue;
-        }
-        if quiet_hours_block(preferences, channel, snapshot)? {
-            // Hold both warnings and all-clears. Keeping an announced prior
-            // incident active allows one still-current resolution to emit
-            // after quiet hours instead of silently dropping it.
-            continue;
+        let targets = if trustworthy {
+            current_channel_dispatch_targets(channel, preferences, snapshot)
+        } else {
+            Vec::new()
+        };
+        changed |= migrate_legacy_channel_tracker(&mut tracker, channel, snapshot, &targets);
+
+        // Recover the narrow crash boundary between Meta accepting a warning
+        // and recording that acceptance. Each item owns its incident, so one
+        // accepted earthquake can never promote an unaccepted sibling.
+        for key in dispatch_state_keys(&tracker, &channel.id) {
+            let Some(mut state) = tracker.channels.get(&key).cloned() else {
+                continue;
+            };
+            if state.active
+                && !state.announced
+                && let Some(incident_id) = state.incident_id
+                && store
+                    .outbox_revision_was_accepted(
+                        WHATSAPP_ROUTE_ID,
+                        incident_id,
+                        i64::from(state.revision),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?
+            {
+                state.announced = true;
+                tracker.channels.insert(key, state);
+                changed = true;
+            }
         }
 
-        let material = if active {
-            material_channel_state(channel, snapshot)
-        } else {
-            "resolved".into()
-        };
-        if previous.last_material.as_deref() == Some(material.as_str()) {
-            continue;
-        }
-        let incident_id = if active && !previous.active {
-            Uuid::now_v7()
-        } else {
-            previous.incident_id.unwrap_or_else(Uuid::now_v7)
-        };
-        let revision = previous.revision.saturating_add(1).max(1);
-        let outbox_id = Uuid::now_v7();
-        let request = delivery_request_for_channel(
-            preferences,
-            snapshot,
-            channel,
-            active,
-            incident_id,
-            outbox_id,
-            revision,
-            now_ms,
-            &material,
-        );
-        let action = if active {
-            "material_update"
-        } else {
-            "resolved"
-        };
-        tracker.channels.insert(
-            channel.id.clone(),
-            if active {
+        let active_keys = targets
+            .iter()
+            .map(|target| target.tracker_key.clone())
+            .collect::<BTreeSet<_>>();
+        for target in &targets {
+            let previous = tracker
+                .channels
+                .get(&target.tracker_key)
+                .cloned()
+                .unwrap_or_default();
+            let view = channel_dispatch_view(channel, target, true);
+            if quiet_hours_block(preferences, &view, snapshot)? {
+                continue;
+            }
+            let material = dispatch_material(channel, snapshot, target);
+            if previous.active && previous.last_material.as_deref() == Some(material.as_str()) {
+                continue;
+            }
+
+            let incident_id = if previous.active {
+                previous.incident_id.unwrap_or_else(Uuid::now_v7)
+            } else {
+                Uuid::now_v7()
+            };
+            let revision = previous.revision.saturating_add(1).max(1);
+            let outbox_id = Uuid::now_v7();
+            let request = delivery_request_for_dispatch_target(
+                preferences,
+                snapshot,
+                channel,
+                target,
+                true,
+                incident_id,
+                outbox_id,
+                revision,
+                now_ms,
+                &material,
+            );
+            tracker.channels.insert(
+                target.tracker_key.clone(),
                 ChannelDispatchState {
                     incident_id: Some(incident_id),
                     revision,
                     last_material: Some(material),
                     active: true,
                     announced: previous.active && previous.announced,
-                }
-            } else {
+                    signal: target.signal.clone(),
+                    priority: Some(target.priority),
+                },
+            );
+            commit_whatsapp_transition(
+                store,
+                &tracker,
+                channel,
+                target,
+                &request,
+                incident_id,
+                outbox_id,
+                revision,
+                true,
+                &now,
+            )
+            .await?;
+            changed = true;
+        }
+
+        // Partial usable coverage may raise a positive signal, but only full
+        // coverage can prove that a formerly current item has resolved.
+        if !(trustworthy && channel.coverage_complete) {
+            continue;
+        }
+        for key in dispatch_state_keys(&tracker, &channel.id) {
+            if active_keys.contains(&key) {
+                continue;
+            }
+            let previous = tracker.channels.get(&key).cloned().unwrap_or_default();
+            if !previous.active {
+                continue;
+            }
+            if !previous.announced {
+                tracker.channels.insert(
+                    key,
+                    ChannelDispatchState {
+                        last_material: Some("resolved".into()),
+                        active: false,
+                        ..previous
+                    },
+                );
+                changed = true;
+                continue;
+            }
+
+            let target = ChannelDispatchTarget {
+                tracker_key: key.clone(),
+                signal: previous.signal.clone(),
+                priority: previous.priority.unwrap_or(channel.priority),
+                item_level: key != channel.id,
+            };
+            let mut view = channel_dispatch_view(channel, &target, false);
+            if target.item_level {
+                // A resolution is useful, but is not itself an emergency.
+                view.priority.urgency = UrgencyDto::Routine;
+            }
+            if quiet_hours_block(preferences, &view, snapshot)? {
+                // Leave the prior incident active so its still-current
+                // all-clear can be emitted once quiet hours end.
+                continue;
+            }
+            let incident_id = previous.incident_id.unwrap_or_else(Uuid::now_v7);
+            let revision = previous.revision.saturating_add(1).max(1);
+            let outbox_id = Uuid::now_v7();
+            let request = delivery_request_for_dispatch_target(
+                preferences,
+                snapshot,
+                channel,
+                &target,
+                false,
+                incident_id,
+                outbox_id,
+                revision,
+                now_ms,
+                "resolved",
+            );
+            tracker.channels.insert(
+                key,
                 ChannelDispatchState {
                     incident_id: Some(incident_id),
                     revision,
-                    last_material: Some(material),
+                    last_material: Some("resolved".into()),
                     active: false,
-                    announced: previous.announced,
-                }
-            },
-        );
-        store
-            .commit_delivery_transition(
-                &IncidentRecord {
-                    id: incident_id,
-                    channel_id: &channel.id,
-                    state: if active { "active" } else { "resolved" },
-                    urgency: urgency_key(channel.priority.urgency),
-                    material_revision: i64::from(revision),
-                    fingerprint: tracker
-                        .channels
-                        .get(&channel.id)
-                        .and_then(|state| state.last_material.as_deref())
-                        .unwrap_or("unknown"),
-                    // Incident history needs the sourced notice, never the
-                    // recipient address carried by the outbound envelope.
-                    payload: &request.notice,
-                    opened_at: &now,
-                    updated_at: &now,
-                    resolved_at: (!active).then_some(now.as_str()),
+                    announced: true,
+                    signal: target.signal.clone(),
+                    priority: Some(target.priority),
                 },
-                &OutboxRecord {
-                    id: outbox_id,
-                    route_id: WHATSAPP_ROUTE_ID,
-                    incident_id,
-                    material_revision: i64::from(revision),
-                    action,
-                    request: &request,
-                    next_attempt_at: &now,
-                    created_at: &now,
-                },
-                DISPATCH_TRACKER_KEY,
+            );
+            commit_whatsapp_transition(
+                store,
                 &tracker,
+                channel,
+                &target,
+                &request,
+                incident_id,
+                outbox_id,
+                revision,
+                false,
                 &now,
             )
-            .await
-            .map_err(|error| error.to_string())?;
-        changed = true;
+            .await?;
+            changed = true;
+        }
     }
+
     if changed || stored.is_none() {
         store
             .set_json(DISPATCH_TRACKER_KEY, &tracker, &now)
@@ -378,6 +625,60 @@ async fn enqueue_material_whatsapp_updates(
             .map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn commit_whatsapp_transition(
+    store: &Store,
+    tracker: &WhatsAppDispatchTracker,
+    channel: &ChannelSnapshot,
+    target: &ChannelDispatchTarget,
+    request: &DeliveryRequest,
+    incident_id: Uuid,
+    outbox_id: Uuid,
+    revision: u32,
+    active: bool,
+    now: &str,
+) -> Result<(), String> {
+    store
+        .commit_delivery_transition(
+            &IncidentRecord {
+                id: incident_id,
+                channel_id: &channel.id,
+                state: if active { "active" } else { "resolved" },
+                urgency: urgency_key(target.priority.urgency),
+                material_revision: i64::from(revision),
+                fingerprint: tracker
+                    .channels
+                    .get(&target.tracker_key)
+                    .and_then(|state| state.last_material.as_deref())
+                    .unwrap_or("unknown"),
+                payload: &request.notice,
+                opened_at: now,
+                updated_at: now,
+                resolved_at: (!active).then_some(now),
+            },
+            &OutboxRecord {
+                id: outbox_id,
+                route_id: WHATSAPP_ROUTE_ID,
+                incident_id,
+                material_revision: i64::from(revision),
+                action: if active {
+                    "material_update"
+                } else {
+                    "resolved"
+                },
+                request,
+                next_attempt_at: now,
+                created_at: now,
+            },
+            DISPATCH_TRACKER_KEY,
+            tracker,
+            now,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 async fn dispatch_desktop_notifications(
@@ -393,84 +694,123 @@ async fn dispatch_desktop_notifications(
     let mut tracker = stored.clone().unwrap_or_default();
     let mut changed = false;
     let mut first_error = None;
+
     for channel in &snapshot.channels {
-        let previous = tracker
-            .channels
-            .get(&channel.id)
-            .cloned()
-            .unwrap_or_default();
         if !desktop_route_configured(channel) {
-            if previous != ChannelDispatchState::default() {
-                tracker
-                    .channels
-                    .insert(channel.id.clone(), ChannelDispatchState::default());
+            for key in dispatch_state_keys(&tracker, &channel.id) {
+                tracker.channels.remove(&key);
                 changed = true;
             }
             continue;
         }
+
         let trustworthy = matches!(
             channel.availability,
             AvailabilityDto::Fresh | AvailabilityDto::Delayed
         );
-        let active = trustworthy && interrupt_allows(channel, preferences, snapshot);
-        let resolution_trustworthy = trustworthy && channel.coverage_complete;
-        let became_inactive = previous.active && !active && resolution_trustworthy;
-        let resolved = became_inactive && previous.announced;
-        if became_inactive && !previous.announced {
+        let targets = if trustworthy {
+            current_channel_dispatch_targets(channel, preferences, snapshot)
+        } else {
+            Vec::new()
+        };
+        changed |= migrate_legacy_channel_tracker(&mut tracker, channel, snapshot, &targets);
+        let active_keys = targets
+            .iter()
+            .map(|target| target.tracker_key.clone())
+            .collect::<BTreeSet<_>>();
+
+        for target in &targets {
+            let view = channel_dispatch_view(channel, target, true);
+            if quiet_hours_block(preferences, &view, snapshot)? {
+                continue;
+            }
+            let Some(material) =
+                desktop_notification_material_if_due(&tracker, channel, snapshot, target)
+            else {
+                continue;
+            };
+            let (title, body) = desktop_notification_copy_for_signal(
+                channel,
+                target.signal.as_ref(),
+                true,
+                target.item_level,
+            );
+            if let Err(error) = app
+                .notification()
+                .builder()
+                .title(bounded_text(&title, 96))
+                .body(bounded_text(&body, 320))
+                .show()
+            {
+                first_error.get_or_insert_with(|| {
+                    format!("Native notification was not accepted: {error}")
+                });
+                continue;
+            }
+            record_desktop_notification(&mut tracker, target, material);
+            changed = true;
+        }
+
+        if !(trustworthy && channel.coverage_complete) {
+            continue;
+        }
+        for key in dispatch_state_keys(&tracker, &channel.id) {
+            if active_keys.contains(&key) {
+                continue;
+            }
+            let previous = tracker.channels.get(&key).cloned().unwrap_or_default();
+            if !previous.active {
+                continue;
+            }
+            if previous.announced {
+                let item_level = key != channel.id;
+                let target = ChannelDispatchTarget {
+                    tracker_key: key.clone(),
+                    signal: previous.signal.clone(),
+                    priority: previous.priority.unwrap_or(channel.priority),
+                    item_level,
+                };
+                let mut view = channel_dispatch_view(channel, &target, false);
+                if item_level {
+                    view.priority.urgency = UrgencyDto::Routine;
+                }
+                if quiet_hours_block(preferences, &view, snapshot)? {
+                    continue;
+                }
+                let (title, body) = desktop_notification_copy_for_signal(
+                    channel,
+                    previous.signal.as_ref(),
+                    false,
+                    item_level,
+                );
+                if let Err(error) = app
+                    .notification()
+                    .builder()
+                    .title(bounded_text(&title, 96))
+                    .body(bounded_text(&body, 320))
+                    .show()
+                {
+                    first_error.get_or_insert_with(|| {
+                        format!("Native notification was not accepted: {error}")
+                    });
+                    continue;
+                }
+            }
             tracker.channels.insert(
-                channel.id.clone(),
+                key,
                 ChannelDispatchState {
-                    incident_id: previous.incident_id,
-                    revision: previous.revision,
+                    revision: previous
+                        .revision
+                        .saturating_add(u32::from(previous.announced)),
                     last_material: Some("resolved".into()),
                     active: false,
-                    announced: false,
+                    ..previous
                 },
             );
             changed = true;
-            continue;
         }
-        if !active && !resolved {
-            continue;
-        }
-        if quiet_hours_block(preferences, channel, snapshot)? {
-            continue;
-        }
-        let material = if active {
-            material_channel_state(channel, snapshot)
-        } else {
-            "resolved".into()
-        };
-        if previous.last_material.as_deref() == Some(material.as_str()) {
-            continue;
-        }
-        let (title, body) = desktop_notification_copy(channel, active);
-        if let Err(error) = app
-            .notification()
-            .builder()
-            .title(bounded_text(&title, 96))
-            .body(bounded_text(&body, 320))
-            .show()
-        {
-            first_error
-                .get_or_insert_with(|| format!("Native notification was not accepted: {error}"));
-            continue;
-        }
-        tracker.channels.insert(
-            channel.id.clone(),
-            ChannelDispatchState {
-                incident_id: None,
-                revision: previous.revision.saturating_add(1),
-                last_material: Some(material),
-                active,
-                // The pinned desktop notification plugin only confirms that
-                // it spawned an OS task, not that the OS displayed it. Until
-                // an awaited host receipt exists, never infer an all-clear.
-                announced: false,
-            },
-        );
-        changed = true;
     }
+
     if changed || stored.is_none() {
         let now = Timestamp::now().to_string();
         store
@@ -566,6 +906,7 @@ async fn process_whatsapp_outbox(
         if reason.starts_with("Notice exceeded this channel's")
             || reason == "The channel state changed before this notice could be delivered"
             || reason == "Complete usable source coverage is required before sending an all-clear"
+            || reason == "The notice content has been superseded by a newer channel state"
         {
             suppress_and_rearm_current_outbox(store, &lease, &request, &tracker, &now, &reason)
                 .await?;
@@ -574,7 +915,23 @@ async fn process_whatsapp_outbox(
         }
         return Ok(());
     }
-    if quiet_hours_block(preferences, channel, snapshot)? {
+    let quiet_hours_channel = tracker_state_for_request(&tracker, &request)
+        .and_then(|(key, state)| {
+            state
+                .active
+                .then(|| current_target_for_key(channel, preferences, snapshot, key))
+                .flatten()
+                .map(|target| channel_dispatch_view(channel, &target, true))
+                .or_else(|| {
+                    let mut view = channel.clone();
+                    if key != channel.id {
+                        view.priority.urgency = UrgencyDto::Routine;
+                    }
+                    Some(view)
+                })
+        })
+        .unwrap_or_else(|| channel.clone());
+    if quiet_hours_block(preferences, &quiet_hours_channel, snapshot)? {
         let retry_at = iso_at(now_ms.saturating_add(5 * 60_000))?;
         store
             .mark_outbox(
@@ -683,11 +1040,11 @@ async fn mark_whatsapp_accepted(
         .await
         .map_err(|error| error.to_string())?
         .unwrap_or_default();
-    if let Some(current) = tracker.channels.get_mut(&request.destination.id)
-        && current.active
-        && current.incident_id == Some(request.incident_id)
-        && current.revision == request.material_revision
-    {
+    if let Some(current) = tracker.channels.values_mut().find(|current| {
+        current.active
+            && current.incident_id == Some(request.incident_id)
+            && current.revision == request.material_revision
+    }) {
         current.announced = true;
     }
     store
@@ -726,14 +1083,21 @@ async fn suppress_and_rearm_current_outbox(
     reason: &str,
 ) -> Result<(), String> {
     let mut rearmed = tracker.clone();
-    let Some(current) = rearmed.channels.get_mut(&request.destination.id) else {
+    let Some(key) = rearmed
+        .channels
+        .iter()
+        .find(|(_, current)| {
+            current.incident_id == Some(request.incident_id)
+                && current.revision == request.material_revision
+        })
+        .map(|(key, _)| key.clone())
+    else {
         return suppress_leased_outbox(store, lease, now, reason).await;
     };
-    if current.incident_id != Some(request.incident_id)
-        || current.revision != request.material_revision
-    {
-        return suppress_leased_outbox(store, lease, now, reason).await;
-    }
+    let current = rearmed
+        .channels
+        .get_mut(&key)
+        .expect("key came from tracker");
 
     // The current representation aged out or became temporarily unverifiable
     // while queued. Preserve incident/acceptance history, but remove the
@@ -775,13 +1139,10 @@ fn validate_current_outbox(
     {
         return Err("Stored outbox identity does not match its request envelope".into());
     }
-    let Some(current) = tracker.channels.get(&channel.id) else {
+    let Some((tracker_key, current)) = tracker_state_for_request(tracker, request) else {
         return Err("The material transition is no longer current".into());
     };
-    if current.incident_id != Some(request.incident_id)
-        || current.revision != request.material_revision
-        || i64::from(current.revision) != lease.material_revision
-    {
+    if i64::from(current.revision) != lease.material_revision {
         return Err("A newer material revision superseded this notice".into());
     }
     if !matches!(
@@ -796,7 +1157,8 @@ fn validate_current_outbox(
         channel.availability,
         AvailabilityDto::Fresh | AvailabilityDto::Delayed
     );
-    let current_active = trustworthy && interrupt_allows(channel, preferences, snapshot);
+    let target = current_target_for_key(channel, preferences, snapshot, tracker_key);
+    let current_active = trustworthy && target.is_some();
     if !current.active && (!trustworthy || !channel.coverage_complete) {
         return Err(
             "Complete usable source coverage is required before sending an all-clear".into(),
@@ -811,12 +1173,18 @@ fn validate_current_outbox(
         return Err("The channel state changed before this notice could be delivered".into());
     }
     let expected_material = if current.active {
-        material_channel_state(channel, snapshot)
+        dispatch_material(
+            channel,
+            snapshot,
+            target
+                .as_ref()
+                .expect("active state was checked against a current target"),
+        )
     } else {
         "resolved".into()
     };
     if current.last_material.as_deref() != Some(expected_material.as_str())
-        || request.deduplication_key != format!("{}:{expected_material}", channel.id)
+        || request.deduplication_key != format!("{tracker_key}:{expected_material}")
     {
         return Err("The notice content has been superseded by a newer channel state".into());
     }
@@ -875,10 +1243,44 @@ fn whatsapp_adapter(preferences: &AppPreferences, token: String) -> Result<Whats
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn delivery_request_for_channel(
     preferences: &AppPreferences,
     snapshot: &AppSnapshot,
     channel: &ChannelSnapshot,
+    active: bool,
+    incident_id: Uuid,
+    outbox_id: Uuid,
+    revision: u32,
+    now_ms: i64,
+    material: &str,
+) -> DeliveryRequest {
+    let target = ChannelDispatchTarget {
+        tracker_key: channel.id.clone(),
+        signal: channel.signal.clone(),
+        priority: channel.priority,
+        item_level: false,
+    };
+    delivery_request_for_dispatch_target(
+        preferences,
+        snapshot,
+        channel,
+        &target,
+        active,
+        incident_id,
+        outbox_id,
+        revision,
+        now_ms,
+        material,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn delivery_request_for_dispatch_target(
+    preferences: &AppPreferences,
+    snapshot: &AppSnapshot,
+    channel: &ChannelSnapshot,
+    target: &ChannelDispatchTarget,
     active: bool,
     incident_id: Uuid,
     outbox_id: Uuid,
@@ -909,8 +1311,8 @@ fn delivery_request_for_channel(
         .is_predictive()
         .then(|| snapshot.decision.confidence_bps.map(bps_to_percent))
         .flatten();
-    let signal = active.then_some(channel.signal.as_ref()).flatten();
-    let subject = if is_bridge || !active {
+    let signal = target.signal.as_ref();
+    let subject = if is_bridge || (!active && !target.item_level) {
         channel.title.clone()
     } else {
         signal.map_or_else(|| channel.title.clone(), |signal| signal.headline.clone())
@@ -922,6 +1324,8 @@ fn delivery_request_for_channel(
             || nonempty_or(&channel.summary, "An active signal was reported."),
             |signal| nonempty_or(&signal.detail, "An active signal was reported."),
         )
+    } else if let Some(signal) = signal.filter(|_| target.item_level) {
+        format!("{} is no longer current.", signal.headline)
     } else {
         format!("{} is no longer reporting an active alert.", channel.title)
     };
@@ -939,7 +1343,7 @@ fn delivery_request_for_channel(
         outbox_id,
         incident_id,
         material_revision: revision,
-        deduplication_key: format!("{}:{material}", channel.id),
+        deduplication_key: format!("{}:{material}", target.tracker_key),
         reason: DeliveryReason::StateTransition,
         destination: Destination {
             id: channel.id.clone(),
@@ -961,7 +1365,7 @@ fn delivery_request_for_channel(
             confidence_percent,
             evidence: if active {
                 let mut evidence = Vec::new();
-                if !channel.summary.trim().is_empty() {
+                if !target.item_level && !channel.summary.trim().is_empty() {
                     evidence.push(channel.summary.clone());
                 }
                 if let Some(severity) = signal.and_then(|signal| signal.severity.as_deref()) {
@@ -1063,11 +1467,6 @@ fn nonempty_or(value: &str, fallback: &str) -> String {
 
 fn whatsapp_route_configured(channel: &ChannelSnapshot) -> bool {
     channel.enabled
-        && !matches!(
-            channel.interrupt_preset,
-            InterruptPreset::Off | InterruptPreset::Custom
-        )
-        && channel.destinations.contains(&DestinationIdDto::Whatsapp)
 }
 
 fn urgency_key(urgency: UrgencyDto) -> &'static str {
@@ -1079,9 +1478,32 @@ fn urgency_key(urgency: UrgencyDto) -> &'static str {
     }
 }
 
-
+#[cfg(test)]
 fn desktop_notification_copy(channel: &ChannelSnapshot, active: bool) -> (String, String) {
+    desktop_notification_copy_for_signal(
+        channel,
+        active.then_some(channel.signal.as_ref()).flatten(),
+        active,
+        false,
+    )
+}
+
+fn desktop_notification_copy_for_signal(
+    channel: &ChannelSnapshot,
+    signal: Option<&brickellstatus_runtime::ChannelSignalDto>,
+    active: bool,
+    item_level: bool,
+) -> (String, String) {
     if !active {
+        if item_level && let Some(signal) = signal {
+            return (
+                format!("{} · Resolved", signal.headline),
+                format!(
+                    "This notice is no longer current. Source: {}",
+                    channel.source_label
+                ),
+            );
+        }
         return (
             format!("{} · Resolved", channel.title),
             format!(
@@ -1090,7 +1512,7 @@ fn desktop_notification_copy(channel: &ChannelSnapshot, active: bool) -> (String
             ),
         );
     }
-    let Some(signal) = channel.signal.as_ref() else {
+    let Some(signal) = signal else {
         return (
             format!("{} · Alert", channel.title),
             format!("{} · Source: {}", channel.summary, channel.source_label),
@@ -1110,11 +1532,6 @@ fn desktop_notification_copy(channel: &ChannelSnapshot, active: bool) -> (String
 
 fn desktop_route_configured(channel: &ChannelSnapshot) -> bool {
     channel.enabled
-        && !matches!(
-            channel.interrupt_preset,
-            InterruptPreset::Off | InterruptPreset::Custom
-        )
-        && channel.destinations.contains(&DestinationIdDto::Desktop)
 }
 
 /// Applies the plain-language interrupt presets to the current event, rather

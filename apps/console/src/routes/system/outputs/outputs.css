@@ -613,8 +613,7 @@
 
   .connection-fields,
   .two-fields,
-  .three-fields,
-  .timing-register {
+  .three-fields {
     display: grid;
     gap: 14px;
     margin-top: 28px;
@@ -625,10 +624,20 @@
     grid-template-columns: 1fr 1fr;
   }
 
-  .three-fields,
-  .timing-register {
+  .three-fields {
     grid-template-columns: repeat(3, 1fr);
-  }  .orientation {
+  }
+
+  .automatic-cadence {
+    margin: 28px 0 0;
+    padding: 14px 0;
+    border-block: 1px solid var(--rule);
+    color: var(--muted);
+    font-size: var(--type-caption);
+    line-height: 1.5;
+  }
+
+  .orientation {
     margin: 28px 0 0;
     padding: 0;
     border: 0;
@@ -1208,8 +1217,7 @@
     .transport-register,
     .connection-fields,
     .two-fields,
-    .three-fields,
-    .timing-register {
+    .three-fields {
       grid-template-columns: 1fr;
     }
 

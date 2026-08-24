@@ -11,11 +11,11 @@
 // an alert is itself preemptible so a larger event displaces the remainder
 // rather than queueing behind it.
 //
-// Two invariants protect the anchor, and both are asserted in tests:
+// Two invariants keep the sequence predictable, and both are asserted in tests:
 //
 // * `rotation_index` advances only when the rotation lane is served. An alert
 //   must never consume a rotation slot, or a burst of alerts would silently
-//   skip the bridge's home cadence.
+//   skip current notices.
 // * An alert holds for a bounded time and then returns the panel to rotation.
 
 // BTreeMap, StdMutex and AtomicU64 already come from lib.rs; this file is
@@ -25,38 +25,6 @@ use std::collections::BinaryHeap;
 
 /// Longest an alert keeps the panel before rotation resumes.
 const ALERT_HOLD: Duration = Duration::from_secs(45);
-
-/// A still-current top-priority state re-enters the queue on this cadence, so a
-/// bridge that stays open keeps reclaiming the panel instead of appearing once
-/// and then only on its rotation turn.
-const ALERT_REASSERT: Duration = Duration::from_secs(180);
-
-/// Score at or above which a state re-asserts itself on that slow cadence. Only
-/// a confirmed, road-blocking event needs to keep taking the panel back merely
-/// for continuing to be true.
-const REASSERT_MIN_SCORE: u16 = 900;
-
-/// How near an event has to be before it is treated as a live warning window.
-///
-/// Inside this horizon the reader is deciding *now* — whether to turn, whether
-/// to leave — and the panel belongs to whatever they are deciding about.
-const IMMINENT_HORIZON_MINUTES: u16 = 15;
-
-/// Re-assertion cadence inside that window. Shorter than [`ALERT_HOLD`], so an
-/// imminent event reclaims the panel as its own hold expires rather than
-/// surrendering the rest of the window to the rotation.
-///
-/// This is the bug it exists to prevent, and it is the flagship one. A bridge
-/// opening in three to eight minutes at better than eighty percent confidence
-/// scores 493: `HeadsUp` plus imminence plus the anchor bonus, with no
-/// `confirmed` bonus because nothing has been observed yet — that is what
-/// *predicted* means. Re-assertion required 900 and `confirmed`, both of which
-/// only an already-open bridge satisfies. So the one warning the product exists
-/// to give appeared once, held forty-five seconds, and handed the panel back to
-/// the rotation for the remaining minutes, which is how a reader with a bridge
-/// about to go up in front of them was shown stock prices. "Warn ahead, confirm
-/// later" is the first product principle; the panel was doing the opposite.
-const ALERT_REASSERT_IMMINENT: Duration = Duration::from_secs(20);
 
 /// A queued alert is dropped rather than shown if it waited longer than this;
 /// by then it describes a moment that has passed.
@@ -75,6 +43,7 @@ struct QueuedAlert {
     /// Monotonic, for a stable first-in-first-out order among equal scores.
     sequence: u64,
     channel_id: String,
+    notice_key: Option<String>,
     alert_key: String,
     queued_at: tokio::time::Instant,
 }
@@ -99,20 +68,25 @@ impl PartialOrd for QueuedAlert {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PanelSelection {
     /// Preempts whatever is showing and holds for a bounded time.
-    Alert { channel_id: String, score: u16 },
+    Alert {
+        channel_id: String,
+        notice_key: Option<String>,
+        score: u16,
+    },
     /// The ordinary cadence. Only this advances `rotation_index`.
-    Rotation { channel_id: String },
+    Rotation {
+        channel_id: String,
+        notice_key: Option<String>,
+    },
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct PanelBroker {
     interrupts: StdMutex<BinaryHeap<QueuedAlert>>,
-    /// Channel id -> the alert key last enqueued for it. This is what makes an
-    /// escalating event re-alert: a changed key is a new alert, an unchanged one
-    /// is the same alert still being true.
+    /// Stable event identity -> the alert band last enqueued for it. Authored
+    /// items keep separate entries, while bridge and weather keep one semantic
+    /// condition entry whose source samples may change without repeating.
     seen: StdMutex<BTreeMap<String, String>>,
-    /// Last time a channel re-asserted, so a sustained state does not spin.
-    reasserted: StdMutex<BTreeMap<String, tokio::time::Instant>>,
     wake: tokio::sync::Notify,
     sequence: AtomicU64,
 }
@@ -130,77 +104,62 @@ impl PanelBroker {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn lock_reasserted(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, tokio::time::Instant>> {
-        self.reasserted
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     /// Notices new or changed alerts in a snapshot and queues them.
     ///
-    /// Enqueues only what the operator already consented to interrupt for, via
-    /// the existing `interrupt_allows` gate. There is deliberately no numeric
-    /// floor on top of that: silently ignoring something a user switched on is
-    /// worse than showing it.
+    /// Enqueues only active, non-routine material under the engine's automatic
+    /// urgency policy. There is no second per-channel interrupt setting here.
     pub(crate) fn ingest(&self, snapshot: &AppSnapshot, preferences: &AppPreferences) {
         let now = tokio::time::Instant::now();
         let mut queued_any = false;
         for channel in &snapshot.channels {
-            if !panel_eligible(channel, preferences) {
-                continue;
-            }
-            if !channel.active || !interrupt_allows(channel, preferences, snapshot) {
-                // A channel that has gone quiet forgets its last alert, so the
-                // same condition recurring later is a fresh interrupt.
-                self.lock_seen().remove(&channel.id);
-                self.lock_reasserted().remove(&channel.id);
+            let tracker_prefix = format!("{}\0", channel.id);
+            if !panel_eligible(channel, preferences) || !channel.active {
+                // A channel that has gone quiet forgets every event it owned,
+                // so a later recurrence is a genuinely fresh onset.
+                self.lock_seen().retain(|tracker_id, _| {
+                    tracker_id != &channel.id && !tracker_id.starts_with(&tracker_prefix)
+                });
                 continue;
             }
 
-            let key = alert_key(channel);
-            let changed = self.lock_seen().get(&channel.id) != Some(&key);
-            // Two reasons to take the panel back while saying the same thing:
-            // the event is confirmed and still blocking, or it is close enough
-            // that the reader is acting on it right now. The second is the one
-            // that matters most and was missing, because imminence is exactly
-            // the state in which nothing has been confirmed yet.
-            let imminent = channel
-                .priority
-                .imminence_minutes
-                .is_some_and(|minutes| minutes <= IMMINENT_HORIZON_MINUTES);
-            let sustained =
-                channel.priority.score >= REASSERT_MIN_SCORE && channel.priority.confirmed;
-            let cadence = if imminent {
-                ALERT_REASSERT_IMMINENT
-            } else {
-                ALERT_REASSERT
+            let candidates = alert_candidates(channel);
+            let current_ids = candidates
+                .iter()
+                .map(|candidate| candidate.tracker_id.clone())
+                .collect::<BTreeSet<_>>();
+            let changed = {
+                let mut seen = self.lock_seen();
+                seen.retain(|tracker_id, _| {
+                    !tracker_id.starts_with(&tracker_prefix)
+                        || current_ids.contains(tracker_id.as_str())
+                });
+                candidates
+                    .into_iter()
+                    .filter(|candidate| {
+                        if seen.get(&candidate.tracker_id) == Some(&candidate.alert_key) {
+                            return false;
+                        }
+                        seen.insert(candidate.tracker_id.clone(), candidate.alert_key.clone());
+                        true
+                    })
+                    .collect::<Vec<_>>()
             };
-            let due_to_reassert = !changed
-                && (imminent || sustained)
-                && self
-                    .lock_reasserted()
-                    .get(&channel.id)
-                    .is_none_or(|last| now.duration_since(*last) >= cadence);
 
-            if !changed && !due_to_reassert {
-                continue;
+            // One onset or escalation per current item interrupts once.
+            // Continuing relevance remains in rotation without a repeat count.
+            for candidate in changed {
+                self.lock_interrupts().push(QueuedAlert {
+                    score: candidate.score,
+                    sequence: self
+                        .sequence
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    channel_id: channel.id.clone(),
+                    notice_key: candidate.notice_key.map(str::to_owned),
+                    alert_key: candidate.alert_key,
+                    queued_at: now,
+                });
+                queued_any = true;
             }
-            if due_to_reassert {
-                self.lock_reasserted().insert(channel.id.clone(), now);
-            } else {
-                self.lock_seen().insert(channel.id.clone(), key.clone());
-                self.lock_reasserted().insert(channel.id.clone(), now);
-            }
-            self.lock_interrupts().push(QueuedAlert {
-                score: channel.priority.score,
-                sequence: self
-                    .sequence
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                channel_id: channel.id.clone(),
-                alert_key: key,
-                queued_at: now,
-            });
-            queued_any = true;
         }
         if queued_any {
             self.wake.notify_waiters();
@@ -216,7 +175,7 @@ impl PanelBroker {
         &self,
         snapshot: &AppSnapshot,
         preferences: &AppPreferences,
-    ) -> Option<(String, u16)> {
+    ) -> Option<(String, Option<String>, u16)> {
         let now = tokio::time::Instant::now();
         loop {
             let alert = self.lock_interrupts().pop()?;
@@ -232,14 +191,14 @@ impl PanelBroker {
             };
             // Superseded: the channel moved on while this sat in the queue, so
             // showing it would report a state that is no longer true.
-            if !channel.active
-                || !panel_eligible(channel, preferences)
-                || alert_key(channel) != alert.alert_key
-                || !interrupt_allows(channel, preferences, snapshot)
-            {
+            let still_current = alert_candidates(channel).into_iter().any(|candidate| {
+                candidate.notice_key == alert.notice_key.as_deref()
+                    && candidate.alert_key == alert.alert_key
+            });
+            if !channel.active || !panel_eligible(channel, preferences) || !still_current {
                 continue;
             }
-            return Some((alert.channel_id, alert.score));
+            return Some((alert.channel_id, alert.notice_key, alert.score));
         }
     }
 
@@ -250,12 +209,17 @@ impl PanelBroker {
         preferences: &AppPreferences,
         rotation_index: u64,
     ) -> Option<PanelSelection> {
-        if let Some((channel_id, score)) = self.take_alert(snapshot, preferences) {
-            return Some(PanelSelection::Alert { channel_id, score });
+        if let Some((channel_id, notice_key, score)) = self.take_alert(snapshot, preferences) {
+            return Some(PanelSelection::Alert {
+                channel_id,
+                notice_key,
+                score,
+            });
         }
-        rotation_channel(snapshot, preferences, rotation_index).map(|channel| {
+        rotation_channel(snapshot, preferences, rotation_index).map(|entry| {
             PanelSelection::Rotation {
-                channel_id: channel.id.clone(),
+                channel_id: entry.channel.id.clone(),
+                notice_key: entry.notice_key.map(str::to_owned),
             }
         })
     }
@@ -312,12 +276,6 @@ impl PanelBroker {
     }
 }
 
-/// Whether a channel may appear on the panel at all.
-///
-/// Note there is no channel-kind exception here. The previous filter demoted
-/// Official, Hurricane, News and Earthquake to active-only regardless of the
-/// operator's `presence` choice, which made `Rotation` mean nothing for exactly
-/// the channels most worth rotating.
 /// Whether a channel has earned a place on the panel right now.
 ///
 /// The anchor is exempt from having to be active, because "Road open" is the
@@ -331,70 +289,160 @@ impl PanelBroker {
 /// roster; the rule was never "news cannot rotate", it was "nothing with
 /// nothing to say gets the screen".
 fn panel_eligible(channel: &ChannelSnapshot, preferences: &AppPreferences) -> bool {
-    if !channel.enabled || !channel.destinations.contains(&DestinationIdDto::Epaper) {
+    if !channel.enabled {
         return false;
     }
-    // Presence already says how much of the panel a channel is entitled to, and
-    // the enum draws the distinction explicitly: `Rotation` takes its turn
-    // whatever its state, `ActiveOnly` waits until it has something.
-    //
-    // Requiring `active` on top of that collapsed the two into one. A channel
-    // set to Rotation sat out exactly like ActiveOnly, so on a quiet day the
-    // home channel was the only eligible one, `others` was empty, and the
-    // rotation returned the same frame forever -- which reads as a panel that
-    // has stopped rather than one with nothing to add. It also contradicted the
-    // product rule that being shown in rotation and being allowed to interrupt
-    // are separate decisions.
-    match channel.presence {
-        SurfacePresence::Off | SurfacePresence::MessagesOnly => false,
-        SurfacePresence::Home | SurfacePresence::Rotation => true,
-        SurfacePresence::ActiveOnly => {
-            channel.active || channel.id == preferences.profile.home_channel_id
-        }
+    // One relevance rule replaces presence modes, destinations and empty
+    // reservations. The home decision is the quiet fallback; every other
+    // channel exists on the panel only while it has something current to say.
+    channel.active || channel.id == preferences.profile.home_channel_id
+}
+
+struct AlertCandidate<'a> {
+    tracker_id: String,
+    notice_key: Option<&'a str>,
+    alert_key: String,
+    score: u16,
+}
+
+/// Current interrupt candidates, with stable semantic deduplication.
+///
+/// * Bridge movement samples share one condition identity and re-alert only
+///   when the engine changes urgency (for example Likely -> Open).
+/// * Weather forecast-bin ids are deliberately ignored. Its band already says
+///   whether rain/wind timing or intensity changed enough to matter.
+/// * Authored items keep their own identities, and severity/urgency is included
+///   so a Severe -> Extreme update can interrupt as an escalation.
+fn alert_candidates(channel: &ChannelSnapshot) -> Vec<AlertCandidate<'_>> {
+    if channel.kind == ChannelKindDto::Bridge {
+        return (!matches!(channel.priority.urgency, UrgencyDto::Routine))
+            .then(|| AlertCandidate {
+                tracker_id: format!("{}\0condition", channel.id),
+                notice_key: None,
+                alert_key: format!("bridge:{:?}", channel.priority.urgency),
+                score: channel.priority.score,
+            })
+            .into_iter()
+            .collect();
+    }
+
+    if channel.notices.is_empty() {
+        return (!matches!(channel.priority.urgency, UrgencyDto::Routine))
+            .then(|| AlertCandidate {
+                tracker_id: format!("{}\0condition", channel.id),
+                notice_key: None,
+                alert_key: channel
+                    .signal
+                    .as_ref()
+                    .and_then(|signal| signal.band.as_deref())
+                    .map_or_else(|| channel.material_key.clone(), str::to_owned),
+                score: channel.priority.score,
+            })
+            .into_iter()
+            .collect();
+    }
+
+    channel
+        .notices
+        .iter()
+        .filter(|notice| !matches!(notice.priority.urgency, UrgencyDto::Routine))
+        .map(|notice| {
+            let (tracker_id, alert_key) = if channel.kind == ChannelKindDto::Weather {
+                (
+                    format!("{}\0condition", channel.id),
+                    notice
+                        .signal
+                        .band
+                        .as_deref()
+                        .map_or_else(|| notice.key.clone(), |band| format!("weather:{band}")),
+                )
+            } else {
+                let severity = notice
+                    .signal
+                    .severity
+                    .as_deref()
+                    .unwrap_or("unspecified")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .to_ascii_lowercase();
+                (
+                    format!("{}\0{}", channel.id, notice.key),
+                    format!("{}:{:?}:{severity}", notice.key, notice.priority.urgency),
+                )
+            };
+            AlertCandidate {
+                tracker_id,
+                notice_key: Some(notice.key.as_str()),
+                alert_key,
+                score: notice.priority.score,
+            }
+        })
+        .collect()
+}
+
+/// The ordinary cadence: every current notice gets one slot, highest priority
+/// first, plus the home decision as the quiet fallback.
+///
+/// There is deliberately no "return home every N frames" and no repeat count.
+/// The index advances once per served slide and wraps the current set. A new
+/// urgent event uses the interrupt lane above, then remains here while relevant.
+#[derive(Clone, Copy)]
+struct RotationChannel<'a> {
+    channel: &'a ChannelSnapshot,
+    notice_key: Option<&'a str>,
+    score: u16,
+    ordinal: usize,
+}
+
+impl std::ops::Deref for RotationChannel<'_> {
+    type Target = ChannelSnapshot;
+
+    fn deref(&self) -> &Self::Target {
+        self.channel
     }
 }
 
-/// Identity of the thing being alerted about.
-///
-/// Prefers the signal's band, which is the same string the notification path
-/// dedupes on — one identity for both, so the panel and a phone can never
-/// disagree about whether something is new.
-///
-/// `material_key` is the fallback for kinds that carry no band. It hashes the
-/// underlying items, which is right for an authored alert and wrong for a
-/// measurement: a forecast refresh that moves a number by a tenth produces a
-/// fresh key and would re-seize the panel on every poll.
-fn alert_key(channel: &ChannelSnapshot) -> String {
-    channel
-        .signal
-        .as_ref()
-        .and_then(|signal| signal.band.as_deref())
-        .map_or_else(|| channel.material_key.clone(), str::to_owned)
-}
-
-/// The ordinary cadence: every eligible channel in turn, home included.
-///
-/// There is deliberately no "return home every N frames". A periodic detour
-/// back to the bridge answered a question nobody was asking on the frames in
-/// between, and it did it on a timer rather than when anything changed -- so it
-/// both wasted slots and still could not be relied on to be current, because
-/// the interesting moment might land in the gap.
-///
-/// The interrupt lane above already covers it properly: a bridge state change
-/// preempts whatever is showing, within milliseconds rather than at the end of
-/// a cadence, and holds the panel while it matters. That is the behaviour the
-/// detour was approximating badly, so the rotation is now a plain round-robin
-/// and the anchor earns the panel by changing rather than by counting.
 fn rotation_channel<'a>(
     snapshot: &'a AppSnapshot,
     preferences: &AppPreferences,
     rotation_index: u64,
-) -> Option<&'a ChannelSnapshot> {
-    let eligible = snapshot
+) -> Option<RotationChannel<'a>> {
+    let mut eligible = Vec::new();
+    for channel in snapshot
         .channels
         .iter()
         .filter(|channel| panel_eligible(channel, preferences))
-        .collect::<Vec<_>>();
+    {
+        if channel.notices.is_empty() {
+            eligible.push(RotationChannel {
+                channel,
+                notice_key: None,
+                score: channel.priority.score,
+                ordinal: 0,
+            });
+        } else {
+            eligible.extend(
+                channel
+                    .notices
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, notice)| RotationChannel {
+                        channel,
+                        notice_key: Some(notice.key.as_str()),
+                        score: notice.priority.score,
+                        ordinal,
+                    }),
+            );
+        }
+    }
+    eligible.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.channel.id.cmp(&right.channel.id))
+            .then_with(|| left.ordinal.cmp(&right.ordinal))
+    });
     if eligible.is_empty() {
         return None;
     }
@@ -430,4 +478,3 @@ pub(crate) fn prove_backoff(failures: u32) -> Duration {
         _ => 60,
     })
 }
-

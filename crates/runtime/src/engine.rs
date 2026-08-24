@@ -11,13 +11,13 @@ use std::{
 use crate::{
     AisConnectionStateDto, AisStreamStatusDto, AlertArea, AlertAreaSource, AppPreferences,
     AppSnapshot, AvailabilityDto, BridgeCrossingDto, BridgeRelationDto, BridgeStateDto,
-    BridgeStateIntervalDto, ChannelKindDto, ChannelPreference, ChannelPriorityDto,
-    ChannelSignalDto, ChannelSnapshot, CredentialFreeCollectorFactory, DecisionSnapshot,
-    DeliveryStateDto, DestinationIdDto, DisplayTransport, EvidenceStateDto, EvidenceStrip,
-    KnownOpenerDto, LocationSearchError, LocationSearchResult, LocationSearchService,
-    MutationResult, ObservedBridgeStateDto, OutputSnapshot, OutputStateDto, PreferencesError,
-    RiverCorridorBranchDto, RiverCorridorDto, RiverStationDto, SourceHealth, SystemHealth,
-    SystemStatusDto, UnitSystem, UrgencyDto, VesselDetailDto, VesselTrackSnapshot,
+    BridgeStateIntervalDto, ChannelKindDto, ChannelNoticeDto, ChannelPreference,
+    ChannelPriorityDto, ChannelSignalDto, ChannelSnapshot, CredentialFreeCollectorFactory,
+    DecisionSnapshot, DeliveryStateDto, DestinationIdDto, DisplayTransport, EvidenceStateDto,
+    EvidenceStrip, KnownOpenerDto, LocationSearchError, LocationSearchResult,
+    LocationSearchService, MutationResult, ObservedBridgeStateDto, OutputSnapshot, OutputStateDto,
+    PreferencesError, RiverCorridorBranchDto, RiverCorridorDto, RiverStationDto, SourceHealth,
+    SystemHealth, SystemStatusDto, UnitSystem, UrgencyDto, VesselDetailDto, VesselTrackSnapshot,
     WhatsAppRecipientConsent, validate_preferences, whatsapp_consent_is_current,
 };
 use brickellstatus_collectors::{
@@ -481,7 +481,11 @@ impl RuntimeEngine {
         // reached a fresh profile. Adopt the ones the user has never seen,
         // switched off, and leave every channel they already have alone.
         let adopted = adopt_new_default_channels(&mut preferences);
+        let standardized = crate::preferences::standardize_alert_policy(&mut preferences);
+        let quiet_time_zone_before = preferences.profile.quiet_hours.time_zone.clone();
         adopt_host_time_zone(&mut preferences);
+        let host_time_zone_adopted =
+            preferences.profile.quiet_hours.time_zone != quiet_time_zone_before;
         let secret_status_changed = if let Some(configured) = factory.aisstream_key_configured()? {
             let changed = preferences.ais.api_key_configured != configured
                 || preferences.ais.enabled != configured;
@@ -493,7 +497,12 @@ impl RuntimeEngine {
             false
         };
         validate_preferences(&preferences)?;
-        if stored_preferences.is_none() || secret_status_changed || adopted > 0 {
+        if stored_preferences.is_none()
+            || secret_status_changed
+            || adopted > 0
+            || standardized
+            || host_time_zone_adopted
+        {
             store
                 .set_json(PREFERENCES_KEY, &preferences, &iso_timestamp(now_ms)?)
                 .await?;
@@ -565,6 +574,7 @@ impl RuntimeEngine {
         if let Some(configured) = self.factory.aisstream_key_configured()? {
             preferences.ais.api_key_configured = configured;
         }
+        crate::preferences::standardize_alert_policy(&mut preferences);
         validate_preferences(&preferences)?;
         let registrations = self.factory.build(&preferences)?;
         let active_sources = active_source_map(&registrations)?;
@@ -1635,6 +1645,7 @@ fn adopt_host_time_zone(preferences: &mut AppPreferences) {
     let Some(zone) = jiff::tz::TimeZone::system().iana_name().map(str::to_owned) else {
         return;
     };
+    preferences.profile.quiet_hours.time_zone.clone_from(&zone);
     for channel in &mut preferences.profile.channels {
         if channel.kind == ChannelKindDto::Bridge {
             channel

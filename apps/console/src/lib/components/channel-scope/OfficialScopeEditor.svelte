@@ -34,7 +34,7 @@
   <SwitchField
     checked={scopeBool(channel, 'includeStatements', false)}
     label="Include statements"
-    description="Show non-warning NWS statements in rotation; the channel’s alert setting still applies."
+    description="Include non-warning NWS statements with current warnings."
     onchange={(enabled) => setScope(channel, onchannelchange, 'includeStatements', enabled)}
   />
 </div>

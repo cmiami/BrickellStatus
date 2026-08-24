@@ -45,12 +45,15 @@ use brickellstatus_eink::{
 };
 pub use brickellstatus_projection::render_live_bridge_frame;
 use brickellstatus_runtime::{
-    AisConnectionStateDto, AppPreferences, AppSnapshot, AvailabilityDto, BridgeStateDto,
-    ChannelKindDto, ChannelSnapshot, CredentialFreeCollectorFactory, DeliveryStateDto,
-    DestinationIdDto, DispatchRecord, DisplayOrientation, DisplayTransport, InterruptPreset,
-    LocationSearchResult, MutationResult, OutputStateDto, RuntimeConfig, RuntimeEngine,
-    SchedulerHandle, SurfacePresence, UrgencyDto, VesselDetailDto, whatsapp_consent_is_current,
+    AUTOMATIC_FRAME_DWELL_SECONDS, AisConnectionStateDto, AppPreferences, AppSnapshot,
+    AvailabilityDto, BridgeStateDto, ChannelKindDto, ChannelSnapshot,
+    CredentialFreeCollectorFactory, DeliveryStateDto, DestinationIdDto, DispatchRecord,
+    DisplayOrientation, DisplayTransport, LocationSearchResult, MutationResult, OutputStateDto,
+    RuntimeConfig, RuntimeEngine, SchedulerHandle, UrgencyDto, VesselDetailDto,
+    whatsapp_consent_is_current,
 };
+#[cfg(test)]
+use brickellstatus_runtime::{InterruptPreset, SurfacePresence};
 use brickellstatus_storage::{IncidentRecord, OutboxLease, OutboxRecord, Store};
 use jiff::{Timestamp, tz::TimeZone};
 use serde::{Deserialize, Serialize};
@@ -2544,12 +2547,18 @@ async fn send_rotating_snapshot_to_display(
     selection: &PanelSelection,
     radar: Option<&RadarFigure>,
 ) -> (MutationResult, Option<String>) {
-    let channel_id = match selection {
-        PanelSelection::Alert { channel_id, .. } | PanelSelection::Rotation { channel_id } => {
-            channel_id
+    let (channel_id, notice_key) = match selection {
+        PanelSelection::Alert {
+            channel_id,
+            notice_key,
+            ..
         }
+        | PanelSelection::Rotation {
+            channel_id,
+            notice_key,
+        } => (channel_id, notice_key.as_deref()),
     };
-    let Some(channel) = snapshot
+    let Some(base_channel) = snapshot
         .channels
         .iter()
         .find(|channel| &channel.id == channel_id)
@@ -2559,6 +2568,21 @@ async fn send_rotating_snapshot_to_display(
             None,
         );
     };
+    // A channel is a subscription; each current item is its own slide. Clone
+    // the compatibility view for projection so existing renderers can draw the
+    // selected notice without learning carousel state.
+    let mut selected_channel = base_channel.clone();
+    if let Some(notice_key) = notice_key
+        && let Some(notice) = base_channel
+            .notices
+            .iter()
+            .find(|notice| notice.key == notice_key)
+    {
+        selected_channel.signal = Some(notice.signal.clone());
+        selected_channel.priority = notice.priority;
+        selected_channel.material_key.clone_from(&notice.key);
+    }
+    let channel = &selected_channel;
     let panel = display.panel();
     let frame = if channel.kind == ChannelKindDto::Bridge {
         match render_snapshot(
@@ -3109,7 +3133,24 @@ async fn run_display_worker(
     engine: Arc<RuntimeEngine>,
     display: Arc<DisplayController>,
 ) {
-    let broker = PanelBroker::default();
+    let broker = Arc::new(PanelBroker::default());
+    // Snapshot ingestion must keep running while the display task is dwelling.
+    // When both jobs lived in this loop, `wait_or_preempt` had nobody capable
+    // of enqueueing the new alert that was supposed to wake it.
+    let ingest_broker = Arc::clone(&broker);
+    let ingest_engine = Arc::clone(&engine);
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let Ok(snapshot) = ingest_engine.get_snapshot().await else {
+                continue;
+            };
+            let preferences = ingest_engine.get_preferences().await;
+            ingest_broker.ingest(&snapshot, &preferences);
+        }
+    });
     let mut next_prove_at = tokio::time::Instant::now();
     let mut prove_failures = 0_u32;
     let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -3252,7 +3293,7 @@ async fn run_display_worker(
             // does not re-fetch a composite that changes every ten.
             let radar = match &selection {
                 PanelSelection::Alert { channel_id, .. }
-                | PanelSelection::Rotation { channel_id } => {
+                | PanelSelection::Rotation { channel_id, .. } => {
                     // Bounded hard. Radar is decoration and the panel is the
                     // product: a tile host that hangs must cost the frame its
                     // figure, never its repaint.
@@ -3264,7 +3305,7 @@ async fn run_display_worker(
                     .unwrap_or_default()
                 }
             };
-            let (result, channel_id) = match tokio::time::timeout(
+            let (result, _) = match tokio::time::timeout(
                 Duration::from_secs(30),
                 send_rotating_snapshot_to_display(
                     &app,
@@ -3292,26 +3333,15 @@ async fn run_display_worker(
                     )
                 }
             };
-            // An alert holds for a fixed, bounded time; a rotation frame keeps
-            // its channel's configured dwell.
+            // An alert holds for a fixed, bounded time. Every ordinary frame
+            // uses the same readable cadence; channel order and timing are no
+            // longer configuration concerns.
             let (dwell, holding_score) = match &selection {
                 PanelSelection::Alert { score, .. } => (PanelBroker::alert_hold(), *score),
-                PanelSelection::Rotation { .. } => {
-                    let seconds = channel_id
-                        .as_deref()
-                        .and_then(|id| {
-                            preferences
-                                .profile
-                                .channels
-                                .iter()
-                                .find(|channel| channel.id == id)
-                        })
-                        .map(|channel| channel.rotation_seconds)
-                        .unwrap_or(preferences.display.dwell_seconds)
-                        .max(5);
-                    // Score zero: anything queued may preempt an ordinary frame.
-                    (Duration::from_secs(u64::from(seconds)), 0)
-                }
+                PanelSelection::Rotation { .. } => (
+                    Duration::from_secs(u64::from(AUTOMATIC_FRAME_DWELL_SECONDS)),
+                    0,
+                ),
             };
             // The dwell and the interrupt wait are one primitive, so a new alert
             // lands within milliseconds instead of at the end of this frame.

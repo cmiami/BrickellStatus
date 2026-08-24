@@ -11,6 +11,30 @@ use crate::{
     WhatsAppSettings, catalog::catalog,
 };
 
+/// One readable cadence for every ordinary panel frame.
+///
+/// This is product policy, not a tuning knob: urgent frames can still preempt
+/// it, while every relevant ordinary item gets one turn in the live set.
+pub const AUTOMATIC_FRAME_DWELL_SECONDS: u32 = 24;
+/// Hardware maintenance cadence used to clear e-paper ghosting.
+pub const AUTOMATIC_FULL_REFRESH_EVERY: u32 = 12;
+/// Safety ceiling for one collector response. The UI never asks a reader to
+/// decide how many current items deserve to exist.
+pub const AUTOMATIC_ITEM_LIMIT: usize = 100;
+
+const fn automatic_source_age_minutes(kind: ChannelKindDto) -> u32 {
+    match kind {
+        ChannelKindDto::Bridge | ChannelKindDto::Official => 2,
+        ChannelKindDto::Weather => 15,
+        ChannelKindDto::Hurricane => 360,
+        ChannelKindDto::News => 180,
+        ChannelKindDto::Sports => 720,
+        ChannelKindDto::Earthquake => 1_440,
+        ChannelKindDto::Markets => 20,
+        ChannelKindDto::System => 5,
+    }
+}
+
 /// Resolve shipped catalog entries to their URLs, for seeding a default channel.
 ///
 /// An id that is not in the catalog is dropped rather than seeded as a broken
@@ -58,8 +82,8 @@ impl Default for AppPreferences {
                 // fixed default could only ever match the wrong one. Discovery
                 // finds boards by the service UUID; this pins one when asked.
                 ble_name: String::new(),
-                dwell_seconds: 28,
-                full_refresh_every: 12,
+                dwell_seconds: AUTOMATIC_FRAME_DWELL_SECONDS,
+                full_refresh_every: AUTOMATIC_FULL_REFRESH_EVERY,
                 orientation: DisplayOrientation::default(),
             },
             whatsapp: WhatsAppSettings {
@@ -111,8 +135,8 @@ pub fn default_channel_preferences() -> Vec<ChannelPreference> {
                 DestinationIdDto::Desktop,
             ],
             max_age_minutes: 2,
-            max_items: 1,
-            rotation_seconds: 28,
+            max_items: AUTOMATIC_ITEM_LIMIT,
+            rotation_seconds: AUTOMATIC_FRAME_DWELL_SECONDS,
             scope: BTreeMap::from([
                 ("bridge".into(), json!("Brickell Avenue Bridge")),
                 ("latitude".into(), json!(25.7699)),
@@ -126,12 +150,16 @@ pub fn default_channel_preferences() -> Vec<ChannelPreference> {
             kind: ChannelKindDto::Weather,
             title: "Miami weather".into(),
             enabled: true,
-            presence: SurfacePresence::Rotation,
+            presence: SurfacePresence::ActiveOnly,
             interrupt_preset: InterruptPreset::Recommended,
-            destinations: vec![DestinationIdDto::Epaper, DestinationIdDto::Desktop],
+            destinations: vec![
+                DestinationIdDto::Epaper,
+                DestinationIdDto::Whatsapp,
+                DestinationIdDto::Desktop,
+            ],
             max_age_minutes: 15,
-            max_items: 2,
-            rotation_seconds: 26,
+            max_items: AUTOMATIC_ITEM_LIMIT,
+            rotation_seconds: AUTOMATIC_FRAME_DWELL_SECONDS,
             scope: BTreeMap::from([
                 ("place".into(), json!("Miami, FL")),
                 ("latitude".into(), json!(25.7617)),
@@ -151,15 +179,15 @@ pub fn default_channel_preferences() -> Vec<ChannelPreference> {
             title: "Official alerts".into(),
             enabled: true,
             presence: SurfacePresence::ActiveOnly,
-            interrupt_preset: InterruptPreset::ConfirmedOnly,
+            interrupt_preset: InterruptPreset::Recommended,
             destinations: vec![
                 DestinationIdDto::Epaper,
                 DestinationIdDto::Whatsapp,
                 DestinationIdDto::Desktop,
             ],
             max_age_minutes: 2,
-            max_items: 2,
-            rotation_seconds: 30,
+            max_items: AUTOMATIC_ITEM_LIMIT,
+            rotation_seconds: AUTOMATIC_FRAME_DWELL_SECONDS,
             scope: BTreeMap::from([
                 ("place".into(), json!("Miami, FL")),
                 ("point".into(), json!("25.7617,-80.1918")),
@@ -174,11 +202,15 @@ pub fn default_channel_preferences() -> Vec<ChannelPreference> {
             title: "Atlantic hurricanes".into(),
             enabled: true,
             presence: SurfacePresence::ActiveOnly,
-            interrupt_preset: InterruptPreset::Meaningful,
-            destinations: vec![DestinationIdDto::Epaper, DestinationIdDto::Desktop],
+            interrupt_preset: InterruptPreset::Recommended,
+            destinations: vec![
+                DestinationIdDto::Epaper,
+                DestinationIdDto::Whatsapp,
+                DestinationIdDto::Desktop,
+            ],
             max_age_minutes: 360,
-            max_items: 2,
-            rotation_seconds: 28,
+            max_items: AUTOMATIC_ITEM_LIMIT,
+            rotation_seconds: AUTOMATIC_FRAME_DWELL_SECONDS,
             scope: BTreeMap::from([
                 ("place".into(), json!("Miami, FL")),
                 ("areaIds".into(), json!(["area.miami"])),
@@ -193,12 +225,16 @@ pub fn default_channel_preferences() -> Vec<ChannelPreference> {
             // NEWS.
             title: "Headlines".into(),
             enabled: true,
-            presence: SurfacePresence::Rotation,
-            interrupt_preset: InterruptPreset::Off,
-            destinations: vec![DestinationIdDto::Epaper],
+            presence: SurfacePresence::ActiveOnly,
+            interrupt_preset: InterruptPreset::Recommended,
+            destinations: vec![
+                DestinationIdDto::Epaper,
+                DestinationIdDto::Whatsapp,
+                DestinationIdDto::Desktop,
+            ],
             max_age_minutes: 180,
-            max_items: 3,
-            rotation_seconds: 24,
+            max_items: AUTOMATIC_ITEM_LIMIT,
+            rotation_seconds: AUTOMATIC_FRAME_DWELL_SECONDS,
             scope: BTreeMap::from([
                 // Seeded from the catalog by id rather than by repeating URL
                 // literals here, so a feed that moves is corrected in one file.
@@ -226,17 +262,21 @@ pub fn default_channel_preferences() -> Vec<ChannelPreference> {
             id: "earthquake.significant".into(),
             kind: ChannelKindDto::Earthquake,
             title: "Significant earthquakes".into(),
-            enabled: false,
+            enabled: true,
             presence: SurfacePresence::ActiveOnly,
-            interrupt_preset: InterruptPreset::ConfirmedOnly,
-            destinations: vec![DestinationIdDto::Desktop],
-            max_age_minutes: 60,
-            max_items: 1,
-            rotation_seconds: 24,
+            interrupt_preset: InterruptPreset::Recommended,
+            destinations: vec![
+                DestinationIdDto::Epaper,
+                DestinationIdDto::Whatsapp,
+                DestinationIdDto::Desktop,
+            ],
+            max_age_minutes: 1_440,
+            max_items: AUTOMATIC_ITEM_LIMIT,
+            rotation_seconds: AUTOMATIC_FRAME_DWELL_SECONDS,
             scope: BTreeMap::from([
-                ("feed".into(), json!("significant_hour")),
-                ("minimumMagnitude".into(), json!(5.5)),
-                ("eventAgeMinutes".into(), json!(60)),
+                ("feed".into(), json!("4.5_day")),
+                ("minimumMagnitude".into(), json!(4.5)),
+                ("eventAgeMinutes".into(), json!(1_440)),
             ]),
         },
         ChannelPreference {
@@ -244,20 +284,24 @@ pub fn default_channel_preferences() -> Vec<ChannelPreference> {
             kind: ChannelKindDto::Markets,
             title: "Market watchlist".into(),
             enabled: false,
-            presence: SurfacePresence::Rotation,
-            interrupt_preset: InterruptPreset::Off,
-            destinations: vec![DestinationIdDto::Epaper],
+            presence: SurfacePresence::ActiveOnly,
+            interrupt_preset: InterruptPreset::Recommended,
+            destinations: vec![
+                DestinationIdDto::Epaper,
+                DestinationIdDto::Whatsapp,
+                DestinationIdDto::Desktop,
+            ],
             max_age_minutes: 20,
-            max_items: 2,
-            rotation_seconds: 20,
+            max_items: AUTOMATIC_ITEM_LIMIT,
+            rotation_seconds: AUTOMATIC_FRAME_DWELL_SECONDS,
             scope: BTreeMap::from([
                 ("symbols".into(), json!(["AMD"])),
                 ("movePercent".into(), json!(5)),
                 ("pollSeconds".into(), json!(300)),
             ]),
         },
-        // Last in the array, and the array is the rotation order. An optional
-        // channel that ships off should not sit between two that ship on.
+        // Optional on a fresh install; enabling it is the only alert-policy
+        // choice the reader needs to make.
         ChannelPreference {
             id: "sports.miami".into(),
             kind: ChannelKindDto::Sports,
@@ -266,15 +310,19 @@ pub fn default_channel_preferences() -> Vec<ChannelPreference> {
             // nothing.
             title: "Miami teams".into(),
             enabled: false,
-            presence: SurfacePresence::Rotation,
-            interrupt_preset: InterruptPreset::Off,
-            destinations: vec![DestinationIdDto::Epaper],
+            presence: SurfacePresence::ActiveOnly,
+            interrupt_preset: InterruptPreset::Recommended,
+            destinations: vec![
+                DestinationIdDto::Epaper,
+                DestinationIdDto::Whatsapp,
+                DestinationIdDto::Desktop,
+            ],
             // A trade stays worth reading for the rest of the day, unlike a
             // rain warning. News runs 180; sports has no reason to be that
             // impatient.
             max_age_minutes: 720,
-            max_items: 3,
-            rotation_seconds: 20,
+            max_items: AUTOMATIC_ITEM_LIMIT,
+            rotation_seconds: AUTOMATIC_FRAME_DWELL_SECONDS,
             scope: BTreeMap::from([
                 (
                     "feeds".into(),
@@ -291,6 +339,73 @@ pub fn default_channel_preferences() -> Vec<ChannelPreference> {
             ]),
         },
     ]
+}
+
+/// Removes legacy alert and carousel decisions from a stored profile.
+///
+/// `enabled` and content scope remain the reader's choices. Everything else is
+/// one shared contract: relevant items reach every configured output, urgent
+/// items may interrupt, and the runtime owns freshness and cadence.
+pub(crate) fn standardize_alert_policy(preferences: &mut AppPreferences) -> bool {
+    let before = preferences.clone();
+
+    // The original earthquake card shipped switched off, desktop-only, and
+    // looking back one hour. That exact untouched legacy shape is safe to
+    // upgrade once; after this migration a reader can switch it off normally
+    // without it being re-enabled on the next launch.
+    if let Some(channel) = preferences
+        .profile
+        .channels
+        .iter_mut()
+        .find(|channel| channel.id == "earthquake.significant")
+    {
+        let untouched_legacy = !channel.enabled
+            && channel.scope.get("feed").and_then(Value::as_str) == Some("significant_hour")
+            && channel
+                .scope
+                .get("minimumMagnitude")
+                .and_then(Value::as_f64)
+                == Some(5.5)
+            && channel.scope.get("eventAgeMinutes").and_then(Value::as_f64) == Some(60.0);
+        if untouched_legacy {
+            channel.enabled = true;
+            channel.scope.insert("minimumMagnitude".into(), json!(4.5));
+        }
+    }
+
+    let home = preferences.profile.home_channel_id.clone();
+    for channel in &mut preferences.profile.channels {
+        channel.presence = if channel.id == home {
+            SurfacePresence::Home
+        } else {
+            SurfacePresence::ActiveOnly
+        };
+        channel.interrupt_preset = InterruptPreset::Recommended;
+        channel.destinations = vec![
+            DestinationIdDto::Epaper,
+            DestinationIdDto::Whatsapp,
+            DestinationIdDto::Desktop,
+        ];
+        channel.max_age_minutes = automatic_source_age_minutes(channel.kind);
+        channel.max_items = AUTOMATIC_ITEM_LIMIT;
+        channel.rotation_seconds = AUTOMATIC_FRAME_DWELL_SECONDS;
+
+        if channel.kind == ChannelKindDto::Earthquake {
+            channel.scope.insert("feed".into(), json!("4.5_day"));
+            channel.scope.insert("eventAgeMinutes".into(), json!(1_440));
+        }
+        if channel.kind == ChannelKindDto::Weather {
+            channel
+                .scope
+                .insert("rainProbabilityThreshold".into(), json!(60));
+            channel.scope.insert("rainLeadMinutes".into(), json!(90));
+        }
+    }
+    preferences.display.dwell_seconds = AUTOMATIC_FRAME_DWELL_SECONDS;
+    preferences.display.full_refresh_every = AUTOMATIC_FULL_REFRESH_EVERY;
+    preferences.profile.quiet_hours.bypass_emergency = true;
+
+    *preferences != before
 }
 
 pub fn validate_preferences(preferences: &AppPreferences) -> Result<(), PreferencesError> {
@@ -609,9 +724,9 @@ fn validate_earthquake_scope(channel: &ChannelPreference) -> Result<(), Preferen
         .ok_or_else(|| {
             PreferencesError::Invalid(format!("{}.scope.feed must be a string", channel.id))
         })?;
-    if !matches!(feed, "significant_hour" | "significant_day") {
+    if !matches!(feed, "significant_hour" | "significant_day" | "4.5_day") {
         return invalid(format!(
-            "{}.scope.feed must be significant_hour or significant_day",
+            "{}.scope.feed must be significant_hour, significant_day, or 4.5_day",
             channel.id
         ));
     }
@@ -814,6 +929,26 @@ mod tests {
     }
 
     #[test]
+    fn earthquake_scope_accepts_the_magnitude_45_day_feed() {
+        let mut preferences = AppPreferences::default();
+        let earthquake_index = preferences
+            .profile
+            .channels
+            .iter()
+            .position(|channel| channel.kind == ChannelKindDto::Earthquake)
+            .expect("default preferences include earthquakes");
+        preferences.profile.channels[earthquake_index]
+            .scope
+            .insert("feed".into(), json!("4.5_day"));
+        validate_preferences(&preferences).unwrap();
+
+        preferences.profile.channels[earthquake_index]
+            .scope
+            .insert("feed".into(), json!("4.5_week"));
+        assert!(validate_preferences(&preferences).is_err());
+    }
+
+    #[test]
     fn rejects_values_outside_the_typescript_scope_contract() {
         let mut preferences = AppPreferences::default();
         preferences.profile.channels[0]
@@ -924,7 +1059,7 @@ mod tests {
     }
 
     #[test]
-    fn the_sports_channel_ships_off_and_never_interrupts() {
+    fn the_sports_channel_ships_off_with_the_shared_automatic_policy() {
         let preferences = AppPreferences::default();
         let sports = preferences
             .profile
@@ -934,8 +1069,116 @@ mod tests {
             .expect("a sports channel ships");
         assert_eq!(sports.id, "sports.miami");
         assert!(!sports.enabled);
-        assert_eq!(sports.interrupt_preset, InterruptPreset::Off);
+        assert_eq!(sports.interrupt_preset, InterruptPreset::Recommended);
         validate_preferences(&preferences).unwrap();
+    }
+
+    #[test]
+    fn shipped_defaults_already_match_the_automatic_alert_policy() {
+        let mut preferences = AppPreferences::default();
+        assert!(!standardize_alert_policy(&mut preferences));
+        for channel in &preferences.profile.channels {
+            assert_eq!(channel.max_items, AUTOMATIC_ITEM_LIMIT);
+            assert_eq!(channel.rotation_seconds, AUTOMATIC_FRAME_DWELL_SECONDS);
+            assert_eq!(channel.interrupt_preset, InterruptPreset::Recommended);
+            assert_eq!(
+                channel.destinations,
+                vec![
+                    DestinationIdDto::Epaper,
+                    DestinationIdDto::Whatsapp,
+                    DestinationIdDto::Desktop,
+                ]
+            );
+            assert_eq!(
+                channel.presence,
+                if channel.id == preferences.profile.home_channel_id {
+                    SurfacePresence::Home
+                } else {
+                    SurfacePresence::ActiveOnly
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_alert_controls_are_replaced_without_overriding_channel_choices() {
+        let mut preferences = AppPreferences::default();
+        let news = preferences
+            .profile
+            .channels
+            .iter_mut()
+            .find(|channel| channel.kind == ChannelKindDto::News)
+            .unwrap();
+        news.enabled = false;
+        news.presence = SurfacePresence::Rotation;
+        news.interrupt_preset = InterruptPreset::Off;
+        news.destinations = vec![DestinationIdDto::Desktop];
+        news.max_age_minutes = 1;
+        news.max_items = 1;
+        news.rotation_seconds = 300;
+        preferences.display.dwell_seconds = 90;
+        preferences.profile.quiet_hours.bypass_emergency = false;
+
+        assert!(standardize_alert_policy(&mut preferences));
+        let news = preferences
+            .profile
+            .channels
+            .iter()
+            .find(|channel| channel.kind == ChannelKindDto::News)
+            .unwrap();
+        assert!(!news.enabled, "the channel on/off choice is preserved");
+        assert_eq!(news.presence, SurfacePresence::ActiveOnly);
+        assert_eq!(news.interrupt_preset, InterruptPreset::Recommended);
+        assert_eq!(news.max_age_minutes, 180);
+        assert_eq!(news.max_items, AUTOMATIC_ITEM_LIMIT);
+        assert_eq!(news.rotation_seconds, AUTOMATIC_FRAME_DWELL_SECONDS);
+        assert_eq!(
+            preferences.display.dwell_seconds,
+            AUTOMATIC_FRAME_DWELL_SECONDS
+        );
+        assert!(preferences.profile.quiet_hours.bypass_emergency);
+    }
+
+    #[test]
+    fn untouched_legacy_earthquakes_upgrade_once_then_respect_off() {
+        let mut preferences = AppPreferences::default();
+        let earthquake = preferences
+            .profile
+            .channels
+            .iter_mut()
+            .find(|channel| channel.kind == ChannelKindDto::Earthquake)
+            .unwrap();
+        earthquake.enabled = false;
+        earthquake
+            .scope
+            .insert("feed".into(), json!("significant_hour"));
+        earthquake
+            .scope
+            .insert("minimumMagnitude".into(), json!(5.5));
+        earthquake.scope.insert("eventAgeMinutes".into(), json!(60));
+
+        assert!(standardize_alert_policy(&mut preferences));
+        let earthquake = preferences
+            .profile
+            .channels
+            .iter_mut()
+            .find(|channel| channel.kind == ChannelKindDto::Earthquake)
+            .unwrap();
+        assert!(earthquake.enabled);
+        assert_eq!(earthquake.scope["feed"], json!("4.5_day"));
+        assert_eq!(earthquake.scope["minimumMagnitude"], json!(4.5));
+
+        earthquake.enabled = false;
+        assert!(!standardize_alert_policy(&mut preferences));
+        assert!(
+            !preferences
+                .profile
+                .channels
+                .iter()
+                .find(|channel| channel.kind == ChannelKindDto::Earthquake)
+                .unwrap()
+                .enabled
+        );
     }
 
     #[test]
