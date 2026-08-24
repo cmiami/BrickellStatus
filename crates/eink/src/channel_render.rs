@@ -747,7 +747,7 @@ mod tests {
                 .packed()
                 .iter()
                 .zip(b.packed())
-                .map(|(x, y)| u32::from((x ^ y).count_ones()))
+                .map(|(x, y)| (x ^ y).count_ones())
                 .sum();
             changed as f32 / (a.packed().len() * 8) as f32
         };

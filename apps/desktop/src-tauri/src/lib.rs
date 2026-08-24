@@ -1031,7 +1031,7 @@ impl DisplayController {
         let changed: u32 = last
             .iter()
             .zip(packed)
-            .map(|(before, after)| u32::from((before ^ after).count_ones()))
+            .map(|(before, after)| (before ^ after).count_ones())
             .sum();
         #[expect(
             clippy::cast_precision_loss,
