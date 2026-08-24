@@ -136,6 +136,22 @@ export function isUnderway(track: VesselTrack): boolean {
 }
 
 /**
+ * Whether a current fix belongs on the bridge-decision surface.
+ *
+ * Normal candidates come from the engine's route judgement, and a hull waiting
+ * at the span remains relevant even though it is momentarily stationary. Once
+ * a river-trunk vessel has crossed and is moving away, keep it only for the
+ * rest of the observed opening; the first closed reading clears it. This also
+ * covers an app or credential restart whose first fix arrives just beyond the
+ * span, before a local crossing baseline exists.
+ */
+export function isRelevantBridgeVessel(track: VesselTrack, targetIsUp: boolean): boolean {
+  if (track.sMeters == null || !isUnderway(track)) return false;
+  if (track.routeIntersects || track.posture === 'waiting') return true;
+  return targetIsUp && track.branch === 'river' && track.movement === 'diverging';
+}
+
+/**
  * Which way along the channel the vessel is travelling.
  *
  * Course over ground bends with the river, so direction is read from the side

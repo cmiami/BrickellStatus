@@ -219,14 +219,19 @@
     min-height: 0;
   }
 
-  .picker-map :global(.location-map) {
+  /* LocationMap's root carries the general-purpose 430px floor used by full
+     pages. A picker has a bounded grid row instead: leaving that floor in
+     place makes the map overflow a short desktop window and the dialog's
+     intentional clipping hides the name and action footer. */
+  .picker-map :global(.location-map-shell) {
     height: 100%;
+    min-height: 0;
   }
 
   .picker > footer {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(180px, auto) minmax(220px, 1fr) auto;
     align-items: center;
-    justify-content: space-between;
     gap: 20px;
     padding: 14px 20px;
     background: var(--frost);
@@ -265,6 +270,7 @@
   }
 
   .picker-name input {
+    width: 100%;
     min-width: 0;
     /* Past the 44px touch minimum: this sits beside the two buttons a thumb is
        already reaching for. */
@@ -280,6 +286,17 @@
     gap: 10px;
   }
 
+  @media (max-width: 900px) {
+    .picker > footer {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 12px;
+    }
+
+    .picker-actions {
+      justify-content: flex-end;
+    }
+  }
+
   @media (max-width: 680px) {
     .picker-scrim {
       padding: 0;
@@ -292,8 +309,6 @@
     }
 
     .picker > footer {
-      flex-direction: column;
-      align-items: stretch;
       /* The scrim's padding is what held this card off the system bars, and the
          rule above drops it so the map can run full bleed. The footer then has
          to hold itself off: without this the confirm and cancel buttons sit

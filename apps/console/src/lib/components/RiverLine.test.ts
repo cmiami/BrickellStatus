@@ -285,6 +285,42 @@ describe('RiverLine', () => {
     );
   });
 
+  it('turns the four reversed spans toward the same opening face as SW 2 and NW 5', () => {
+    const extraStations = [
+      station('SW 1 St', 'bridge', 25.773038, -80.200591, 1112, 'sw_1_st'),
+      station('W Flagler', 'bridge', 25.774205, -80.201287, 1350, 'w_flagler'),
+      station('NW 17 Ave', 'bridge', 25.785884, -80.222961, 4100, 'nw_17_ave'),
+      station('NW 22 Ave', 'bridge', 25.788202, -80.231373, 4900, 'nw_22_ave')
+    ];
+    const corridor: RiverCorridor = {
+      ...CORRIDOR,
+      branches: CORRIDOR.branches.map((branch) =>
+        branch.id === 'river'
+          ? { ...branch, stations: [...branch.stations, ...extraStations] }
+          : branch
+      )
+    };
+
+    render(RiverLine, { corridor, vesselTracks: [], intervals: INTERVALS });
+
+    const byName = (name: string) =>
+      Array.from(document.querySelectorAll('.station')).find((node) =>
+        node.querySelector('title')?.textContent?.startsWith(name)
+      )?.querySelector('.mini-bascule');
+    for (const name of ['SW 2 Ave', 'NW 5 St']) {
+      const angle = Number(byName(name)?.getAttribute('data-bridge-angle'));
+      expect(angle).toBeGreaterThanOrEqual(-90);
+      expect(angle).toBeLessThanOrEqual(90);
+    }
+    for (const name of ['SW 1 St', 'W Flagler', 'NW 17 Ave', 'NW 22 Ave']) {
+      const bridge = byName(name);
+      const routeAngle = Number(bridge?.getAttribute('data-route-angle'));
+      const bridgeAngle = Number(bridge?.getAttribute('data-bridge-angle'));
+      expect(((bridgeAngle - routeAngle) % 180 + 180) % 180).toBeCloseTo(90);
+      expect(bridgeAngle).toBeGreaterThan(90);
+    }
+  });
+
   it('keeps direction, knots, Brickell ETA, and bridge-opening impact with the hull', () => {
     render(RiverLine, { corridor: CORRIDOR, vesselTracks: [vessel()], intervals: INTERVALS });
 
@@ -409,7 +445,9 @@ describe('RiverLine', () => {
     expect(names).not.toContain('PORT WATCH');
     expect(names).not.toContain('BAY HOLD');
     expect(names).not.toContain('OPEN WATER');
-    expect(compactText(document.querySelector('.manifest-head'))).toContain('VESSELS TO · 5');
+    expect(compactText(document.querySelector('.manifest-head'))).toContain(
+      'LIVE TRAFFIC · 5 BRICKELL'
+    );
   });
 
   it('keeps side-profile boats upright and mirrors them along every schematic route', () => {
@@ -490,7 +528,55 @@ describe('RiverLine', () => {
     expect(compactText(document.body)).not.toMatch(/unknown type|not broadcast|AIS type/i);
   });
 
-  it('omits the vessel sidebar when no current track will cross Brickell', () => {
+  it('keeps a just-passed vessel through the opening and clears it when Brickell closes', async () => {
+    const openIntervals: BridgeStateInterval[] = INTERVALS.map((interval) =>
+      interval.bridgeKey === 'brickell' ? { ...interval, state: 'up' } : interval
+    );
+    const tracks = [
+      vessel({
+        mmsi: '275543000',
+        vesselName: 'VIOLET',
+        posture: 'underway',
+        branch: 'river',
+        sMeters: -40,
+        movement: 'diverging',
+        routeIntersects: false
+      }),
+      vessel({
+        mmsi: '367705830',
+        vesselName: 'PEPIN',
+        posture: 'underway',
+        branch: 'government_cut',
+        sMeters: -168,
+        movement: 'diverging',
+        routeIntersects: false
+      }),
+      vessel({ mmsi: '367705810', vesselName: 'SARA' })
+    ];
+    const { rerender } = render(RiverLine, {
+      corridor: CORRIDOR,
+      vesselTracks: tracks,
+      intervals: openIntervals
+    });
+
+    expect(document.querySelectorAll('.vessel')).toHaveLength(2);
+    expect(document.querySelectorAll('.manifest li')).toHaveLength(2);
+    expect(compactText(document.body)).toContain('VIOLET');
+    expect(compactText(document.body)).toContain('SARA');
+    expect(compactText(document.body)).not.toContain('PEPIN');
+    expect(compactText(document.querySelector('.manifest-head'))).toContain(
+      'LIVE TRAFFIC · 2 BRICKELL'
+    );
+
+    await rerender({ corridor: CORRIDOR, vesselTracks: tracks, intervals: INTERVALS });
+
+    expect(document.querySelectorAll('.vessel')).toHaveLength(1);
+    expect(document.querySelectorAll('.manifest li')).toHaveLength(1);
+    expect(compactText(document.body)).not.toContain('VIOLET');
+    expect(compactText(document.body)).toContain('SARA');
+  });
+
+  it('omits the vessel sidebar when every current track is outside displayed corridor traffic', () => {
     render(RiverLine, {
       corridor: CORRIDOR,
       vesselTracks: [

@@ -18,7 +18,12 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     type SchematicStation,
     type SchematicVessel
   } from '$lib/riverSchematic';
-  import { currentVesselTracks, travelDirection, type TravelDirection } from '$lib/river';
+  import {
+    currentVesselTracks,
+    isRelevantBridgeVessel,
+    travelDirection,
+    type TravelDirection
+  } from '$lib/river';
   import { layoutVesselAnnotations } from '$lib/vesselAnnotationLayout';
   import type {
     BridgeCrossing,
@@ -84,11 +89,17 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     return states;
   });
 
+  const targetBridgeState = $derived.by(() => {
+    const target = corridor.branches
+      .flatMap((branch) => branch.stations)
+      .find((station) => station.kind === 'target');
+    return target?.bridgeKey ? (bridgeStates.get(target.bridgeKey) ?? 'unknown') : 'unknown';
+  });
   const liveVesselTracks = $derived(currentVesselTracks(vesselTracks, generatedAt));
-  const passageVesselTracks = $derived(
-    liveVesselTracks.filter((track) => track.routeIntersects)
+  const corridorVesselTracks = $derived(
+    liveVesselTracks.filter((track) => isRelevantBridgeVessel(track, targetBridgeState === 'up'))
   );
-  const schematic = $derived(riverSchematic(corridor, passageVesselTracks, bridgeStates));
+  const schematic = $derived(riverSchematic(corridor, corridorVesselTracks, bridgeStates));
   const targetState = $derived(schematic.target?.state ?? 'unknown');
   const visibleStations = $derived(
     schematic.stations.filter(
@@ -100,7 +111,7 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     const positionedByMmsi = new Map(
       schematic.vessels.map((vessel) => [vessel.mmsi, vessel] as const)
     );
-    return passageVesselTracks
+    return corridorVesselTracks
       .map((track): Omit<IdentifierVessel, 'ordinal'> => {
         const positioned = positionedByMmsi.get(track.mmsi);
         return {
@@ -284,12 +295,23 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     return stationNameY(station) + station.labelSide * 18;
   }
 
+  const REVERSED_LEAF_DIRECTION = new Set([
+    'sw_1_st',
+    'w_flagler',
+    'nw_17_ave',
+    'nw_22_ave'
+  ]);
+
   function bridgeOrientation(station: SchematicStation): number {
     // A crossing has the same axis after a half-turn. Keep that perpendicular
-    // axis in the readable half of the circle so an upriver tangent (usually
-    // 180–225deg) cannot turn the asymmetric bridge artwork upside down.
+    // axis in the readable half of the circle, then restore the intentional
+    // half-turn for the four spans whose local route segment otherwise makes
+    // the raised leaves face opposite SW 2 Ave and NW 5 St. The road axis is
+    // unchanged; only the side toward which the open leaves point is corrected.
     const perpendicular = (((station.angleDegrees + 90) % 180) + 180) % 180;
-    return perpendicular > 90 ? perpendicular - 180 : perpendicular;
+    const readable = perpendicular > 90 ? perpendicular - 180 : perpendicular;
+    const reverse = station.bridgeKey && REVERSED_LEAF_DIRECTION.has(station.bridgeKey);
+    return readable + (reverse ? 180 : 0);
   }
 
   function vesselProfileFacesLeft(vessel: SchematicVessel): boolean {
@@ -649,7 +671,7 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
       <aside class="manifest-rail" aria-labelledby="manifest-heading">
         <header class="manifest-head">
           <div>
-            <p>VESSELS TO · {identifierVessels.length}</p>
+            <p>LIVE TRAFFIC · {identifierVessels.length}</p>
             <h3 id="manifest-heading">BRICKELL</h3>
           </div>
           <div class="manifest-actions">
