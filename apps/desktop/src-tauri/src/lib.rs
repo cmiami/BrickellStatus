@@ -34,9 +34,9 @@ use brickellstatus_projection::{
 use brickellstatus_projection::{local_clock, span_code, upstream_spans};
 // Re-exported because the live-frame binary drives the same path the app does.
 use brickellstatus_eink::{
-    DeviceBanner, MonoFrame, PanelModel, RadarFigure, RefreshMode, RenderConfig, preview_png_bytes,
-    radar_figure_from_png, render_channel_card, render_channel_card_with_radar, render_snapshot,
-    series_figure,
+    DeviceBanner, FULL_REFRESH_CHURN, MonoFrame, PanelModel, RadarFigure, RefreshMode,
+    RenderConfig, preview_png_bytes, radar_figure_from_png, render_channel_card,
+    render_channel_card_with_radar, render_snapshot, series_figure,
     transport::{
         BleConfig, BleDeviceInfo, BleTransport, TransportError, TransportKind, TransportReceipt,
         UsbConfig, UsbTransport, discover_ble_devices, discover_espressif_devices,
@@ -1042,14 +1042,6 @@ impl DisplayController {
         }
     }
 }
-
-/// How much of the panel must change before a frame earns a full refresh.
-///
-/// Well above the few percent a figure or a timestamp turns over inside an
-/// otherwise identical card, and far below the share a different channel's
-/// layout repaints. The cost of guessing high is one ghosted slide; the cost of
-/// guessing low is a full refresh's flash on every routine update.
-const FULL_REFRESH_CHURN: f32 = 0.08;
 
 struct DesktopState {
     engine: Arc<RuntimeEngine>,

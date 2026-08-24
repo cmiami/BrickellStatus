@@ -35,6 +35,26 @@ pub const fn packet_size(panel: PanelModel) -> usize {
     HEADER_SIZE + panel.payload_size()
 }
 
+/// How much of the panel must change before a frame earns a full refresh.
+///
+/// Measured, not guessed, and the first guess was wrong by an order of
+/// magnitude. A fast refresh settles only the pixels it is told changed, so it
+/// suits a figure ticking over inside an otherwise identical card and leaves
+/// the previous slide legible underneath a different one. The instinct is that
+/// swapping a whole layout repaints most of the glass -- but on a one-bit panel
+/// that is mostly white in both frames, only the ink moves:
+///
+/// | | E213 | E290 |
+/// |---|---|---|
+/// | different channel's card | 0.59-4.86% | 0.49-4.37% |
+/// | same card, a figure and a clock moved on | 0.30% | 0.25% |
+///
+/// So this sits between the two, nearer the tick, because the costs are not
+/// symmetric: refreshing fully when it was not needed costs one flash, and
+/// refreshing fast when it was needed costs a ghost that stays until something
+/// else clears it. `channel_render` asserts the separation still holds.
+pub const FULL_REFRESH_CHURN: f32 = 0.004;
+
 /// E-paper refresh waveform requested for a frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RefreshMode {
