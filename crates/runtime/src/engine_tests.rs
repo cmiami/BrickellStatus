@@ -662,7 +662,7 @@ fn earthquake_item(id: &str, now_ms: i64) -> CollectorItem {
     CollectorItem {
         id: id.into(),
         kind: ItemKind::Earthquake,
-        title: "M 6.2 fixture earthquake".into(),
+        title: "M 7.2 fixture earthquake".into(),
         summary: Some("Fixture earthquake".into()),
         observed_at: Some(chrono::DateTime::from_timestamp_millis(now_ms).unwrap()),
         starts_at: None,
@@ -675,7 +675,7 @@ fn earthquake_item(id: &str, now_ms: i64) -> CollectorItem {
             ),
         },
         attributes: BTreeMap::from([
-            ("magnitude".into(), json!(6.2)),
+            ("magnitude".into(), json!(7.2)),
             ("status".into(), json!("reviewed")),
         ]),
     }
