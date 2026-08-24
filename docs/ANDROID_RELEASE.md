@@ -199,8 +199,18 @@ For CI, set four repository secrets:
 | `ANDROID_KEY_PASSWORD` | key password |
 
 The release job writes `keystore.properties`, builds, and removes it in an
-`if: always()` step. Without the secrets it logs a warning and ships unsigned
-rather than failing.
+`if: always()` step. A missing `ANDROID_KEYSTORE_BASE64` **fails** the job on
+this repository; only a fork falls through to an unsigned build. That asymmetry
+exists because v0.1.27 through v0.1.32 shipped unsigned, uninstallable APKs
+while the job stayed green on a warning.
+
+The job then verifies the artifact rather than the inputs: every published APK
+must pass `apksigner verify`, and its DEX must still contain each method Rust
+resolves by JNI name (`publishStatus`, `initBluetooth`, `initStatusBridge`).
+The second check exists because R8 strips whatever it sees no caller for, and
+a name lookup from Rust is not a caller it can see -- a keep rule is the only
+thing standing between minification and a `NoSuchMethodError` on a build that
+otherwise looks healthy.
 
 ## The Bluetooth bridge
 

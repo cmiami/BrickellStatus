@@ -37,6 +37,17 @@ updates:
       - cmiami
     commit-message:
       prefix: deps
+    # jni is not ours to choose: `init_android_bluetooth` hands the `JNIEnv`
+    # straight to `btleplug::platform::init`, so the version has to be the one
+    # btleplug itself compiles against, currently 0.19. 0.22 split `JNIEnv`
+    # into `Env` and `EnvUnowned`, which fails the Android cross-compile with a
+    # type mismatch rather than anything Dependabot can see. Unpin this when
+    # btleplug moves, not before.
+    ignore:
+      - dependency-name: jni
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
     groups:
       cargo-minor-and-patch:
         applies-to: version-updates

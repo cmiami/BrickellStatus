@@ -33,10 +33,84 @@ use super::{
 /// into the APK, should cost the user the e-paper output and nothing else.
 #[cfg(target_os = "android")]
 pub fn init_android_bluetooth(env: &jni::JNIEnv<'_>) -> Result<(), TransportError> {
+    // Kept for `ensure_jvm_attached`, which cannot ask btleplug for the same
+    // handle: its `global_jvm` is private to the Android backend.
+    let vm = env.get_java_vm().map_err(|error| TransportError::Io {
+        transport: TransportKind::Ble,
+        message: error.to_string(),
+    })?;
+    let _ = ANDROID_JVM.set(vm);
     btleplug::platform::init(env).map_err(|error| TransportError::Io {
         transport: TransportKind::Ble,
         message: error.to_string(),
     })
+}
+
+/// The JVM handed to [`init_android_bluetooth`], kept for thread attachment.
+#[cfg(target_os = "android")]
+static ANDROID_JVM: std::sync::OnceLock<jni::JavaVM> = std::sync::OnceLock::new();
+
+/// Attaches the calling thread to the JVM, so btleplug can reach it.
+///
+/// btleplug's Android backend reads the environment with `JavaVM::get_env`,
+/// which looks the thread up rather than attaching it: on a thread Java has
+/// never called into it returns `JNI_EDETACHED`, which surfaces two layers up
+/// as the maximally unhelpful "JNI call failed". Every BLE call in this module
+/// runs on a Tokio worker that Rust spawned, so without this the first adapter
+/// call fails and the app reports no Bluetooth hardware at all.
+///
+/// The attachment is permanent because a detach-on-drop guard would have to be
+/// held across await points, and a Tokio task may resume on a different worker
+/// after any of them. Attaching is idempotent and cheap once a thread is
+/// already attached, and the runtime's worker set is bounded, so the cost is a
+/// handful of permanent attachments rather than one per call.
+#[cfg(target_os = "android")]
+fn ensure_jvm_attached() {
+    let Some(vm) = ANDROID_JVM.get() else {
+        return;
+    };
+    if let Err(error) = vm.attach_current_thread_permanently() {
+        warn!(%error, "could not attach this thread to the JVM; the BLE call will fail");
+    }
+}
+
+/// A future that attaches the polling thread to the JVM before each poll.
+///
+/// Wrapping the outermost future covers every nested btleplug await inside it,
+/// which is what makes this robust against work stealing: whichever worker
+/// resumes the task is attached before btleplug touches JNI again.
+#[cfg(target_os = "android")]
+struct JvmAttached<'a, T> {
+    inner: std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>,
+}
+
+#[cfg(target_os = "android")]
+impl<T> Future for JvmAttached<'_, T> {
+    type Output = T;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<T> {
+        ensure_jvm_attached();
+        self.inner.as_mut().poll(context)
+    }
+}
+
+/// Wraps a BLE future so every poll runs on a JVM-attached thread.
+#[cfg(target_os = "android")]
+fn attached<'a, T>(future: impl Future<Output = T> + Send + 'a) -> JvmAttached<'a, T> {
+    JvmAttached {
+        inner: Box::pin(future),
+    }
+}
+
+/// Off Android there is no JVM to attach to, so this is the future unchanged.
+#[cfg(not(target_os = "android"))]
+fn attached<'a, T>(
+    future: impl Future<Output = T> + Send + 'a,
+) -> impl Future<Output = T> + Send + 'a {
+    future
 }
 
 const BLE_FRAME_ATTEMPTS: usize = 2;
@@ -245,6 +319,10 @@ impl BleTransport {
     /// frame. This is application-level BLE setup; it does not claim that the
     /// operating system created a bonded pairing record.
     pub async fn ensure_connected(&self) -> Result<BleConnectionInfo, TransportError> {
+        attached(self.ensure_connected_inner()).await
+    }
+
+    async fn ensure_connected_inner(&self) -> Result<BleConnectionInfo, TransportError> {
         let mut guard = self.connection.lock().await;
         if let Some(mut connection) = guard.take() {
             let connected = timeout(
@@ -278,6 +356,10 @@ impl BleTransport {
     /// display. No retained connection is treated as no reading, not as an
     /// invitation to start a surprise scan.
     pub async fn read_banner(&self) -> Result<Option<String>, TransportError> {
+        attached(self.read_banner_inner()).await
+    }
+
+    async fn read_banner_inner(&self) -> Result<Option<String>, TransportError> {
         let mut guard = self.connection.lock().await;
         let Some(connection) = guard.as_mut() else {
             return Ok(None);
@@ -311,6 +393,10 @@ impl BleTransport {
 
     /// Disconnects the retained GATT session, if one exists.
     pub async fn disconnect(&self) -> Result<(), TransportError> {
+        attached(self.disconnect_inner()).await
+    }
+
+    async fn disconnect_inner(&self) -> Result<(), TransportError> {
         let mut guard = self.connection.lock().await;
         if let Some(mut connection) = guard.take() {
             let connected = timeout(
@@ -407,7 +493,9 @@ impl BleTransport {
 fn spawn_cleanup(cleanup: impl Future<Output = ()> + Send + 'static) {
     match Handle::try_current() {
         Ok(handle) => {
-            handle.spawn(cleanup);
+            // Cleanup runs on a fresh task, so it needs the same JVM
+            // attachment as the call whose failure scheduled it.
+            handle.spawn(attached(cleanup));
         }
         Err(error) => {
             warn!(%error, "BLE cleanup could not be scheduled because the async runtime is gone");
@@ -448,6 +536,12 @@ fn ble_timeout(waiting_for: &'static str) -> TransportError {
 /// Scans every available Bluetooth adapter for peripherals advertising the
 /// compatible service or selected compatibility name.
 pub async fn discover_ble_devices(
+    config: &BleConfig,
+) -> Result<Vec<BleDeviceInfo>, TransportError> {
+    attached(discover_ble_devices_inner(config)).await
+}
+
+async fn discover_ble_devices_inner(
     config: &BleConfig,
 ) -> Result<Vec<BleDeviceInfo>, TransportError> {
     let adapters = available_adapters().await?;
@@ -607,6 +701,12 @@ impl PacketTransport for BleTransport {
     }
 
     async fn send_packet(&self, packet: &[u8]) -> Result<TransportReceipt, TransportError> {
+        attached(self.send_packet_inner(packet)).await
+    }
+}
+
+impl BleTransport {
+    async fn send_packet_inner(&self, packet: &[u8]) -> Result<TransportReceipt, TransportError> {
         validate_for_transport(packet)?;
         let mut guard = self.connection.lock().await;
         for attempt in 0..BLE_FRAME_ATTEMPTS {
