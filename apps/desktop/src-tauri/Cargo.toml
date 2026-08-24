@@ -70,7 +70,7 @@ tauri-plugin-single-instance = "2.4.3"
 # All three crates are already in Cargo.lock transitively, so this section
 # adds no new supply-chain surface.
 [target.'cfg(windows)'.dependencies]
-base64 = "0.22.1"
+base64 = "0.23.1"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 zeroize.workspace = true
 
