@@ -86,6 +86,38 @@ constexpr size_t kLowBatteryAckLength = sizeof("ACK INK1 BAT0000 LOW") - 1;
 // Keep the enriched low-battery ACK inside the default 20-byte ATT payload.
 static_assert(kLowBatteryAckLength <= 20);
 
+// The warning the panel draws for itself, along its bottom edge.
+//
+// Size 2 for the same reason the waiting screen uses it: this has to be read by
+// someone walking past a board with no host attached, which is the whole case
+// it exists for. The strip lands on the band the host already draws at the foot
+// of a frame, so black with white text reads as that band saying something else
+// rather than as damage.
+constexpr uint8_t kBatteryBannerTextSize = 2;
+constexpr uint16_t kBatteryBannerGlyphWidth = 6 * kBatteryBannerTextSize;
+constexpr uint16_t kBatteryBannerGlyphHeight = 8 * kBatteryBannerTextSize;
+constexpr uint16_t kBatteryBannerRule = 1;
+constexpr uint16_t kBatteryBannerPadding = 2;
+constexpr uint16_t kBatteryBannerHeight = kBatteryBannerRule +
+                                          kBatteryBannerPadding +
+                                          kBatteryBannerGlyphHeight +
+                                          kBatteryBannerPadding;
+constexpr uint16_t kBatteryBannerTop = kHeight - kBatteryBannerHeight;
+constexpr char kBatteryBannerLabel[] = "LOW BATTERY";
+constexpr uint16_t kBatteryBannerSeparator = 2 * kBatteryBannerGlyphWidth;
+
+// Proved against the widest reading the plausibility window admits rather than
+// against whatever a battery happened to show, so the line cannot wrap out of
+// its strip and across a host frame on either panel.
+constexpr uint16_t kBatteryBannerWidestWidth =
+    (sizeof(kBatteryBannerLabel) - 1 + sizeof("5.00V") - 1) *
+        kBatteryBannerGlyphWidth +
+    kBatteryBannerSeparator;
+
+static_assert(kBatteryBannerWidestWidth <= kWidth);
+// A strip, not a takeover: the panel is still a status display.
+static_assert(kBatteryBannerHeight * 4 < kHeight);
+
 constexpr bool shouldRestoreBleAdvertising(uint8_t connectedCount,
                                            bool advertising) {
   return connectedCount == 0 && !advertising;
@@ -167,6 +199,23 @@ bool batteryKnown = false;
 bool batteryLow = false;
 uint16_t batteryMillivolts = 0;
 uint32_t lastBatterySampleAt = 0;
+
+/// Whether the last thing drawn on this panel carried the warning strip.
+///
+/// The glass cannot be read back, so what was last put there is the only fact
+/// worth keeping. Comparing it against `batteryLow` is the entire trigger:
+/// there is no request flag to lose and no timer to fire, and the hysteresis in
+/// `refreshBatteryTelemetry` already stops a battery resting on the threshold
+/// from repainting every thirty seconds.
+bool batteryBannerDrawn = false;
+
+/// Whether `pendingFrame` holds a frame that actually reached the glass.
+///
+/// The buffer is value-initialised, so before the first host frame it is a
+/// legitimate all-white image rather than "nothing". Re-rendering it to take
+/// the strip back off would quietly replace the waiting screen with a blank
+/// panel.
+bool hostFrameRendered = false;
 
 void composeBanner();
 
@@ -371,6 +420,9 @@ class PacketDecoder {
 
   void poll() { resetIfTimedOut(); }
 
+  /// Whether a packet is part-assembled, i.e. a host is mid-sentence.
+  bool assembling() const { return used_ > 0; }
+
  private:
   std::array<uint8_t, kPacketSize> buffer_{};
   size_t used_ = 0;
@@ -520,7 +572,76 @@ void armLoopWatchdog() {
   loopWatchdogArmed = true;
 }
 
+/// Composites the low-battery strip over whatever was just drawn.
+///
+/// Called last by every path that puts anything on this panel, which is the
+/// point: the panel keeps a strip of its own glass, so a host frame loses that
+/// strip rather than the warning losing the panel. A board ran flat unattended
+/// with nothing on the glass to say so, and a warning that lives only in the
+/// wire protocol cannot be read by someone walking past a panel with no host.
+void drawBatteryBanner() {
+  // Recorded before the early return: "drew nothing" is as much a record of
+  // what the glass carries as the strip is, and it is what lets the loop notice
+  // that a recovered battery has left a stale warning behind.
+  batteryBannerDrawn = batteryLow;
+  if (!batteryLow) return;
+
+  // A rule in the background colour, because the host's own band at the foot of
+  // a frame is black with white text too. Without it a dark frame and this
+  // strip merge into one shape and the warning stops reading as something the
+  // panel added.
+  display->fillRect(0, kBatteryBannerTop, kWidth, kBatteryBannerRule, WHITE);
+  display->fillRect(0, kBatteryBannerTop + kBatteryBannerRule, kWidth,
+                    kBatteryBannerHeight - kBatteryBannerRule, BLACK);
+
+  // The reading is dropped rather than invented when the divider last answered
+  // implausibly. `batteryLow` keeps its state through an unreadable sample, so
+  // the warning stays true where the number is not known, and 0.00V would be
+  // the one thing on this strip that was a lie.
+  char reading[8] = "";
+  if (batteryKnown) {
+    snprintf(reading, sizeof(reading), "%u.%02uV", batteryMillivolts / 1000,
+             (batteryMillivolts % 1000) / 10);
+  }
+
+  const uint16_t labelWidth =
+      (sizeof(kBatteryBannerLabel) - 1) * kBatteryBannerGlyphWidth;
+  const uint16_t readingWidth =
+      std::strlen(reading) * kBatteryBannerGlyphWidth;
+  const uint16_t total =
+      readingWidth == 0 ? labelWidth
+                        : labelWidth + kBatteryBannerSeparator + readingWidth;
+  const uint16_t left = (kWidth - total) / 2;
+  const uint16_t textTop =
+      kBatteryBannerTop + kBatteryBannerRule + kBatteryBannerPadding;
+
+  // Wrapping is turned off rather than merely proved impossible above: a line
+  // that wrapped would put white text on the host's frame outside this strip,
+  // which is the one failure here that would read as a broken panel.
+  display->setTextWrap(false);
+  display->setTextSize(kBatteryBannerTextSize);
+  display->setTextColor(WHITE);
+  display->setCursor(left, textTop);
+  display->print(kBatteryBannerLabel);
+  if (readingWidth > 0) {
+    // The separator is drawn rather than typed. The built-in font shifts every
+    // code point from 176 upward unless CP437 mode is on, so a literal middle
+    // dot in this source would print as some other glyph.
+    const uint16_t dot = kBatteryBannerTextSize + 1;
+    display->fillRect(left + labelWidth + (kBatteryBannerSeparator - dot) / 2,
+                      textTop + (kBatteryBannerGlyphHeight - dot) / 2, dot, dot,
+                      WHITE);
+    display->setCursor(left + labelWidth + kBatteryBannerSeparator, textTop);
+    display->print(reading);
+  }
+  display->setTextWrap(true);
+}
+
 void drawWaitingScreen() {
+  // This screen is no longer drawn only once -- a recovering battery brings it
+  // back -- so the waveform has to be settled first, or the host frame it
+  // replaces ghosts underneath it.
+  display->fastmodeOff();
   display->landscape();
   display->clearMemory();
   display->setTextColor(BLACK);
@@ -552,6 +673,7 @@ void drawWaitingScreen() {
   char advertised[32];
   snprintf(advertised, sizeof(advertised), "BrickellStatus %s", boardId);
   display->print(advertised);
+  drawBatteryBanner();
   display->update();
 }
 
@@ -591,6 +713,24 @@ void maintainBatteryTelemetry() {
   if (txCharacteristic != nullptr) txCharacteristic->setValue(bannerLine);
 }
 
+/// Draws one host frame into the page buffer, warning strip included.
+///
+/// Shared because the frame that arrives and the frame that has to be put back
+/// after the warning clears are the same image drawn the same way; two copies
+/// of this loop would be two chances for them to disagree about what the panel
+/// is showing.
+void drawHostFrame(const std::array<uint8_t, kPayloadSize> &frame) {
+  display->clearMemory();
+  for (uint16_t y = 0; y < kHeight; ++y) {
+    for (uint16_t x = 0; x < kWidth; ++x) {
+      const size_t offset = static_cast<size_t>(y) * kStride + x / 8;
+      const bool black = (frame[offset] & (0x80u >> (x % 8))) != 0;
+      display->drawPixel(x, y, black ? BLACK : WHITE);
+    }
+  }
+  drawBatteryBanner();
+}
+
 void renderPendingFrame() {
   if (!framePending || !driving || display == nullptr) return;
 
@@ -607,16 +747,67 @@ void renderPendingFrame() {
   } else {
     display->fastmodeOn();
   }
-  display->clearMemory();
-  for (uint16_t y = 0; y < kHeight; ++y) {
-    for (uint16_t x = 0; x < kWidth; ++x) {
-      const size_t offset = static_cast<size_t>(y) * kStride + x / 8;
-      const bool black = (frame[offset] & (0x80u >> (x % 8))) != 0;
-      display->drawPixel(x, y, black ? BLACK : WHITE);
-    }
-  }
+  drawHostFrame(frame);
   display->update();
+  hostFrameRendered = true;
   acknowledge("ACK INK1");
+}
+
+/// Puts back on the glass what the panel should currently be showing.
+///
+/// Adding the strip could be done by drawing over the retained page buffer,
+/// since that buffer mirrors the glass -- but taking it away cannot: the strip
+/// is in that buffer too, and the only way back is to build what was underneath
+/// it again. Doing both directions the same way keeps one drawing path, and the
+/// pixel loop costs milliseconds against a refresh that costs seconds.
+///
+/// Which image is underneath is the question `hostFrameRendered` answers.
+void repaintPanel() {
+  if (!hostFrameRendered) {
+    drawWaitingScreen();
+    return;
+  }
+
+  // Copied out under the lock for the reason `renderPendingFrame` copies: the
+  // loop below runs tens of thousands of iterations, and holding the frame lock
+  // across it would keep interrupts off on this core for milliseconds.
+  std::array<uint8_t, kPayloadSize> frame{};
+  portENTER_CRITICAL(&frameMux);
+  std::memcpy(frame.data(), pendingFrame.data(), kPayloadSize);
+  portEXIT_CRITICAL(&frameMux);
+
+  // The full waveform in both directions. A large solid band appearing under a
+  // partial refresh comes out mottled, and one disappearing leaves its ghost.
+  display->fastmodeOff();
+  drawHostFrame(frame);
+  display->update();
+  // Deliberately no acknowledgement: nobody sent this frame, and a spurious
+  // ACK INK1 would be a lie to a host counting them.
+}
+
+/// Puts the warning on the glass, or takes it off, when the two disagree.
+///
+/// Nothing here is on a timer. The comparison is against what was last drawn,
+/// so a sample that only confirms what is already showing costs no refresh at
+/// all, and the hysteresis in `refreshBatteryTelemetry` means a battery resting
+/// on the threshold cannot flip the panel back and forth. Across a battery's
+/// life this repaints twice.
+///
+/// This is also the only path that can warn a panel with nobody connected,
+/// which is the case it exists for.
+void maintainBatteryBanner() {
+  if (!driving || display == nullptr) return;
+  if (batteryLow == batteryBannerDrawn) return;
+
+  // Deferred while a host is mid-sentence on serial. A repaint takes the panel
+  // for the length of a full refresh, the serial drain lives in this same loop,
+  // and the decoder gives a host one second between bytes -- so starting one
+  // now is how a frame in flight becomes NACK TRUNCATED. The strip can wait for
+  // the gap. BLE needs no such gate: its bytes are assembled in the radio's own
+  // task and reach `pendingFrame` regardless of what this task is blocked on.
+  if (framePending || serialDecoder.assembling()) return;
+
+  repaintPanel();
 }
 
 }  // namespace
@@ -670,6 +861,9 @@ void loop() {
 
   renderPendingFrame();
   maintainBatteryTelemetry();
+  // After the frame render, so a frame that just drew has already carried the
+  // strip and this collapses to a no-op rather than refreshing twice over.
+  maintainBatteryBanner();
   maintainBleAdvertising();
   delay(5);
 }
