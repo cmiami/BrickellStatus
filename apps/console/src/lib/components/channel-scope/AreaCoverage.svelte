@@ -27,7 +27,7 @@
   const BRICKELL = { latitude: 25.7699, longitude: -80.19005 };
   const origin = $derived(areas[0] ?? BRICKELL);
 
-  function addPlace(latitude: number, longitude: number) {
+  function addPlace(latitude: number, longitude: number, name: string) {
     picking = false;
     if (!onareaadd) return;
     const area: AlertArea = {
@@ -35,7 +35,12 @@
       // without asking the reader to name the place before they have looked
       // at it.
       id: `area.${Date.now().toString(36)}`,
-      label: `Coverage area ${areas.length + 1}`,
+      // The reader's own name when they gave one. The generated label is still
+      // the default rather than a prompt, because naming a place is not worth
+      // blocking on -- but a place you have just looked at is the moment you
+      // know what to call it, and the alternative was finding it filed as
+      // "Coverage area 3" and going to another screen to rename it.
+      label: name || `Coverage area ${areas.length + 1}`,
       latitude,
       longitude,
       timeZone: areas[0]?.timeZone ?? 'America/New_York',
@@ -92,6 +97,7 @@
     label="New coverage area"
     {unitSystem}
     confirmLabel="Add this place"
+    nameSuggestion={`Coverage area ${areas.length + 1}`}
     onconfirm={addPlace}
     oncancel={() => (picking = false)}
   />

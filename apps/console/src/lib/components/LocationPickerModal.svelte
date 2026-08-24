@@ -16,6 +16,7 @@
     label = 'Selected place',
     unitSystem = 'imperial',
     confirmLabel = 'Use this place',
+    nameSuggestion = '',
     onconfirm,
     oncancel
   }: {
@@ -26,7 +27,8 @@
     label?: string;
     unitSystem?: UnitSystem;
     confirmLabel?: string;
-    onconfirm: (latitude: number, longitude: number) => void;
+    nameSuggestion?: string;
+    onconfirm: (latitude: number, longitude: number, name: string) => void;
     oncancel: () => void;
   } = $props();
 
@@ -36,6 +38,13 @@
   let staged = $state({ latitude, longitude });
   let dialog = $state<HTMLDivElement | null>(null);
 
+  // Offered, never demanded. Naming a place before looking at it is the thing
+  // this dialog exists to avoid, but once the pin is down the reader knows
+  // exactly what they picked, and the alternative was finding out later that it
+  // had been called "Coverage area 3" and going to another screen to fix it.
+  // Left blank, the caller keeps whatever it would have named this anyway.
+  let name = $state('');
+
   const moved = $derived(staged.latitude !== latitude || staged.longitude !== longitude);
 
   // The only pin on the map. Saved places are deliberately hidden: the reader
@@ -43,7 +52,7 @@
   // to click by mistake.
   const pin = $derived<LocationMapPoint>({
     id: 'picker.candidate',
-    label,
+    label: name.trim() || label,
     latitude: staged.latitude,
     longitude: staged.longitude,
     kind: 'candidate',
@@ -108,12 +117,23 @@
         <span>{staged.latitude.toFixed(5)}, {staged.longitude.toFixed(5)}</span>
         <small>{moved ? 'Moved · not saved yet' : 'Unchanged'}</small>
       </p>
+      <label class="picker-name">
+        <span>Name (optional)</span>
+        <input
+          type="text"
+          bind:value={name}
+          maxlength="60"
+          placeholder={nameSuggestion}
+          autocomplete="off"
+          enterkeyhint="done"
+        />
+      </label>
       <div class="picker-actions">
         <button class="secondary-action" type="button" onclick={oncancel}>Cancel</button>
         <button
           class="primary-action"
           type="button"
-          onclick={() => onconfirm(staged.latitude, staged.longitude)}
+          onclick={() => onconfirm(staged.latitude, staged.longitude, name.trim())}
         >
           <Check size={16} aria-hidden="true" /> {confirmLabel}
         </button>
@@ -233,6 +253,28 @@
     text-transform: uppercase;
   }
 
+  .picker-name {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .picker-name span {
+    color: var(--muted);
+    font-size: var(--type-caption);
+  }
+
+  .picker-name input {
+    min-width: 0;
+    /* Past the 44px touch minimum: this sits beside the two buttons a thumb is
+       already reaching for. */
+    min-height: 44px;
+    padding: 0 12px;
+    color: var(--ink);
+    background: var(--white);
+    border: 1px solid var(--rule-strong);
+  }
+
   .picker-actions {
     display: flex;
     gap: 10px;
@@ -252,10 +294,17 @@
     .picker > footer {
       flex-direction: column;
       align-items: stretch;
+      /* The scrim's padding is what held this card off the system bars, and the
+         rule above drops it so the map can run full bleed. The footer then has
+         to hold itself off: without this the confirm and cancel buttons sit
+         under the navigation bar, which is exactly where a thumb cannot reach
+         them. */
+      padding-bottom: calc(14px + env(safe-area-inset-bottom));
     }
 
     .picker-actions button {
       flex: 1;
+      min-height: 48px;
       justify-content: center;
     }
   }

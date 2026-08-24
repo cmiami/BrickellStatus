@@ -50,7 +50,27 @@ describe('the location picker', () => {
     const { onconfirm } = mount();
     await fireEvent.click(screen.getByTestId('map-pick'));
     await fireEvent.click(screen.getByRole('button', { name: /use this place/i }));
-    expect(onconfirm).toHaveBeenCalledWith(25.8, -80.1);
+    // Empty name: the caller keeps whatever it would have named this anyway.
+    expect(onconfirm).toHaveBeenCalledWith(25.8, -80.1, '');
+  });
+
+  it('carries a name the reader typed, trimmed', async () => {
+    const { onconfirm } = mount();
+    await fireEvent.click(screen.getByTestId('map-pick'));
+    await fireEvent.input(screen.getByLabelText(/name/i), {
+      target: { value: '  Rickenbacker  ' }
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /use this place/i }));
+    expect(onconfirm).toHaveBeenCalledWith(25.8, -80.1, 'Rickenbacker');
+  });
+
+  it('does not require a name', async () => {
+    const { onconfirm } = mount();
+    // Naming a place before looking at it is what this dialog avoids, so an
+    // untouched field must never be the thing standing between the reader and
+    // the place they just picked.
+    await fireEvent.click(screen.getByRole('button', { name: /use this place/i }));
+    expect(onconfirm).toHaveBeenCalledWith(25.7699, -80.19005, '');
   });
 
   it('discards a staged move on cancel', async () => {
