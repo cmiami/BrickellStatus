@@ -706,10 +706,7 @@ impl PacketTransport for BleTransport {
 }
 
 impl BleTransport {
-    async fn send_packet_inner(
-        &self,
-        packet: &[u8],
-    ) -> Result<TransportReceipt, TransportError> {
+    async fn send_packet_inner(&self, packet: &[u8]) -> Result<TransportReceipt, TransportError> {
         validate_for_transport(packet)?;
         let mut guard = self.connection.lock().await;
         for attempt in 0..BLE_FRAME_ATTEMPTS {
