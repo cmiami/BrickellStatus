@@ -437,6 +437,7 @@ const fn urgency_slot(urgency: ChannelUrgency) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::FULL_REFRESH_CHURN;
     use crate::render_primitives::TRUNCATION_MARK;
     use crate::{ChannelKind, ChannelSource, radar_figure_from_png};
 
@@ -727,6 +728,75 @@ mod tests {
             assert!(
                 black > 0 && black < box_pixels,
                 "{model:?}: {black} of {box_pixels}"
+            );
+        }
+    }
+
+    /// The full-refresh threshold has to sit between two measured quantities,
+    /// and both of them move whenever a card's layout does.
+    ///
+    /// This is the test that would have caught the first attempt: the threshold
+    /// was set to 8% on the assumption that a different channel's card
+    /// repaints most of the glass, when the largest such change measured here
+    /// is under 5% -- so no rotation ever earned a full refresh and every slide
+    /// ghosted under the next one.
+    #[test]
+    fn a_slide_change_outruns_a_tick_by_enough_to_tell_them_apart() {
+        let churn = |a: &MonoFrame, b: &MonoFrame| {
+            let changed: u32 = a
+                .packed()
+                .iter()
+                .zip(b.packed())
+                .map(|(x, y)| (x ^ y).count_ones())
+                .sum();
+            changed as f32 / (a.packed().len() * 8) as f32
+        };
+        let kinds = [
+            ChannelKind::Weather,
+            ChannelKind::OfficialAlert,
+            ChannelKind::Tropical,
+            ChannelKind::News,
+            ChannelKind::Sports,
+            ChannelKind::Earthquake,
+            ChannelKind::Markets,
+        ];
+        for model in PanelModel::ALL {
+            let frames: Vec<_> = kinds
+                .iter()
+                .map(|kind| {
+                    render_channel_card(&card(kind.clone(), ChannelUrgency::Advisory), model)
+                        .unwrap()
+                })
+                .collect();
+            for (index, window) in frames.windows(2).enumerate() {
+                let ratio = churn(&window[0], &window[1]);
+                assert!(
+                    ratio > FULL_REFRESH_CHURN,
+                    "{model:?} slide {index} to {} changes {ratio:.4} of the panel, at or under \
+                     the {FULL_REFRESH_CHURN} that earns a full refresh -- it would ghost",
+                    index + 1
+                );
+            }
+
+            let base = card(ChannelKind::Weather, ChannelUrgency::Advisory);
+            let ticked = ChannelCard::new(
+                ChannelKind::Weather,
+                ChannelUrgency::Advisory,
+                ChannelAvailability::Current,
+                "Miami / Brickell",
+                "Heavy rain in 11 minutes",
+                "0.7 in/hr / gusts 33 mph",
+                "Take cover by 4:20 PM",
+                ChannelSource::aged("Open-Meteo", 47),
+            );
+            let ratio = churn(
+                &render_channel_card(&base, model).unwrap(),
+                &render_channel_card(&ticked, model).unwrap(),
+            );
+            assert!(
+                ratio < FULL_REFRESH_CHURN,
+                "{model:?} a figure and a clock moving changes {ratio:.4}, at or over the \
+                 {FULL_REFRESH_CHURN} that earns a full refresh -- every tick would flash"
             );
         }
     }

@@ -523,11 +523,7 @@ fn channel_signal_from_item(
             }),
         ),
         ChannelKindDto::Earthquake => (
-            signal_text(
-                item.summary.as_deref(),
-                "A recent earthquake meets the configured magnitude and age rules.",
-                360,
-            ),
+            earthquake_local_time(item),
             "Reported magnitude and location, not local shaking.".into(),
             item.attributes
                 .get("magnitude")
@@ -691,6 +687,37 @@ fn signal_priority(
             .unwrap_or_default(),
         ChannelKindDto::Bridge | ChannelKindDto::System => 0.0,
     }
+}
+
+/// When the quake happened, on the reader's own clock.
+///
+/// USGS titles already read "M 4.5 - 80 km W of El Aguilar, Argentina", and
+/// `item.summary` is built from the same magnitude and place -- so a card made
+/// of both said the same thing twice and spent its second line doing it. The
+/// news and sports paths strip that repetition with `copy_without_leading`;
+/// here there is nothing left once it is stripped, because the title is the
+/// whole fact.
+///
+/// Time is what the title does not carry and what a reader checks next: a
+/// tremor an hour ago and one three days ago are different news at the same
+/// magnitude. It is shown in the machine's own zone rather than UTC, because
+/// the panel is read by someone standing in front of it.
+fn earthquake_local_time(item: &CollectorItem) -> String {
+    local_clock_label(item_time_ms(item))
+}
+
+/// Renders an instant on the machine's own clock, or says it has none.
+fn local_clock_label(milliseconds: i64) -> String {
+    if milliseconds == i64::MIN {
+        return "Time not reported".into();
+    }
+    let Ok(timestamp) = jiff::Timestamp::from_millisecond(milliseconds) else {
+        return "Time not reported".into();
+    };
+    timestamp
+        .to_zoned(jiff::tz::TimeZone::system())
+        .strftime("%b %-d, %-I:%M %p")
+        .to_string()
 }
 
 fn item_time_ms(item: &CollectorItem) -> i64 {
@@ -3152,5 +3179,20 @@ mod availability_tests {
             AvailabilityDto::Delayed,
             "an error still surfaces even while the market is shut"
         );
+    }
+    #[test]
+    fn an_earthquake_reads_its_time_on_the_local_clock() {
+        // jiff defers formatting, so an unsupported specifier only fails when
+        // the value is rendered. Render it.
+        let detail = local_clock_label(1_756_051_620_000);
+        assert!(detail.contains(':'), "expected a clock time, got {detail:?}");
+        assert!(
+            !detail.contains('\u{b7}'),
+            "the time line must not restate the title, got {detail:?}"
+        );
+
+        // An item carrying no time at all still has to say something honest
+        // rather than render the epoch or an empty second line.
+        assert_eq!(local_clock_label(i64::MIN), "Time not reported");
     }
 }

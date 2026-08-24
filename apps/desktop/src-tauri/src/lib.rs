@@ -34,9 +34,9 @@ use brickellstatus_projection::{
 use brickellstatus_projection::{local_clock, span_code, upstream_spans};
 // Re-exported because the live-frame binary drives the same path the app does.
 use brickellstatus_eink::{
-    DeviceBanner, MonoFrame, PanelModel, RadarFigure, RefreshMode, RenderConfig, preview_png_bytes,
-    radar_figure_from_png, render_channel_card, render_channel_card_with_radar, render_snapshot,
-    series_figure,
+    DeviceBanner, FULL_REFRESH_CHURN, MonoFrame, PanelModel, RadarFigure, RefreshMode,
+    RenderConfig, preview_png_bytes, radar_figure_from_png, render_channel_card,
+    render_channel_card_with_radar, render_snapshot, series_figure,
     transport::{
         BleConfig, BleDeviceInfo, BleTransport, TransportError, TransportKind, TransportReceipt,
         UsbConfig, UsbTransport, discover_ble_devices, discover_espressif_devices,
@@ -970,7 +970,20 @@ impl DisplayController {
             .ok_or_else(|| "No display connection is active.".to_owned())?;
         let next = self.frames_sent.load(Ordering::Relaxed).saturating_add(1);
         let cadence = u64::from(preferences.display.full_refresh_every.max(1));
-        let refresh = if next.is_multiple_of(cadence) {
+        // Two reasons to clear the glass, and the periodic one is the weaker.
+        //
+        // A fast refresh only settles the pixels it is told changed, so it is
+        // right for a frame that mostly matches the one before it -- a figure
+        // ticking over inside an otherwise identical card. Rotation does not do
+        // that: every dwell swaps in a different channel's whole layout, and
+        // eleven of those in a row between maintenance refreshes leaves the
+        // previous slide legible underneath the current one.
+        //
+        // So the amount of glass actually changing decides it, and the counted
+        // cadence stays as a floor for the case this cannot see: slow drift,
+        // where each frame is a small change but the residue still accumulates.
+        let churn = self.frame_churn(frame.packed()).await;
+        let refresh = if next.is_multiple_of(cadence) || churn >= FULL_REFRESH_CHURN {
             RefreshMode::Full
         } else {
             RefreshMode::Fast
@@ -999,6 +1012,34 @@ impl DisplayController {
         self.frames_sent.fetch_add(1, Ordering::Relaxed);
         *self.last_frame.lock().await = Some(frame.packed().to_vec());
         Ok(Some((receipt, active.name().to_owned())))
+    }
+
+    /// The fraction of the panel this frame repaints, against the last one sent.
+    ///
+    /// Nothing to compare against means everything is changing: the first frame
+    /// after a connect lands on glass holding whatever the last session left
+    /// there. A length change means the panel itself changed, which is the same
+    /// answer for the same reason.
+    async fn frame_churn(&self, packed: &[u8]) -> f32 {
+        let guard = self.last_frame.lock().await;
+        let Some(last) = guard.as_deref() else {
+            return 1.0;
+        };
+        if last.len() != packed.len() || packed.is_empty() {
+            return 1.0;
+        }
+        let changed: u32 = last
+            .iter()
+            .zip(packed)
+            .map(|(before, after)| (before ^ after).count_ones())
+            .sum();
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a ratio of pixel counts, where f32's 24-bit mantissa is far more precision than a threshold comparison needs"
+        )]
+        {
+            changed as f32 / (packed.len() as f32 * 8.0)
+        }
     }
 }
 
@@ -2532,7 +2573,17 @@ async fn send_snapshot_to_display(
     force: bool,
 ) -> MutationResult {
     let presentation = display_snapshot(snapshot);
-    let frame = match render_snapshot(&presentation, &RenderConfig::default()) {
+    // For the attached panel, not the default one. Geometry is baked into the
+    // packet length, so rendering an E213 frame for an E290 sends 3,922 bytes
+    // to a board waiting for 4,754: it never completes the packet, times out a
+    // second later and answers NACK TRUNCATED. The rotation path already asks
+    // the controller which panel is attached; this one did not, so the test
+    // frame -- the very thing offered as proof the link works -- was the one
+    // frame guaranteed to fail on an E290.
+    let frame = match render_snapshot(
+        &presentation,
+        &RenderConfig::default().for_panel(display.panel()),
+    ) {
         Ok(frame) => frame,
         Err(error) => return mutation_error(format!("Frame render failed: {error}")),
     };

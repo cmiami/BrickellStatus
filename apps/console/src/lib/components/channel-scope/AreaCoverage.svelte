@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { MapPin } from '@lucide/svelte';
+  import { MapPin, Trash2 } from '@lucide/svelte';
 
   import LocationPickerModal from '$lib/components/LocationPickerModal.svelte';
   import type { AlertArea, ChannelPreference, UnitSystem } from '$lib/types';
@@ -10,14 +10,37 @@
     areas,
     unitSystem = 'imperial',
     onchannelchange,
-    onareaadd
+    onareaadd,
+    onareachange,
+    onarearemove
   }: {
     channel: ChannelPreference;
     areas: AlertArea[];
     unitSystem?: UnitSystem;
     onchannelchange: ChannelChange;
     onareaadd?: (area: AlertArea) => void;
+    onareachange?: (area: AlertArea) => void;
+    onarearemove?: (area: AlertArea) => void;
   } = $props();
+
+  // Which row has its name open for editing. Renaming was a link to another
+  // screen, and the screen it pointed at showed the name as plain text -- so
+  // the one thing the alert says out loud was the one thing that could not be
+  // changed from anywhere.
+  let renaming = $state<string | null>(null);
+  let renameDraft = $state('');
+
+  function startRename(area: AlertArea) {
+    renaming = area.id;
+    renameDraft = area.label;
+  }
+
+  function commitRename(area: AlertArea) {
+    const label = renameDraft.trim();
+    renaming = null;
+    if (!label || label === area.label || !onareachange) return;
+    onareachange({ ...area, label });
+  }
 
   let picking = $state(false);
 
@@ -27,7 +50,7 @@
   const BRICKELL = { latitude: 25.7699, longitude: -80.19005 };
   const origin = $derived(areas[0] ?? BRICKELL);
 
-  function addPlace(latitude: number, longitude: number) {
+  function addPlace(latitude: number, longitude: number, name: string) {
     picking = false;
     if (!onareaadd) return;
     const area: AlertArea = {
@@ -35,7 +58,12 @@
       // without asking the reader to name the place before they have looked
       // at it.
       id: `area.${Date.now().toString(36)}`,
-      label: `Coverage area ${areas.length + 1}`,
+      // The reader's own name when they gave one. The generated label is still
+      // the default rather than a prompt, because naming a place is not worth
+      // blocking on -- but a place you have just looked at is the moment you
+      // know what to call it, and the alternative was finding it filed as
+      // "Coverage area 3" and going to another screen to rename it.
+      label: name || `Coverage area ${areas.length + 1}`,
       latitude,
       longitude,
       timeZone: areas[0]?.timeZone ?? 'America/New_York',
@@ -64,10 +92,45 @@
               toggleScopeList(channel, onchannelchange, 'areaIds', area.id, event.currentTarget.checked)}
           />
           <span>
-            <strong>{area.label}</strong>
+            {#if renaming === area.id}
+              <!-- svelte-ignore a11y_autofocus -->
+              <input
+                class="rename-input"
+                type="text"
+                bind:value={renameDraft}
+                maxlength="60"
+                autofocus
+                enterkeyhint="done"
+                onclick={(event) => event.preventDefault()}
+                onblur={() => commitRename(area)}
+                onkeydown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    commitRename(area);
+                  } else if (event.key === 'Escape') {
+                    event.preventDefault();
+                    renaming = null;
+                  }
+                }}
+              />
+            {:else}
+              <strong>{area.label}</strong>
+            {/if}
             <small>{area.latitude.toFixed(4)}, {area.longitude.toFixed(4)} · {area.timeZone}</small>
           </span>
         </label>
+        {#if onareachange || onarearemove}
+          <div class="area-row-actions">
+            {#if onareachange}
+              <button type="button" onclick={() => startRename(area)}>Rename</button>
+            {/if}
+            {#if onarearemove}
+              <button type="button" class="remove-action" onclick={() => onarearemove(area)}>
+                <Trash2 size={14} aria-hidden="true" /> Remove
+              </button>
+            {/if}
+          </div>
+        {/if}
       {/each}
     </div>
   {:else}
@@ -92,6 +155,7 @@
     label="New coverage area"
     {unitSystem}
     confirmLabel="Add this place"
+    nameSuggestion={`Coverage area ${areas.length + 1}`}
     onconfirm={addPlace}
     oncancel={() => (picking = false)}
   />
@@ -114,6 +178,39 @@
     font-weight: 600;
     letter-spacing: 0.07em;
     text-transform: uppercase;
+  }
+
+  .area-row-actions {
+    display: flex;
+    gap: 8px;
+    padding: 0 12px 10px;
+  }
+
+  .area-row-actions button {
+    min-height: 44px;
+    padding: 0 12px;
+    color: var(--ink);
+    background: var(--white);
+    border: 1px solid var(--rule-strong);
+    font-size: var(--type-caption);
+    cursor: pointer;
+  }
+
+  .area-row-actions .remove-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--danger);
+  }
+
+  .rename-input {
+    width: 100%;
+    min-width: 0;
+    min-height: 40px;
+    padding: 0 8px;
+    color: var(--ink);
+    background: var(--white);
+    border: 1px solid var(--marine);
   }
 
   .area-list {

@@ -2,6 +2,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use jiff::tz::TimeZone;
 use serde_json::{Value, json};
+
+/// The magnitude an earthquake must reach before it is worth a slide.
+///
+/// A worldwide feed at 4.5 carries twenty-odd events a day, which is a rotation
+/// full of tremors nobody felt and no room for the ones they did. Seven is the
+/// threshold where an earthquake is news wherever you are.
+pub const DEFAULT_EARTHQUAKE_MAGNITUDE: f64 = 7.0;
 use thiserror::Error;
 
 use crate::{
@@ -275,7 +282,10 @@ pub fn default_channel_preferences() -> Vec<ChannelPreference> {
             rotation_seconds: AUTOMATIC_FRAME_DWELL_SECONDS,
             scope: BTreeMap::from([
                 ("feed".into(), json!("4.5_day")),
-                ("minimumMagnitude".into(), json!(4.5)),
+                (
+                    "minimumMagnitude".into(),
+                    json!(DEFAULT_EARTHQUAKE_MAGNITUDE),
+                ),
                 ("eventAgeMinutes".into(), json!(1_440)),
             ]),
         },
@@ -369,7 +379,10 @@ pub(crate) fn standardize_alert_policy(preferences: &mut AppPreferences) -> bool
             && channel.scope.get("eventAgeMinutes").and_then(Value::as_f64) == Some(60.0);
         if untouched_legacy {
             channel.enabled = true;
-            channel.scope.insert("minimumMagnitude".into(), json!(4.5));
+            channel.scope.insert(
+                "minimumMagnitude".into(),
+                json!(DEFAULT_EARTHQUAKE_MAGNITUDE),
+            );
         }
     }
 
@@ -1166,7 +1179,10 @@ mod tests {
             .unwrap();
         assert!(earthquake.enabled);
         assert_eq!(earthquake.scope["feed"], json!("4.5_day"));
-        assert_eq!(earthquake.scope["minimumMagnitude"], json!(4.5));
+        assert_eq!(
+            earthquake.scope["minimumMagnitude"],
+            json!(DEFAULT_EARTHQUAKE_MAGNITUDE)
+        );
 
         earthquake.enabled = false;
         assert!(!standardize_alert_policy(&mut preferences));

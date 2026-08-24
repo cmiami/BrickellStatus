@@ -5,15 +5,26 @@
   import AreaCoverage from './AreaCoverage.svelte';
   import { scopeBool, scopeNumber, setScope, type ChannelChange } from './scope';
 
-  let { channel, areas, unitSystem, onchannelchange, onareaadd }: {
+  let { channel, areas, unitSystem, onchannelchange, onareaadd, onareachange, onarearemove }: {
     channel: ChannelPreference;
     areas: AlertArea[];
     unitSystem: UnitSystem;
     onchannelchange: ChannelChange;
     onareaadd?: (area: AlertArea) => void;
+    onareachange?: (area: AlertArea) => void;
+    onarearemove?: (area: AlertArea) => void;
   } = $props();
 
   const set = (key: string, value: number | boolean) => setScope(channel, onchannelchange, key, value);
+
+  // Quarter hours, because that is the resolution the forecast arrives in: the
+  // minutely feed is binned to fifteen minutes, so anything finer would be a
+  // control that could not change the answer.
+  const RAIN_LEAD_CHOICES = [15, 30, 60, 120] as const;
+
+  function leadLabel(minutes: number): string {
+    return minutes < 60 ? `${minutes} min` : `${minutes / 60} hr`;
+  }
 
   function windInput(event: Event) {
     const displayed = (event.currentTarget as HTMLInputElement).valueAsNumber;
@@ -23,7 +34,7 @@
 </script>
 
 <div class="weather-scope">
-  <AreaCoverage {channel} {areas} {unitSystem} {onchannelchange} {onareaadd} />
+  <AreaCoverage {channel} {areas} {unitSystem} {onchannelchange} {onareaadd} {onareachange} {onarearemove} />
   <div class="rulebook">
     <!-- Rain has no threshold to set. It reads the forecast’s 15-minute
          precipitation amounts and says when rain starts, which is an answer;
@@ -34,6 +45,26 @@
       description="Include rain that is falling now or likely to begin soon."
       onchange={(enabled) => set('rainAlertEnabled', enabled)}
     />
+    <div class="rain-lead" role="group" aria-label="How far ahead to warn about rain">
+      <span class="rain-lead-label">Warn me up to</span>
+      <div class="rain-lead-choices">
+        {#each RAIN_LEAD_CHOICES as minutes (minutes)}
+          <button
+            type="button"
+            class="rain-lead-choice"
+            aria-pressed={scopeNumber(channel, 'rainWindowMinutes', 30) === minutes}
+            disabled={!scopeBool(channel, 'rainAlertEnabled', true)}
+            onclick={() => set('rainWindowMinutes', minutes)}
+          >
+            {leadLabel(minutes)}
+          </button>
+        {/each}
+      </div>
+      <small class="field-note">
+        Rain expected further out than this waits until it is closer. The panel and
+        the alert name the place it is coming to.
+      </small>
+    </div>
     <SwitchField
       checked={scopeBool(channel, 'radarEnabled', true)}
       label="Radar"
@@ -65,6 +96,48 @@
 </div>
 
 <style>
+  .rain-lead {
+    display: grid;
+    gap: 8px;
+    padding: 12px 14px;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+  }
+
+  .rain-lead-label {
+    color: var(--muted);
+    font-size: var(--type-label);
+    text-transform: uppercase;
+  }
+
+  .rain-lead-choices {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .rain-lead-choice {
+    /* Past the touch minimum: these sit side by side and are the whole reason
+       someone opened this panel. */
+    min-width: 76px;
+    min-height: 44px;
+    color: var(--ink);
+    background: var(--white);
+    border: 1px solid var(--rule-strong);
+    cursor: pointer;
+  }
+
+  .rain-lead-choice[aria-pressed='true'] {
+    color: var(--white);
+    background: var(--marine);
+    border-color: var(--marine);
+  }
+
+  .rain-lead-choice:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+
   .weather-scope,
   .rulebook {
     display: grid;

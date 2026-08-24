@@ -51,8 +51,8 @@ pub use model::{
 pub use panel::PanelModel;
 pub use preview::{PreviewError, preview_png_bytes, save_preview_png, save_scaled_preview_png};
 pub use protocol::{
-    FLAG_FULL_REFRESH, HEADER_SIZE, INK1_MAGIC, MAX_PACKET_SIZE, ProtocolError, RefreshMode,
-    ValidatedPacket, encode_packet, packet_size, validate_packet,
+    FLAG_FULL_REFRESH, FULL_REFRESH_CHURN, HEADER_SIZE, INK1_MAGIC, MAX_PACKET_SIZE, ProtocolError,
+    RefreshMode, ValidatedPacket, encode_packet, packet_size, validate_packet,
 };
 pub use radar::{
     RADAR_FIGURE_HEIGHT, RADAR_FIGURE_WIDTH, RadarError, RadarFigure, radar_figure_from_png,

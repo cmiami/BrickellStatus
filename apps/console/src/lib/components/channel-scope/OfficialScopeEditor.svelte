@@ -4,17 +4,19 @@
   import AreaCoverage from './AreaCoverage.svelte';
   import { scopeBool, scopeList, setScope, toggleScopeList, type ChannelChange } from './scope';
 
-  let { channel, areas, unitSystem, onchannelchange, onareaadd }: {
+  let { channel, areas, unitSystem, onchannelchange, onareaadd, onareachange, onarearemove }: {
     channel: ChannelPreference;
     areas: AlertArea[];
     unitSystem: UnitSystem;
     onchannelchange: ChannelChange;
     onareaadd?: (area: AlertArea) => void;
+    onareachange?: (area: AlertArea) => void;
+    onarearemove?: (area: AlertArea) => void;
   } = $props();
 </script>
 
 <div class="official-scope">
-  <AreaCoverage {channel} {areas} {unitSystem} {onchannelchange} {onareaadd} />
+  <AreaCoverage {channel} {areas} {unitSystem} {onchannelchange} {onareaadd} {onareachange} {onarearemove} />
   <fieldset class="severity-register">
     <legend>Qualifying severities</legend>
     {#each ['Moderate', 'Severe', 'Extreme'] as severity}

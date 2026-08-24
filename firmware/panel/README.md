@@ -138,14 +138,34 @@ charging and no battery percentage is invented. The app sees the warning on
 the next READY identity or successful frame ACK and can notify the user once
 for that low-battery transition.
 
+**The panel also says it itself.** A host-side notification needs a host, and
+the failure this exists for is a board on battery with nobody connected: it runs
+down, stops advertising, and the app can only report that it found no panel. So
+while `LOWBAT` is set the firmware keeps a strip along the bottom edge reading
+`LOW BATTERY · 3.38V`, composited after every host frame — content keeps
+updating and the warning does not disappear underneath it. Host frames lose that
+strip; the wire contract does not change, and a host is neither told nor asked
+to reserve the space, because an FW4 board with a new app would otherwise show
+an empty band and an FW5 board with an old app would get the strip regardless.
+Compositing last in firmware is the only arrangement correct for every pairing.
+
+It is drawn on the hysteretic transition and never on a schedule, so a battery
+resting on the threshold cannot repaint the glass every thirty seconds; across a
+battery's life it costs two refreshes. A reading the divider cannot make sense
+of drops the voltage and keeps the words, because `LOWBAT` survives an
+unreadable sample and `0.00V` would be the one thing on that strip that was
+untrue — a battery removed after going low therefore shows the warning without a
+number until it is charged.
+
 The board advertises without a time limit whenever no BLE client is connected,
 restarts advertising after a disconnect, and checks the radio every two seconds
 so a transient stopped-advertising state repairs itself. BLE starts before the
 e-paper driver, and a 30-second main-loop watchdog reboots a board if a display
 operation wedges, so persistent glass cannot leave the radio permanently
-unreachable. The e-paper waiting screen is drawn once at boot and persists by
-design; it identifies the panel but is not a live connection or advertising
-indicator.
+unreachable. The e-paper waiting screen is drawn at boot and persists; it
+identifies the panel but is not a live connection or advertising indicator. It
+is redrawn in one case only — when a low battery clears on a board that has
+never been sent a frame.
 
 The TX characteristic holds the full banner rather than a bare `READY`, because
 over Bluetooth that line is the only place the geometry is spoken and the host

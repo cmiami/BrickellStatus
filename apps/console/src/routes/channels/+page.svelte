@@ -207,6 +207,25 @@
               draft!.profile.preset = 'custom';
               void saveNow();
             }}
+            onareachange={(area) => {
+              // Same register as the map page edits, for the same reason a pin
+              // dropped here joins it: one place is watched once, whichever
+              // screen the reader happened to be on when they named it.
+              draft!.areas = draft!.areas.map((item) => (item.id === area.id ? area : item));
+              draft!.profile.preset = 'custom';
+              void saveNow();
+            }}
+            onarearemove={(area) => {
+              draft!.areas = draft!.areas.filter((item) => item.id !== area.id);
+              // A removed place must not stay in any channel's scope, or the
+              // engine keeps collecting for somewhere the reader deleted.
+              for (const channel of draft!.profile.channels) {
+                if (!Array.isArray(channel.scope.areaIds)) continue;
+                channel.scope.areaIds = channel.scope.areaIds.filter((id) => id !== area.id);
+              }
+              draft!.profile.preset = 'custom';
+              void saveNow();
+            }}
           />
         </section>
 
@@ -598,6 +617,10 @@
       display: flex;
       max-height: none;
       overflow-x: auto;
+      /* Matches the notice rail on the live deck, which already scrolls
+         horizontally without taking the page with it. */
+      overscroll-behavior-inline: contain;
+      scroll-snap-type: inline proximity;
       border-right: 0;
       border-bottom: 1px solid var(--rule-strong);
     }
@@ -607,7 +630,12 @@
     }
 
     .channel-index button {
-      min-width: 172px;
+      /* 172px spent a third of itself on padding, the gap and the status pill,
+         which left the name about eighty pixels and ellipsised every channel to
+         "BRICKELL B...". Wide enough to read the name is the whole job of this
+         strip -- it is how you tell two channels apart before tapping one. */
+      min-width: 232px;
+      scroll-snap-align: start;
       border-right: 1px solid var(--rule);
       border-bottom: 0;
     }

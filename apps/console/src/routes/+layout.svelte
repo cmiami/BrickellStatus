@@ -180,7 +180,14 @@
 
   @media (max-width: 720px) {
     .app-main {
-      min-height: calc(100vh - 134px);
+      /* The tab bar is fixed, so every page has to end above it. Each route
+         used to reserve that space itself with a hard-coded number, none of
+         which counted env(safe-area-inset-bottom) -- so on a phone with gesture
+         navigation the last rows sat under the bar with no way to scroll to
+         them. Reserved once here, from the same expression AppNav sizes itself
+         with, so the two cannot drift. */
+      min-height: calc(100dvh - 58px - env(safe-area-inset-top));
+      padding-bottom: calc(76px + env(safe-area-inset-bottom));
       margin-left: 0;
     }
 
