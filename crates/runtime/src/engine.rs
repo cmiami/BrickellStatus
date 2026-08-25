@@ -33,8 +33,9 @@ use brickellstatus_model::{
     ObservationId, OutboundProgressStage, SourceId, TimestampMillis, VesselMovement,
 };
 use brickellstatus_policy::{
-    BrickellSchedule, BridgeEvidence, BridgePrediction, BridgePredictor, ContributionDisposition,
-    EvidenceKind, KNOWN_OPENER_LIKELY_BPS, KNOWN_OPENER_LIKELY_ETA_MINUTES, PredictionError,
+    BRIDGE_ALERT_HORIZON_MINUTES, BrickellSchedule, BridgeEvidence, BridgePrediction,
+    BridgePredictor, ContributionDisposition, EvidenceKind, KNOWN_OPENER_LIKELY_BPS,
+    KNOWN_OPENER_LIKELY_ETA_MINUTES, PredictionError,
 };
 use brickellstatus_storage::{
     AisCrossingObservation, AisCrossingRecord, AisLedgerEntry, AisTrackFix, AisVesselObservation,
@@ -2182,6 +2183,9 @@ fn bridge_fact(
                     .map(ToOwned::to_owned),
                 movement,
                 route_intersects: raw_route_intersects || known_opener_committed,
+                schedule_exempt: schedule_exempt(
+                    item.attributes.get("vessel_class").and_then(Value::as_str),
+                ),
                 eta,
                 opening_propensity,
             })
@@ -2398,7 +2402,20 @@ fn decision_snapshot(
     local_time_zone: &str,
 ) -> Result<DecisionSnapshot, RuntimeError> {
     let state = bridge_state_dto(prediction.state);
-    let (state_label, meaning, action) = decision_copy(state);
+    let tracks_opening_beyond_alert_horizon = state == BridgeStateDto::Clear
+        && prediction.predictive_state == BridgeState::Likely
+        && prediction
+            .eta
+            .is_some_and(|eta| eta.earliest > BRIDGE_ALERT_HORIZON_MINUTES);
+    let (state_label, meaning, action) = if tracks_opening_beyond_alert_horizon {
+        (
+            "Road open",
+            "Opening ETA tracked beyond the alert range.",
+            "Alerts begin at T-30.",
+        )
+    } else {
+        decision_copy(state)
+    };
     let confidence_basis = {
         let labels = prediction
             .contributions

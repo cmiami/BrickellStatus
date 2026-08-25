@@ -32,6 +32,10 @@ pub enum BridgeObservation {
         vessel_name: Option<String>,
         movement: VesselMovement,
         route_intersects: bool,
+        /// Whether the live hull classification permits passage outside the
+        /// ordinary schedule (for example, a tug with a tow).
+        #[serde(default)]
+        schedule_exempt: bool,
         eta: Option<EtaRangeMinutes>,
         opening_propensity: Option<Confidence>,
     },

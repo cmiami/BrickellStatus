@@ -327,10 +327,26 @@ fn ais_collector_item_normalizes_to_real_predictor_evidence() {
             vessel_name: Some("RIVER RUNNER".into()),
             movement: VesselMovement::Approaching,
             route_intersects: true,
+            schedule_exempt: false,
             eta: Some(EtaRangeMinutes::new(6, 10)),
             opening_propensity: None,
         })
     );
+}
+
+#[test]
+fn live_tug_exemption_reaches_predictor_evidence() {
+    let mut item = ais_bridge_item();
+    item.attributes.insert("vessel_class".into(), json!("tug"));
+
+    let Some(BridgeObservation::AisTrack {
+        schedule_exempt, ..
+    }) = bridge_fact(&item, &BTreeMap::new())
+    else {
+        panic!("expected an AIS track");
+    };
+
+    assert!(schedule_exempt);
 }
 
 #[test]
@@ -1218,6 +1234,7 @@ fn passed_known_opener_and_confirmed_close_remove_the_live_signal() {
             vessel_name: Some("PEPIN".into()),
             movement,
             route_intersects,
+            schedule_exempt: false,
             eta,
             opening_propensity: Some(Confidence::from_basis_points(8_333)),
         },
@@ -1300,6 +1317,41 @@ fn passed_known_opener_and_confirmed_close_remove_the_live_signal() {
     assert!(
         !bridge.active,
         "Live and e-ink membership consume this flag"
+    );
+}
+
+#[test]
+fn long_range_eta_is_informational_and_cannot_activate_bridge_channel() {
+    let now_ms = "2026-08-15T14:00:00Z"
+        .parse::<Timestamp>()
+        .unwrap()
+        .as_millisecond();
+    let transit = BridgeEvidence {
+        observation_id: ObservationId::from("long-range-transit"),
+        source_id: SourceId::from("bbpilots.bridge.brickell"),
+        observed_at: TimestampMillis(now_ms),
+        expires_at: None,
+        availability: AvailabilityStatus::Live,
+        reliability: Confidence::CERTAIN,
+        fact: BridgeObservation::ScheduledTransit {
+            vessel: "Test tow".into(),
+            exempt: true,
+            eta: Some(EtaRangeMinutes::new(90, 90)),
+        },
+    };
+    let prediction = BridgePredictor::default()
+        .evaluate(TimestampMillis(now_ms), &[transit], None)
+        .unwrap();
+    let decision = decision_snapshot(&prediction, "America/New_York").unwrap();
+
+    assert_eq!(prediction.predictive_state, BridgeState::Likely);
+    assert_eq!(decision.state, BridgeStateDto::Clear);
+    assert_eq!(decision.eta_min, Some(90));
+    assert_eq!(decision.state_label, "Road open");
+    assert_eq!(decision.action, "Alerts begin at T-30.");
+    assert_eq!(
+        channel_urgency(ChannelKindDto::Bridge, None, &decision),
+        UrgencyDto::Routine
     );
 }
 
@@ -1727,6 +1779,7 @@ async fn forecast_history_keeps_one_latest_material_sample_per_minute() {
             vessel_name: Some("Test Vessel".into()),
             movement: VesselMovement::Approaching,
             route_intersects: true,
+            schedule_exempt: false,
             eta: Some(EtaRangeMinutes::new(8, 12)),
             opening_propensity: Some(Confidence::CERTAIN),
         },

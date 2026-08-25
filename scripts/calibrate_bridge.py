@@ -14,6 +14,8 @@ Pre-registered gates:
   paired movements in that direction, and only when its IQR is at most 40 min.
 * Forecast quality is scored per alert episode, not per correlated minute:
   precision, recall, false alerts, warning lead, and ETA-interval coverage.
+  A predictive row is only replayed as an alert when its ETA reaches the
+  product's 30-minute alert horizon; longer-range rows remain calibration data.
 
 Rows created before successful-reading continuity was recorded are identified
 as legacy data. They are never presented as continuous coverage.
@@ -37,7 +39,8 @@ DEFAULT_DB = (
 )
 LOCAL = ZoneInfo("America/New_York")
 MINUTE = 60_000
-HORIZON = 15
+FEATURE_HORIZON = 15
+ALERT_HORIZON = 30
 CONTINUITY_GAP = 2 * MINUTE
 TARGET = "brickell"
 RIVER = [
@@ -330,7 +333,7 @@ def clock_section(openings: list[int]) -> None:
 
 def covered_grid(spans: list[tuple[int, int]]) -> list[int]:
     grid = []
-    horizon = HORIZON * MINUTE
+    horizon = FEATURE_HORIZON * MINUTE
     for start, end in spans:
         first = start - start % MINUTE + MINUTE
         grid.extend(range(first, end - horizon + 1, MINUTE))
@@ -346,13 +349,14 @@ def upstream_section(ups, openings, spans) -> None:
 
     def opens(moment: int) -> bool:
         return any(
-            moment < event <= moment + HORIZON * MINUTE for event in openings
+            moment < event <= moment + FEATURE_HORIZON * MINUTE
+            for event in openings
         )
 
     base = sum(opens(moment) for moment in grid) / len(grid)
     print(
         f"  base rate       {base:.0%} of observed minutes precede an opening "
-        f"within {HORIZON} min"
+        f"within {FEATURE_HORIZON} min"
     )
     rank = {key: index for index, key in enumerate(RIVER)}
 
@@ -489,6 +493,7 @@ def alert_episodes(
     samples: list[Forecast],
     openings: list[int],
     up_spans: list[tuple[int, int]],
+    apply_alert_horizon: bool = True,
 ) -> list[Forecast]:
     episodes = []
     previous: Forecast | None = None
@@ -505,10 +510,20 @@ def alert_episodes(
         if bridge_is_up:
             previous = sample
             continue
-        if sample.state == "likely" and not active:
+        alertable = (
+            sample.state == "likely"
+            and (
+                not apply_alert_horizon
+                or (
+                    sample.eta_min is not None
+                    and sample.eta_min <= ALERT_HORIZON
+                )
+            )
+        )
+        if alertable and not active:
             episodes.append(sample)
             active = True
-        elif sample.state != "likely":
+        elif not alertable:
             active = False
         previous = sample
     return episodes
@@ -528,8 +543,11 @@ def score_forecasts(
     openings: list[int],
     up_spans: list[tuple[int, int]],
     label: str,
+    apply_alert_horizon: bool = True,
 ) -> None:
-    episodes = alert_episodes(samples, openings, up_spans)
+    episodes = alert_episodes(
+        samples, openings, up_spans, apply_alert_horizon
+    )
     sample_spans = merge_spans(
         [
             (sample.at, sample.at + 2 * MINUTE)
@@ -550,7 +568,7 @@ def score_forecasts(
                 opening
                 for opening in eligible
                 if opening not in used
-                and episode.at < opening <= episode.at + HORIZON * MINUTE
+                and episode.at < opening <= episode.at + ALERT_HORIZON * MINUTE
             ),
             None,
         )
@@ -571,7 +589,7 @@ def score_forecasts(
         for episode, opening in eta_pairs
     )
     print(
-        f"  {label:<17}{len(episodes):>7}{precision:>9.0%}"
+        f"  {label:<21}{len(episodes):>7}{precision:>9.0%}"
         f"{recall:>9.0%}{false_alerts:>8}",
         end="",
     )
@@ -585,7 +603,10 @@ def score_forecasts(
 
 
 def forecast_section(samples, openings, up_spans) -> None:
-    print("\nFORECAST OUTCOMES  (one decision per alert episode)")
+    print(
+        "\nFORECAST OUTCOMES  "
+        f"(opening within {ALERT_HORIZON} min)"
+    )
     if samples is None:
         print(
             "  no bridge_forecast_samples table — this build predates forecast history"
@@ -595,16 +616,28 @@ def forecast_section(samples, openings, up_spans) -> None:
         print("  forecast sampling is enabled; no samples have accumulated yet")
         return
     print(
-        f"  {'sample':<17}{'alerts':>7}{'precision':>9}{'recall':>9}"
+        f"  {'sample':<21}{'alerts':>7}{'precision':>9}{'recall':>9}"
         f"{'false':>8}{'lead':>9}{'ETA hit':>9}"
     )
     for model in sorted({sample.model for sample in samples}):
         model_samples = [sample for sample in samples if sample.model == model]
-        score_forecasts(model_samples, openings, up_spans, model)
+        score_forecasts(
+            model_samples,
+            openings,
+            up_spans,
+            f"{model} raw",
+            apply_alert_horizon=False,
+        )
+        score_forecasts(
+            model_samples,
+            openings,
+            up_spans,
+            f"{model} <= {ALERT_HORIZON}m",
+        )
         for mode in ("scheduled", "blackout", "on_signal"):
             subset = [sample for sample in model_samples if sample.mode == mode]
             if subset:
-                score_forecasts(subset, openings, up_spans, f"  {mode}")
+                score_forecasts(subset, openings, up_spans, f"  {mode} <= {ALERT_HORIZON}m")
 
 
 def vessel_section(path: Path) -> None:

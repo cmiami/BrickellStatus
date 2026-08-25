@@ -22,7 +22,15 @@ use thiserror::Error;
 /// Bump this when score semantics, feature construction, or shipped weights
 /// change. Durable forecast samples use it to keep unlike models out of the
 /// same calibration bucket.
-pub const BRIDGE_FORECAST_MODEL_VERSION: &str = "brickell-v2";
+pub const BRIDGE_FORECAST_MODEL_VERSION: &str = "brickell-v3";
+
+/// Maximum ETA at which a predictive opening becomes a public alert.
+///
+/// Longer-range vessel motion remains visible as an informational ETA and is
+/// retained in the calibration trace. It must not raise bridge urgency,
+/// activate delivery, or interrupt the e-ink rotation until the near edge of
+/// its opening window reaches this boundary.
+pub const BRIDGE_ALERT_HORIZON_MINUTES: u16 = 30;
 
 /// Learned opening propensity that makes a currently committed hull a known opener.
 ///
@@ -483,24 +491,38 @@ impl BridgePredictor {
         // less severe: the bridge opens for a tug with a tow at any hour. Score
         // the rest of the evidence as if the blackout were not in force, while
         // still reporting the real mode so the explanation stays truthful.
-        let exempt_transit = evidence.iter().any(|item| {
-            if !evidence_is_active(item, now, self.config.decay.upstream) {
-                return false;
+        let exempt_transit = evidence.iter().any(|item| match &item.fact {
+            // The runtime already classifies the live hull for the vessel
+            // list. Carry that same fact into prediction so a tug ETA is
+            // not silently pushed to an ordinary slot.
+            BridgeObservation::AisTrack {
+                movement,
+                route_intersects,
+                schedule_exempt,
+                eta,
+                ..
+            } => {
+                *schedule_exempt
+                    && *movement == VesselMovement::Approaching
+                    && *route_intersects
+                    && eta.is_some()
+                    && evidence_is_active(item, now, self.config.decay.ais)
             }
-            match &item.fact {
-                // Stated: the pilots booked a tug-assisted tow.
-                BridgeObservation::ScheduledTransit { exempt, .. } => *exempt,
-                // Inferred: a bascule went up while the blackout was in force.
-                // Ordinary traffic would have been refused, so whatever moved
-                // was exempt. This inference has to exist because the pilots'
-                // board is only one source of commercial traffic -- plenty of
-                // commercial movements never appear on it, and keying the
-                // exemption solely to that board would miss them.
-                BridgeObservation::OutboundProgress { .. } => {
-                    schedule.mode == BridgeOperatingMode::Blackout
-                }
-                _ => false,
+            // Stated: the pilots booked a tug-assisted tow.
+            BridgeObservation::ScheduledTransit { exempt, .. } => {
+                *exempt && evidence_is_active(item, now, self.config.decay.upstream)
             }
+            // Inferred: a bascule went up while the blackout was in force.
+            // Ordinary traffic would have been refused, so whatever moved
+            // was exempt. This inference has to exist because the pilots'
+            // board is only one source of commercial traffic -- plenty of
+            // commercial movements never appear on it, and keying the
+            // exemption solely to that board would miss them.
+            BridgeObservation::OutboundProgress { .. } => {
+                schedule.mode == BridgeOperatingMode::Blackout
+                    && evidence_is_active(item, now, self.config.decay.upstream)
+            }
+            _ => false,
         });
         let scoring_mode = if exempt_transit && schedule.mode == BridgeOperatingMode::Blackout {
             BridgeOperatingMode::OnSignal
@@ -645,10 +667,18 @@ impl BridgePredictor {
         };
         let predictive_confidence = Confidence::from_score(predictive_score);
 
+        let eta = self.scheduled_eta(
+            best_eta.map(|eta| tighten_eta(eta, upstream_sightings)),
+            now,
+            exempt_transit,
+        )?;
+        let public_predictive_state = alertable_predictive_state(predictive_state, eta);
         let authoritative = authoritative_state(latest_controller);
-        let public_held_by_hysteresis = authoritative.is_none() && held_by_hysteresis;
+        let public_held_by_hysteresis = authoritative.is_none()
+            && public_predictive_state == BridgeState::Likely
+            && held_by_hysteresis;
         let (state, confidence) =
-            authoritative.unwrap_or((predictive_state, predictive_confidence));
+            authoritative.unwrap_or((public_predictive_state, predictive_confidence));
 
         let previous_state = previous.map(|item| item.state);
         let availability = prediction_availability(
@@ -670,11 +700,7 @@ impl BridgePredictor {
             confidence,
             urgency: urgency_for(state),
             availability,
-            eta: self.scheduled_eta(
-                best_eta.map(|eta| tighten_eta(eta, upstream_sightings)),
-                now,
-                exempt_transit,
-            )?,
+            eta,
             schedule,
             contributions,
             transition: PredictionTransition {
@@ -932,7 +958,7 @@ fn schedule_contribution(
             observation_id: None,
             source_id: None,
             kind: EvidenceKind::Schedule,
-            label: "a booked tug-assisted transit is exempt from the traffic blackout".into(),
+            label: "an exempt transit is not bound by the traffic blackout".into(),
             raw_weight: weights.schedule_on_signal,
             reliability_factor: 1.0,
             freshness_factor: 1.0,
@@ -1266,6 +1292,20 @@ fn authoritative_state(
     }
 }
 
+/// Keeps long-range motion as context without turning it into an alert.
+fn alertable_predictive_state(
+    predictive_state: BridgeState,
+    eta: Option<EtaRangeMinutes>,
+) -> BridgeState {
+    match (predictive_state, eta) {
+        (BridgeState::Likely, Some(eta)) if eta.earliest <= BRIDGE_ALERT_HORIZON_MINUTES => {
+            BridgeState::Likely
+        }
+        (BridgeState::Likely, _) => BridgeState::Clear,
+        (state, _) => state,
+    }
+}
+
 fn select_predictive_state(
     score: f32,
     previous: Option<BridgeState>,
@@ -1435,6 +1475,7 @@ mod tests {
                 vessel_name: Some("Test Vessel".into()),
                 movement: VesselMovement::Approaching,
                 route_intersects: true,
+                schedule_exempt: false,
                 eta: Some(EtaRangeMinutes::new(8, 12)),
                 opening_propensity: None,
             },
@@ -1483,6 +1524,7 @@ mod tests {
                 vessel_name: None,
                 movement,
                 route_intersects,
+                schedule_exempt: false,
                 eta,
                 opening_propensity,
             },
@@ -1514,7 +1556,71 @@ mod tests {
         assert_eq!(prediction.predictive_state, BridgeState::Likely);
         assert_eq!(prediction.state, BridgeState::Likely);
         assert!(prediction.predictive_score.as_score() >= 0.58);
-        assert_eq!(prediction.model_version, "brickell-v2");
+        assert_eq!(prediction.model_version, "brickell-v3");
+    }
+
+    fn exempt_transit_at(now: TimestampMillis, minutes: u16) -> BridgeEvidence {
+        evidence(
+            "exempt-transit",
+            "bbpilots.bridge.brickell",
+            now,
+            BridgeObservation::ScheduledTransit {
+                vessel: "Test tow".into(),
+                exempt: true,
+                eta: Some(EtaRangeMinutes::new(minutes, minutes)),
+            },
+        )
+    }
+
+    #[test]
+    fn long_range_prediction_keeps_eta_but_cannot_raise_public_state() {
+        let now = millis("2026-08-15T14:00:00Z");
+        let prediction = BridgePredictor::default()
+            .evaluate(now, &[exempt_transit_at(now, 90)], None)
+            .expect("prediction");
+
+        assert_eq!(prediction.predictive_state, BridgeState::Likely);
+        assert_eq!(prediction.state, BridgeState::Clear);
+        assert_eq!(prediction.urgency, Urgency::Passive);
+        assert_eq!(prediction.eta, Some(EtaRangeMinutes::new(90, 90)));
+    }
+
+    #[test]
+    fn predictive_alert_begins_at_thirty_minutes_not_thirty_one() {
+        let now = millis("2026-08-15T14:00:00Z");
+        let predictor = BridgePredictor::default();
+        let outside = predictor
+            .evaluate(now, &[exempt_transit_at(now, 31)], None)
+            .expect("outside prediction");
+        let boundary = predictor
+            .evaluate(now, &[exempt_transit_at(now, 30)], Some(&outside))
+            .expect("boundary prediction");
+
+        assert_eq!(outside.predictive_state, BridgeState::Likely);
+        assert_eq!(outside.state, BridgeState::Clear);
+        assert_eq!(boundary.predictive_state, BridgeState::Likely);
+        assert_eq!(boundary.state, BridgeState::Likely);
+        assert_eq!(boundary.urgency, Urgency::TimeSensitive);
+        assert!(boundary.transition.changed);
+    }
+
+    #[test]
+    fn authoritative_open_state_bypasses_predictive_alert_horizon() {
+        let now = millis("2026-08-15T14:00:00Z");
+        let controller = evidence(
+            "controller-open",
+            "fl511.bridge.brickell",
+            now,
+            BridgeObservation::Controller {
+                state: BridgeControllerState::Open,
+            },
+        );
+        let prediction = BridgePredictor::default()
+            .evaluate(now, &[exempt_transit_at(now, 90), controller], None)
+            .expect("prediction");
+
+        assert_eq!(prediction.state, BridgeState::Open);
+        assert_eq!(prediction.urgency, Urgency::Critical);
     }
 
     #[test]
@@ -1647,7 +1753,7 @@ mod tests {
                 BridgeObservation::OutboundProgress {
                     bridge: "SW 2 Avenue".into(),
                     stage,
-                    eta: None,
+                    eta: Some(EtaRangeMinutes::new(8, 12)),
                 },
             );
             let prediction = BridgePredictor::default()
@@ -1673,6 +1779,7 @@ mod tests {
             vessel_name: None,
             movement: VesselMovement::Approaching,
             route_intersects: true,
+            schedule_exempt: false,
             eta: Some(EtaRangeMinutes::new(8, 12)),
             opening_propensity: None,
         };
@@ -1699,6 +1806,7 @@ mod tests {
                 vessel_name: None,
                 movement: VesselMovement::Diverging,
                 route_intersects: false,
+                schedule_exempt: false,
                 eta: None,
                 opening_propensity: None,
             },
@@ -1735,6 +1843,7 @@ mod tests {
                 vessel_name: Some("Test Vessel".into()),
                 movement: VesselMovement::Approaching,
                 route_intersects: true,
+                schedule_exempt: false,
                 eta: Some(EtaRangeMinutes::new(8, 12)),
                 opening_propensity: None,
             },
@@ -1841,6 +1950,7 @@ mod tests {
                 vessel_name: None,
                 movement: VesselMovement::Approaching,
                 route_intersects: true,
+                schedule_exempt: false,
                 eta: Some(EtaRangeMinutes::new(8, 10)),
                 opening_propensity: Some(Confidence::CERTAIN),
             },
@@ -1870,6 +1980,7 @@ mod tests {
                 vessel_name: None,
                 movement: VesselMovement::Approaching,
                 route_intersects: true,
+                schedule_exempt: false,
                 eta: Some(EtaRangeMinutes::new(8, 10)),
                 opening_propensity: Some(Confidence::from_basis_points(5_999)),
             },
@@ -1901,6 +2012,7 @@ mod tests {
                 vessel_name: None,
                 movement: VesselMovement::Approaching,
                 route_intersects: true,
+                schedule_exempt: false,
                 eta: Some(EtaRangeMinutes::new(8, 10)),
                 opening_propensity: Some(Confidence::CERTAIN),
             },
@@ -2087,6 +2199,36 @@ mod tests {
             schedule_label(&ordinary)
         );
         assert!(exempt.confidence.basis_points > ordinary.confidence.basis_points);
+    }
+
+    #[test]
+    fn live_exempt_tug_keeps_its_eta_and_can_alert_during_blackout() {
+        let now = blackout_now();
+        let mut tug = live_ais(
+            "pepin-inbound",
+            "367705830",
+            now,
+            VesselMovement::Approaching,
+            true,
+            Some(EtaRangeMinutes::new(8, 14)),
+            Some(Confidence::from_basis_points(8_333)),
+        );
+        let BridgeObservation::AisTrack {
+            schedule_exempt, ..
+        } = &mut tug.fact
+        else {
+            unreachable!("live_ais always builds AIS evidence");
+        };
+        *schedule_exempt = true;
+
+        let prediction = BridgePredictor::default()
+            .evaluate(now, &[tug], None)
+            .expect("prediction");
+
+        assert_eq!(prediction.schedule.mode, BridgeOperatingMode::Blackout);
+        assert_eq!(prediction.predictive_state, BridgeState::Likely);
+        assert_eq!(prediction.state, BridgeState::Likely);
+        assert_eq!(prediction.eta, Some(EtaRangeMinutes::new(8, 14)));
     }
 
     #[test]
