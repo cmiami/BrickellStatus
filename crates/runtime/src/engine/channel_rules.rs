@@ -2010,10 +2010,6 @@ const MAX_AIS_STATUS_VESSELS: usize = 512;
 const MAX_MAP_VESSEL_TRACKS: usize = 64;
 const MAX_MAP_TRACK_POINTS: usize = 121;
 const MAP_TRACK_RETENTION_MS: i64 = 60 * 60 * 1_000;
-/// Current surface claim. This is deliberately lower than far-channel
-/// forecast pre-arming: once a vessel has a committed ETA, one confirmed
-/// opening is enough to tell the user it is likely to need the span again.
-const LIKELY_TO_OPEN_BRICKELL_BPS: u16 = 6_000;
 
 fn source_health(
     preferences: &AppPreferences,
@@ -2155,22 +2151,55 @@ fn vessel_tracks(state: &PersistedRuntimeState, now_ms: i64) -> Vec<VesselTrackS
     let schedule = BrickellSchedule::new().ok();
     tracks
         .into_iter()
-        .map(|(_, mut track)| {
+        .map(|(observed_ms, mut track)| {
             // The collector knows where a hull is; only the ledger knows
             // whether that hull has ever needed the span raised. Joining here
             // keeps the learned history on one side of the boundary and the
             // live positions on the other.
             track.opening_propensity = state.ais_propensities.get(&track.mmsi).copied();
             track.schedule_exempt = schedule_exempt(track.vessel_class.as_deref());
+            let learned_opener = track
+                .opening_propensity
+                .is_some_and(|score| score >= KNOWN_OPENER_LIKELY_BPS);
+            let known_opener_committed = learned_opener
+                && track.movement == VesselMovementDto::Approaching
+                && matches!(
+                    track.posture.as_deref(),
+                    Some("underway" | "waiting" | "holding")
+                );
+            if known_opener_committed {
+                track.route_intersects = true;
+                if track.eta_min_minutes.is_none()
+                    && let Some(eta) = track
+                        .s_meters
+                        .map(f64::abs)
+                        .and_then(|distance| {
+                            known_opener_eta_from_motion(distance, track.speed_knots)
+                        })
+                {
+                    track.eta_min_minutes = Some(eta.earliest);
+                    track.eta_max_minutes = Some(eta.latest);
+                }
+            }
             if let Some(schedule) = schedule.as_ref() {
                 annotate_predicted_opening(&mut track, schedule, now_ms);
             }
-            let opening_evidence = track
-                .opening_propensity
-                .is_some_and(|score| score >= LIKELY_TO_OPEN_BRICKELL_BPS)
+            let opening_evidence = learned_opener
                 || track.vessel_class.as_deref() == Some("sailing");
-            track.likely_to_open_brickell =
-                opening_evidence && track.predicted_opening_at.is_some();
+            let committed_tight_approach = track.movement == VesselMovementDto::Approaching
+                && track.route_intersects
+                && observed_ms
+                    >= now_ms.saturating_sub(
+                        i64::try_from(AIS_TRACK_RETENTION_SECONDS)
+                            .unwrap_or(i64::MAX)
+                            .saturating_mul(1_000),
+                    )
+                && track
+                    .eta_min_minutes
+                    .is_some_and(|minutes| minutes <= KNOWN_OPENER_LIKELY_ETA_MINUTES);
+            track.likely_to_open_brickell = opening_evidence
+                && committed_tight_approach
+                && track.predicted_opening_at.is_some();
             track
         })
         .collect()

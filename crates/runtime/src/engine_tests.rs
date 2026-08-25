@@ -373,7 +373,7 @@ fn a_known_opener_prearms_only_while_approaching_in_the_corridor() {
     item.attributes
         .insert("route_intersects".into(), json!(false));
     item.attributes.insert("posture".into(), json!("underway"));
-    let known = BTreeMap::from([("367719770".to_string(), 7_000_u16)]);
+    let known = BTreeMap::from([("367719770".to_string(), 6_667_u16)]);
     let route_intersects = |item: &CollectorItem, propensities: &BTreeMap<String, u16>| {
         let Some(BridgeObservation::AisTrack {
             route_intersects, ..
@@ -388,9 +388,9 @@ fn a_known_opener_prearms_only_while_approaching_in_the_corridor() {
     assert!(
         !route_intersects(
             &item,
-            &BTreeMap::from([("367719770".to_string(), 6_667_u16)])
+            &BTreeMap::from([("367719770".to_string(), 5_000_u16)])
         ),
-        "one Beta-smoothed open crossing may be a hitchhiker and must keep the raw route result"
+        "a hull below the shared known-opener boundary must keep the raw route result"
     );
     item.attributes
         .insert("posture".into(), json!("off_channel"));
@@ -411,7 +411,7 @@ fn a_known_opener_prearm_gets_an_eta_only_from_live_corridor_motion() {
     item.attributes.insert("sog_knots".into(), json!(6.0));
     item.attributes.remove("eta_min_minutes");
     item.attributes.remove("eta_max_minutes");
-    let known = BTreeMap::from([("367719770".to_string(), 7_000_u16)]);
+    let known = BTreeMap::from([("367719770".to_string(), 6_667_u16)]);
 
     let eta = |item: &CollectorItem, propensities: &BTreeMap<String, u16>| {
         let Some(BridgeObservation::AisTrack {
@@ -432,7 +432,7 @@ fn a_known_opener_prearm_gets_an_eta_only_from_live_corridor_motion() {
     assert_eq!(
         eta(
             &item,
-            &BTreeMap::from([("367719770".to_string(), 6_667_u16)])
+            &BTreeMap::from([("367719770".to_string(), 5_000_u16)])
         ),
         (false, None)
     );
@@ -931,7 +931,10 @@ async fn known_opener_history_and_current_opening_likelihood_are_independent() {
             mmsi, name, vessel_class, transits_opened, first_seen_ms, last_seen_ms
         ) VALUES
             ('367000101', 'PAST OPENER', 'yacht', 1, ?1, ?1),
-            ('367000102', 'RETURNING OPENER', 'yacht', 1, ?1, ?1)
+            ('367000102', 'RETURNING OPENER', 'yacht', 1, ?1, ?1),
+            ('367000105', 'FAR OPENER', 'yacht', 1, ?1, ?1),
+            ('367000106', 'STALE OPENER', 'yacht', 1, ?1, ?1),
+            ('367000107', 'PREARMED OPENER', 'yacht', 1, ?1, ?1)
         "#,
     )
     .bind(now_ms - 86_400_000)
@@ -940,14 +943,15 @@ async fn known_opener_history_and_current_opening_likelihood_are_independent() {
     .unwrap();
 
     let observed_at = iso_timestamp(now_ms).unwrap();
-    let track = |mmsi: &str, movement: &str, vessel_class: &str, eta: Option<u16>| {
+    let stale_at = iso_timestamp(now_ms - 7 * 60_000).unwrap();
+    let track = |mmsi: &str, movement: &str, vessel_class: &str, eta: Option<u16>, at: &str| {
         serde_json::from_value::<VesselTrackSnapshot>(json!({
             "mmsi": mmsi,
             "movement": movement,
             "routeIntersects": true,
             "speedKnots": 5.0,
             "courseDegrees": 270.0,
-            "observedAt": observed_at,
+            "observedAt": at,
             "vesselClass": vessel_class,
             "posture": "underway",
             "etaMinMinutes": eta,
@@ -955,16 +959,22 @@ async fn known_opener_history_and_current_opening_likelihood_are_independent() {
             "points": [{
                 "latitude": 25.76975,
                 "longitude": -80.185,
-                "observedAt": observed_at
+                "observedAt": at
             }]
         }))
         .unwrap()
     };
+    let mut prearmed = track("367000107", "approaching", "yacht", None, &observed_at);
+    prearmed.route_intersects = false;
+    prearmed.s_meters = Some(-1_200.0);
     let tracks = vec![
-        track("367000101", "diverging", "yacht", None),
-        track("367000102", "approaching", "yacht", Some(8)),
-        track("367000103", "approaching", "sailing", Some(8)),
-        track("367000104", "approaching", "yacht", Some(8)),
+        track("367000101", "diverging", "yacht", None, &observed_at),
+        track("367000102", "approaching", "yacht", Some(8), &observed_at),
+        track("367000103", "approaching", "sailing", Some(8), &observed_at),
+        track("367000104", "approaching", "yacht", Some(8), &observed_at),
+        track("367000105", "approaching", "yacht", Some(21), &observed_at),
+        track("367000106", "approaching", "yacht", Some(8), &stale_at),
+        prearmed,
     ];
 
     let mut source = SourceState::empty("bridge.brickell");
@@ -1003,6 +1013,9 @@ async fn known_opener_history_and_current_opening_likelihood_are_independent() {
             ("367000102".into(), (true, true)),
             ("367000103".into(), (false, true)),
             ("367000104".into(), (false, false)),
+            ("367000105".into(), (true, false)),
+            ("367000106".into(), (true, false)),
+            ("367000107".into(), (true, true)),
         ])
     );
 }
@@ -1184,6 +1197,109 @@ fn predictive_bridge_signal_remains_active_without_resolution_coverage() {
     assert!(
         !bridge.coverage_complete,
         "AIS cannot establish restoration"
+    );
+}
+
+#[test]
+fn passed_known_opener_and_confirmed_close_remove_the_live_signal() {
+    let now_ms = "2026-08-15T03:10:00Z"
+        .parse::<Timestamp>()
+        .unwrap()
+        .as_millisecond();
+    let make_ais = |id: &str, at: i64, movement, route_intersects, eta| BridgeEvidence {
+        observation_id: ObservationId::from(id),
+        source_id: SourceId::from("aisstream.bridge.brickell"),
+        observed_at: TimestampMillis(at),
+        expires_at: None,
+        availability: AvailabilityStatus::Live,
+        reliability: Confidence::from_basis_points(8_500),
+        fact: BridgeObservation::AisTrack {
+            mmsi: Some("367705830".into()),
+            vessel_name: Some("PEPIN".into()),
+            movement,
+            route_intersects,
+            eta,
+            opening_propensity: Some(Confidence::from_basis_points(8_333)),
+        },
+    };
+    let predictor = BridgePredictor::default();
+    let inbound = make_ais(
+        "pepin-inbound",
+        now_ms,
+        VesselMovement::Approaching,
+        true,
+        Some(EtaRangeMinutes::new(7, 14)),
+    );
+    let likely = predictor
+        .evaluate(TimestampMillis(now_ms), &[inbound], None)
+        .unwrap();
+    assert_eq!(likely.state, BridgeState::Likely);
+
+    let later_ms = now_ms + 10 * 60_000;
+    let passed = make_ais(
+        "pepin-passed",
+        later_ms,
+        VesselMovement::Diverging,
+        false,
+        None,
+    );
+    let closed = BridgeEvidence {
+        observation_id: ObservationId::from("controller-closed"),
+        source_id: SourceId::from("fl511.bridge.brickell"),
+        observed_at: TimestampMillis(later_ms),
+        expires_at: None,
+        availability: AvailabilityStatus::Live,
+        reliability: Confidence::from_basis_points(9_900),
+        fact: BridgeObservation::Controller {
+            state: BridgeControllerState::Closed,
+        },
+    };
+    let cleared = predictor
+        .evaluate(TimestampMillis(later_ms), &[passed, closed], Some(&likely))
+        .unwrap();
+    let decision = decision_snapshot(&cleared, "America/New_York").unwrap();
+
+    let preferences = AppPreferences::default();
+    let mut ais_item = ais_bridge_item();
+    ais_item
+        .attributes
+        .insert("movement".into(), json!("diverging"));
+    ais_item
+        .attributes
+        .insert("route_intersects".into(), json!(false));
+    ais_item.attributes.remove("eta_min_minutes");
+    ais_item.attributes.remove("eta_max_minutes");
+    let state = PersistedRuntimeState {
+        active_sources: BTreeMap::from([
+            ("fl511.bridge.brickell".into(), "bridge.brickell".into()),
+            ("aisstream.bridge.brickell".into(), "bridge.brickell".into()),
+        ]),
+        sources: BTreeMap::from([
+            (
+                "fl511.bridge.brickell".into(),
+                healthy_source_state(
+                    "bridge.brickell",
+                    bridge_item("253", "Brickell Avenue Bridge", "target", "down"),
+                    later_ms,
+                ),
+            ),
+            (
+                "aisstream.bridge.brickell".into(),
+                healthy_source_state("bridge.brickell", ais_item, later_ms),
+            ),
+        ]),
+        ..PersistedRuntimeState::default()
+    };
+    let channels = channel_snapshots(&preferences, &state, &decision, later_ms);
+    let bridge = channels
+        .iter()
+        .find(|channel| channel.id == "bridge.brickell")
+        .unwrap();
+
+    assert_eq!(decision.state, BridgeStateDto::Clear);
+    assert!(
+        !bridge.active,
+        "Live and e-ink membership consume this flag"
     );
 }
 

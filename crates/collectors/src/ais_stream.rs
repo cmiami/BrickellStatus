@@ -57,6 +57,8 @@ const MAX_REPORT_FUTURE_SKEW_SECONDS: i64 = 30;
 const MIN_API_KEY_CHARS: usize = 8;
 const MAX_API_KEY_CHARS: usize = 512;
 const MAX_PENDING_CROSSINGS: usize = 32;
+/// How long a last position remains a current predictive claim.
+pub const AIS_TRACK_RETENTION_SECONDS: u64 = 6 * 60;
 /// A sparse Class B stream can legitimately go several minutes between fixes.
 /// Keep the last position long enough to join a report on the other side of
 /// the span without keeping that stale vessel on the live surface.
@@ -342,7 +344,7 @@ impl AisStreamConfig {
             // Twice the three-minute Class B interval, so a queued vessel
             // survives a missed report rather than vanishing between them.
             max_report_age: Duration::from_secs(6 * 60),
-            track_retention: Duration::from_secs(6 * 60),
+            track_retention: Duration::from_secs(AIS_TRACK_RETENTION_SECONDS),
             crossing_baseline_retention: Duration::from_secs(CROSSING_BASELINE_RETENTION_SECONDS),
             history_retention: Duration::from_secs(60 * 60),
             idle_timeout: Duration::from_secs(90),

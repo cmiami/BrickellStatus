@@ -17,14 +17,15 @@ use crate::{
     EvidenceStrip, KnownOpenerDto, LocationSearchError, LocationSearchResult,
     LocationSearchService, MutationResult, ObservedBridgeStateDto, OutputSnapshot, OutputStateDto,
     PreferencesError, RiverCorridorBranchDto, RiverCorridorDto, RiverStationDto, SourceHealth,
-    SystemHealth, SystemStatusDto, UnitSystem, UrgencyDto, VesselDetailDto, VesselTrackSnapshot,
-    WhatsAppRecipientConsent, validate_preferences, whatsapp_consent_is_current,
+    SystemHealth, SystemStatusDto, UnitSystem, UrgencyDto, VesselDetailDto, VesselMovementDto,
+    VesselTrackSnapshot, WhatsAppRecipientConsent, validate_preferences,
+    whatsapp_consent_is_current,
 };
 use brickellstatus_collectors::{
-    AIS_CROSSINGS_CURSOR_KEY, AIS_VESSEL_CATALOG_CURSOR_KEY, AIS_VESSEL_TRACKS_CURSOR_KEY,
-    AisCrossing, AisVesselCatalogEntry, BRIDGE_LATITUDE, BRIDGE_LONGITUDE, CollectContext,
-    Collector, CollectorBatch, CollectorCursor, CollectorError, CollectorItem, HealthState,
-    ItemKind, corridor_geometry, project,
+    AIS_CROSSINGS_CURSOR_KEY, AIS_TRACK_RETENTION_SECONDS, AIS_VESSEL_CATALOG_CURSOR_KEY,
+    AIS_VESSEL_TRACKS_CURSOR_KEY, AisCrossing, AisVesselCatalogEntry, BRIDGE_LATITUDE,
+    BRIDGE_LONGITUDE, CollectContext, Collector, CollectorBatch, CollectorCursor, CollectorError,
+    CollectorItem, HealthState, ItemKind, corridor_geometry, project,
 };
 use brickellstatus_model::{
     Availability, AvailabilityStatus, BridgeControllerState, BridgeObservation,
@@ -33,7 +34,7 @@ use brickellstatus_model::{
 };
 use brickellstatus_policy::{
     BrickellSchedule, BridgeEvidence, BridgePrediction, BridgePredictor, ContributionDisposition,
-    EvidenceKind, PredictionError,
+    EvidenceKind, KNOWN_OPENER_LIKELY_BPS, KNOWN_OPENER_LIKELY_ETA_MINUTES, PredictionError,
 };
 use brickellstatus_storage::{
     AisCrossingObservation, AisCrossingRecord, AisLedgerEntry, AisTrackFix, AisVesselObservation,
@@ -58,10 +59,6 @@ const LIVE_STATE_KEY: &str = "runtime.live_state";
 const FORECAST_TARGET_KEY: &str = "brickell";
 const FORECAST_MATERIAL_STEP_BPS: i64 = 250;
 const RECENT_VESSEL_CROSSINGS: u32 = 24;
-/// Far-channel commitment needs more than one matched opening. A single open
-/// crossing is Beta(1,1)-smoothed to 6,667 bps and may only be a hitchhiker;
-/// 7,000 therefore reserves pre-arming for repeated all-open outcomes.
-const KNOWN_OPENER_PREARM_BPS: u16 = 7_000;
 const KNOTS_TO_METERS_PER_SECOND: f64 = 0.514_444;
 /// Closest two kept fixes of one vessel may sit. Hulls do not move enough in
 /// half a minute to be worth a second row, and the spacing is what keeps a
@@ -2166,7 +2163,7 @@ fn bridge_fact(
             // deep-draft vessel keeps the collector's conservative result.
             let known_opener_committed = movement == VesselMovement::Approaching
                 && learned_propensity
-                    .is_some_and(|value| value.basis_points >= KNOWN_OPENER_PREARM_BPS)
+                    .is_some_and(|value| value.basis_points >= KNOWN_OPENER_LIKELY_BPS)
                 && matches!(
                     item.attributes.get("posture").and_then(Value::as_str),
                     Some("underway" | "waiting" | "holding")
@@ -2202,6 +2199,10 @@ fn bridge_fact(
 fn known_opener_prearm_eta(item: &CollectorItem) -> Option<EtaRangeMinutes> {
     let distance_meters = item.attributes.get("distance_meters")?.as_f64()?;
     let speed_knots = item.attributes.get("sog_knots")?.as_f64()?;
+    known_opener_eta_from_motion(distance_meters, speed_knots)
+}
+
+fn known_opener_eta_from_motion(distance_meters: f64, speed_knots: f64) -> Option<EtaRangeMinutes> {
     if !distance_meters.is_finite() || !speed_knots.is_finite() || distance_meters <= 50.0 {
         return None;
     }
