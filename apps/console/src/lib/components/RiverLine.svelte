@@ -1553,6 +1553,50 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     }
   }
 
+  /* After the 1180px rules so these win. The schematic is a fixed 1320x640
+     projection and the SVG fits whatever box it is given, which is what the
+     desktop layout already relies on. The rules above trade that away for
+     detail at tablet width by pinning the plot to 1120px and letting it scroll.
+     That trade is right on a tablet and wrong on a phone: 1120px inside a
+     ~410px screen is a third of the corridor at a time, so the span, the
+     traffic coming to it, and the mouth cannot be read in one look -- which is
+     the entire question this surface answers. A phone gets the corridor whole.
+
+     Wide drawing shown whole means a short box: the alternative is a taller one
+     with the corridor letterboxed inside it, which buys dead paper rather than
+     legibility. */
+  @media (max-width: 720px) {
+    .schematic-scroll {
+      /* The drawing's own proportions, so the box holds the corridor and not a
+         band of empty paper above and below it. */
+      aspect-ratio: 1320 / 640;
+      height: auto;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .schematic-plot {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      min-width: 0;
+      height: 100%;
+    }
+
+    /* Nothing to pan once the whole corridor is in the box. */
+    .map-pan-controls {
+      display: none;
+    }
+
+    /* Callouts are authored at a fixed 8-15px inside a 1320px space, so at the
+       width a phone can give them they land at three or four pixels: present,
+       unreadable, and covering the vessels they name. The manifest below the
+       map lists every one of them at a size meant to be read. */
+    .vessel-callout {
+      display: none;
+    }
+  }
+
   @media (max-width: 560px) {
     .manifest li > button {
       grid-template-columns: 26px 46px minmax(0, 1fr);
