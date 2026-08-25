@@ -3446,42 +3446,60 @@ async fn run_display_worker(
 
 /// One line of standing status for the Android watch notification.
 ///
-/// Picks the channel the engine already ranked highest rather than deriving a
-/// second opinion here: `priority.score` exists so the panel, the alerts and
-/// this agree on what matters most right now.
-#[cfg(target_os = "android")]
+/// Leads with the decision and keeps the engine's ranking for everything after
+/// it: `priority.score` still decides which of the other channels is worth the
+/// remaining room, so the panel, the alerts, and this line agree on that much.
+/// What it no longer does is let that ranking choose the subject.
+///
+/// Only Android publishes this, but the copy is pure and the tests read it on
+/// every platform -- the same arrangement `clean_menu_text` has for the tray.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn watch_status_copy(snapshot: &AppSnapshot) -> (String, String) {
-    let leading = snapshot
+    // A backgrounded phone has only this line, and the question it exists to
+    // answer is the span's. Ranking every channel by score put whichever
+    // unrelated headline happened to score highest that minute where the bridge
+    // state belongs -- a Hacker News story, in the case that found this. The
+    // decision leads and is always present, so there is no "nothing to report"
+    // branch to fall into; the loudest other channel still rides along in the
+    // body, because rain eight minutes out is worth carrying and is not worth
+    // displacing the span to say.
+    let decision = &snapshot.decision;
+    let title = format!("{} · {}", decision.subject, decision.state_label);
+
+    let mut body = decision.meaning.clone();
+    if let Some(eta) = watch_eta_phrase(decision.eta_min, decision.eta_max) {
+        body.push(' ');
+        body.push_str(&eta);
+    }
+    body.push(' ');
+    body.push_str(&decision.action);
+
+    if let Some(headline) = snapshot
         .channels
         .iter()
-        .filter(|channel| channel.enabled && channel.active)
-        .max_by_key(|channel| channel.priority.score);
-    match leading {
-        Some(channel) => {
-            let title = channel
-                .signal
-                .as_ref()
-                .map_or_else(|| channel.title.clone(), |signal| signal.headline.clone());
-            (
-                bounded_text(&title, 96),
-                bounded_text(&channel.summary, 240),
-            )
+        .filter(|channel| {
+            channel.enabled && channel.active && channel.kind != ChannelKindDto::Bridge
+        })
+        .max_by_key(|channel| channel.priority.score)
+        .and_then(|channel| channel.signal.as_ref())
+    {
+        body.push_str(" · ");
+        body.push_str(&headline.headline);
+    }
+
+    (bounded_text(&title, 96), bounded_text(&body, 240))
+}
+
+/// The decision's own ETA, phrased for one line. A single-minute range is one
+/// number: "6-6 min" reads as a fault rather than as precision.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn watch_eta_phrase(earliest: Option<u16>, latest: Option<u16>) -> Option<String> {
+    match (earliest, latest) {
+        (Some(earliest), Some(latest)) if earliest != latest => {
+            Some(format!("ETA {earliest}-{latest} min."))
         }
-        None => {
-            let watching = snapshot
-                .channels
-                .iter()
-                .filter(|channel| channel.enabled)
-                .count();
-            (
-                "Nothing needs your attention".to_owned(),
-                match watching {
-                    0 => "No channels are enabled.".to_owned(),
-                    1 => "Watching 1 channel.".to_owned(),
-                    count => format!("Watching {count} channels."),
-                },
-            )
-        }
+        (Some(minutes), _) | (None, Some(minutes)) => Some(format!("ETA {minutes} min.")),
+        (None, None) => None,
     }
 }
 

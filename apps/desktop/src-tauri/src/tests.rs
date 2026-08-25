@@ -2871,3 +2871,48 @@ mod radar {
         assert!(json.get("attribution").is_some());
     }
 }
+
+#[tokio::test]
+async fn watch_notification_leads_with_the_span_not_the_loudest_headline() {
+    let engine = RuntimeEngine::new(Store::in_memory().await.unwrap(), RuntimeConfig::default())
+        .await
+        .unwrap();
+    let mut snapshot = engine.get_snapshot().await.unwrap();
+
+    // The span reads "Road open" most of the day, so an unrelated channel
+    // outscoring it is the ordinary case rather than a corner. Ranking every
+    // channel by score therefore handed the title -- the single line a
+    // backgrounded phone gets -- to whatever headline was loudest that minute.
+    let index = snapshot
+        .channels
+        .iter()
+        .position(|channel| channel.kind == ChannelKindDto::News)
+        .unwrap();
+    snapshot.channels[index].enabled = true;
+    snapshot.channels[index].active = true;
+    snapshot.channels[index].priority.score = 9_000;
+    snapshot.channels[index].signal = Some(brickellstatus_runtime::ChannelSignalDto {
+        headline: "An unrelated story that outscores a quiet bridge".into(),
+        detail: "Fixture news detail".into(),
+        action: "Read it whenever.".into(),
+        severity: None,
+        expires_at: None,
+        band: None,
+        imminence_minutes: None,
+        series: Vec::new(),
+        previous_close: None,
+    });
+
+    let (title, body) = watch_status_copy(&snapshot);
+
+    assert!(title.contains(&snapshot.decision.subject), "{title}");
+    assert!(title.contains(&snapshot.decision.state_label), "{title}");
+    assert!(
+        !title.contains("unrelated story"),
+        "the span owns the title: {title}"
+    );
+    // Carrying the decision must not cost the alert; dropping it would trade
+    // one silent failure for another.
+    assert!(body.contains("unrelated story"), "{body}");
+    assert!(body.contains(&snapshot.decision.meaning), "{body}");
+}
