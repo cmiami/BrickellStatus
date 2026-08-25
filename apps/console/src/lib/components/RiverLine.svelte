@@ -96,9 +96,18 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     return target?.bridgeKey ? (bridgeStates.get(target.bridgeKey) ?? 'unknown') : 'unknown';
   });
   const liveVesselTracks = $derived(currentVesselTracks(vesselTracks, generatedAt));
-  const corridorVesselTracks = $derived(
-    liveVesselTracks.filter((track) => isRelevantBridgeVessel(track, targetBridgeState === 'up'))
-  );
+  // One hull is one row. Both the schematic and the manifest key on the MMSI,
+  // and a repeated key aborts the render of the entire live page rather than
+  // drawing one vessel twice, so uniqueness is enforced where the set is
+  // chosen instead of being assumed at each of the three places that key on it.
+  const corridorVesselTracks = $derived.by(() => {
+    const byMmsi = new Map<string, VesselTrack>();
+    for (const track of liveVesselTracks) {
+      if (!isRelevantBridgeVessel(track, targetBridgeState === 'up')) continue;
+      if (!byMmsi.has(track.mmsi)) byMmsi.set(track.mmsi, track);
+    }
+    return [...byMmsi.values()];
+  });
   const schematic = $derived(riverSchematic(corridor, corridorVesselTracks, bridgeStates));
   const targetState = $derived(schematic.target?.state ?? 'unknown');
   const visibleStations = $derived(

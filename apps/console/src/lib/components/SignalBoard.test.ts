@@ -262,3 +262,28 @@ describe('SignalBoard', () => {
     expect(queryByText('Earlier rain passed')).toBeNull();
   });
 });
+
+describe('SignalBoard duplicate notices', () => {
+  // An alert reaching one channel through two overlapping area collectors used
+  // to arrive as two notices carrying the same key. A keyed each block treats
+  // that as a fatal error, so the live page rendered nothing at all -- the
+  // loading skeleton simply stayed up. One event is one row.
+  it('collapses two notices that share a key instead of failing the render', () => {
+    const alert = {
+      key: 'notice:duplicate-alert',
+      signal: { headline: 'Coastal flood advisory', detail: 'Through 8 PM.', action: 'Review' },
+      priority: { score: 620, urgency: 'action', confirmed: true } as ChannelPriority
+    };
+    const official = {
+      ...channel('official.nws', 'official', 'Coastal flood advisory', { score: 620 }),
+      notices: [alert, { ...alert }]
+    } as ChannelSnapshot;
+
+    const { getAllByText } = render(SignalBoard, {
+      generatedAt: GENERATED_AT,
+      channels: [official]
+    });
+
+    expect(getAllByText('Coastal flood advisory')).toHaveLength(1);
+  });
+});

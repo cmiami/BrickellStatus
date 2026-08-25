@@ -69,11 +69,29 @@
       })
       .filter((notice) => isCurrent(notice.signal));
 
-    return notices.toSorted((left, right) =>
+    const ranked = notices.toSorted((left, right) =>
       right.priority.score - left.priority.score ||
       left.channel.id.localeCompare(right.channel.id)
     );
+
+    // The rail below is keyed, and a keyed list is not merely untidy when two
+    // rows share a key -- Svelte aborts the render, which takes the decision,
+    // the river, and this rail off the screen together and leaves the loading
+    // skeleton standing with nothing to say why. The engine collapses an alert
+    // that reached one channel through two area collectors, so this is the
+    // second line of defence; it exists because the cost of a duplicate here
+    // is the whole page rather than one wrong row.
+    const unique = new Map<string, CurrentNotice>();
+    for (const notice of ranked) {
+      const key = noticeKey(notice);
+      if (!unique.has(key)) unique.set(key, notice);
+    }
+    return [...unique.values()];
   });
+
+  function noticeKey(notice: CurrentNotice): string {
+    return `${notice.channel.id}:${notice.key}`;
+  }
 
   const iconFor = (kind: ChannelSnapshot['kind']) => {
     if (kind === 'weather') return CloudRain;
@@ -166,7 +184,7 @@
       role="region"
       aria-label="Active alerts, horizontally scrollable"
     >
-      {#each current as notice, index (`${notice.channel.id}:${notice.key}`)}
+      {#each current as notice, index (noticeKey(notice))}
         {@const Icon = iconFor(notice.channel.kind)}
         {@const onPanel = isOnPanel(notice)}
         {@const external = hasExternalSource(notice)}

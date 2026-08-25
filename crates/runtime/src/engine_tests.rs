@@ -4116,3 +4116,48 @@ fn no_channel_ever_prints_the_rule_that_produced_it() {
         }
     }
 }
+
+#[test]
+fn one_alert_reaching_two_area_collectors_publishes_one_notice() {
+    let now_ms = 1_786_741_200_000;
+    let preferences = AppPreferences::default();
+    let channel = &preferences.profile.channels[2];
+
+    // An Official channel registers one NWS collector per watched area, and an
+    // alert is issued for a zone rather than for the point a collector polls.
+    // Two nearby areas therefore return the identical alert, and the channel
+    // flattens its collectors into a single item list before notices are cut.
+    // Every notice identity is derived from the item id, so the second copy
+    // arrived carrying a key the first had already used -- and the console
+    // keys its alert rail on exactly that, where a repeat is fatal rather than
+    // untidy: the whole live page stopped rendering and left the loading
+    // skeleton up with nothing on screen to explain it.
+    let alert = official_alert_item(
+        "nws:FLC086-coastal-flood",
+        "Alert",
+        "Actual",
+        Some(now_ms + 60 * 60_000),
+    );
+    let same_alert_from_second_area = alert.clone();
+
+    let notices = channel_notices(
+        ChannelKindDto::Official,
+        channel,
+        &[&alert, &same_alert_from_second_area],
+        now_ms,
+        UnitSystem::Imperial,
+        &clear_decision(),
+        false,
+    );
+
+    assert_eq!(notices.len(), 1, "one alert reported twice is one event");
+
+    let mut keys = notices
+        .iter()
+        .map(|notice| notice.key.as_str())
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    let published = keys.len();
+    keys.dedup();
+    assert_eq!(keys.len(), published, "notice keys must stay unique");
+}

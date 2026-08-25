@@ -633,6 +633,15 @@ fn matching_channel_items<'a>(
             .then_with(|| item_time_ms(right).cmp(&item_time_ms(left)))
             .then_with(|| left.id.cmp(&right.id))
     });
+    // One channel can hold several collectors, and an alert is not confined to
+    // the point a collector watches: NWS zones overlap, so two nearby areas
+    // return the identical alert id. That is one event reported twice, not two
+    // events. Keep the highest-ranked copy, ahead of the limit so duplicates
+    // cannot spend slots a distinct alert needed, and because every identity
+    // downstream is derived from the item id -- `channel_notice_key` hashes it,
+    // so a second copy is a second notice carrying the same key.
+    let mut seen = BTreeSet::new();
+    matching.retain(|item| seen.insert(item.id.clone()));
     matching.truncate(crate::preferences::AUTOMATIC_ITEM_LIMIT);
     matching
 }
