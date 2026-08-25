@@ -39,7 +39,7 @@ This is a user-programmable signal instrument, not a feed firehose or binary bri
 - Provides guided BLE/USB discovery, direct GATT connection, connection state, and physical `ACK INK1` proof. Closing the configuration window leaves the service running in the platform tray/menu bar until the user explicitly quits.
 - Provides an optional AISStream WebSocket source with an operating-system-vault API key, a bridge-target-derived 2–30 km coverage radius, and explicit parked/missing-key/armed/live/degraded health. When enabled, only the backend sends that derived bounding box and key to AISStream over WSS; the UI never connects browser-side or samples location passively.
 - Provides first-class configurable channels for the bridge predictor, local weather, official life-safety alerts, hurricane changes, news/RSS, and market watch items; additional channels join through the same typed interface.
-- Every relevant item becomes one current notice and one display slide until its typed expiry or resolution. Imminent, high-confidence events rank first and may interrupt once; continuing relevance never creates a repeat count.
+- Every relevant item becomes one current notice and one display slide until its typed expiry or resolution. New and materially changed alerts interrupt immediately. Active bridge and rain warnings retain e-paper priority until they resolve; other continuing notices do not create repeat interruptions.
 - User-authored policy stays structured and inspectable; arbitrary remote code is not required for ordinary configuration.
 - Does not depend on UHF hardware.
 - Camera and road-traffic detection are explicitly late confirmation sources, not the predictive foundation.

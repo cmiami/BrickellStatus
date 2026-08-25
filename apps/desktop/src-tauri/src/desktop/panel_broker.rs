@@ -26,6 +26,13 @@ use std::collections::BinaryHeap;
 /// Longest an alert keeps the panel before rotation resumes.
 const ALERT_HOLD: Duration = Duration::from_secs(45);
 
+/// How often a still-current bridge or rain warning earns the interrupt lane.
+///
+/// This is deliberately shorter than [`ALERT_HOLD`]. The next copy is waiting
+/// before the current hold ends, so an actionable warning cannot fall through
+/// to ordinary slides merely because it has remained true for 45 seconds.
+const PRIORITY_ALERT_REASSERT: Duration = Duration::from_secs(30);
+
 /// A queued alert is dropped rather than shown if it waited longer than this;
 /// by then it describes a moment that has passed.
 const ALERT_MAX_AGE: Duration = Duration::from_secs(120);
@@ -45,6 +52,9 @@ struct QueuedAlert {
     channel_id: String,
     notice_key: Option<String>,
     alert_key: String,
+    /// A new semantic state may replace an equally scored frame immediately.
+    /// A periodic reassertion waits for the current alert's normal hold.
+    preempts_equal: bool,
     queued_at: tokio::time::Instant,
 }
 
@@ -54,6 +64,7 @@ impl Ord for QueuedAlert {
         // the *lowest* sequence first, so ties are served in arrival order.
         self.score
             .cmp(&other.score)
+            .then_with(|| self.preempts_equal.cmp(&other.preempts_equal))
             .then_with(|| other.sequence.cmp(&self.sequence))
     }
 }
@@ -87,6 +98,10 @@ pub(crate) struct PanelBroker {
     /// items keep separate entries, while bridge and weather keep one semantic
     /// condition entry whose source samples may change without repeating.
     seen: StdMutex<BTreeMap<String, String>>,
+    /// Last interrupt enqueue per semantic event. Bridge and rain alerts use
+    /// this to retain the panel until they clear without multiplying ordinary
+    /// notification repeats.
+    reasserted: StdMutex<BTreeMap<String, tokio::time::Instant>>,
     wake: tokio::sync::Notify,
     sequence: AtomicU64,
 }
@@ -94,6 +109,12 @@ pub(crate) struct PanelBroker {
 impl PanelBroker {
     fn lock_interrupts(&self) -> std::sync::MutexGuard<'_, BinaryHeap<QueuedAlert>> {
         self.interrupts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_reasserted(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, tokio::time::Instant>> {
+        self.reasserted
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -116,9 +137,16 @@ impl PanelBroker {
             if !panel_eligible(channel, preferences) || !channel.active {
                 // A channel that has gone quiet forgets every event it owned,
                 // so a later recurrence is a genuinely fresh onset.
-                self.lock_seen().retain(|tracker_id, _| {
-                    tracker_id != &channel.id && !tracker_id.starts_with(&tracker_prefix)
-                });
+                {
+                    let mut seen = self.lock_seen();
+                    let mut reasserted = self.lock_reasserted();
+                    seen.retain(|tracker_id, _| {
+                        tracker_id != &channel.id && !tracker_id.starts_with(&tracker_prefix)
+                    });
+                    reasserted.retain(|tracker_id, _| {
+                        tracker_id != &channel.id && !tracker_id.starts_with(&tracker_prefix)
+                    });
+                }
                 continue;
             }
 
@@ -127,27 +155,43 @@ impl PanelBroker {
                 .iter()
                 .map(|candidate| candidate.tracker_id.clone())
                 .collect::<BTreeSet<_>>();
-            let changed = {
+            let ready = {
                 let mut seen = self.lock_seen();
+                let mut reasserted = self.lock_reasserted();
                 seen.retain(|tracker_id, _| {
+                    !tracker_id.starts_with(&tracker_prefix)
+                        || current_ids.contains(tracker_id.as_str())
+                });
+                reasserted.retain(|tracker_id, _| {
                     !tracker_id.starts_with(&tracker_prefix)
                         || current_ids.contains(tracker_id.as_str())
                 });
                 candidates
                     .into_iter()
-                    .filter(|candidate| {
-                        if seen.get(&candidate.tracker_id) == Some(&candidate.alert_key) {
-                            return false;
+                    .filter_map(|candidate| {
+                        let changed =
+                            seen.get(&candidate.tracker_id) != Some(&candidate.alert_key);
+                        let due_to_reassert = !changed
+                            && candidate.retains_priority
+                            && reasserted.get(&candidate.tracker_id).is_none_or(|last| {
+                                now.duration_since(*last) >= PRIORITY_ALERT_REASSERT
+                            });
+                        if !changed && !due_to_reassert {
+                            return None;
                         }
-                        seen.insert(candidate.tracker_id.clone(), candidate.alert_key.clone());
-                        true
+                        if changed {
+                            seen.insert(candidate.tracker_id.clone(), candidate.alert_key.clone());
+                        }
+                        reasserted.insert(candidate.tracker_id.clone(), now);
+                        Some((candidate, changed))
                     })
                     .collect::<Vec<_>>()
             };
 
-            // One onset or escalation per current item interrupts once.
-            // Continuing relevance remains in rotation without a repeat count.
-            for candidate in changed {
+            // Onsets and material status changes interrupt immediately. Bridge
+            // and rain alerts additionally keep a single interrupt queued so
+            // routine rotation cannot take the panel while they remain active.
+            for (candidate, changed) in ready {
                 self.lock_interrupts().push(QueuedAlert {
                     score: candidate.score,
                     sequence: self
@@ -156,6 +200,7 @@ impl PanelBroker {
                     channel_id: channel.id.clone(),
                     notice_key: candidate.notice_key.map(str::to_owned),
                     alert_key: candidate.alert_key,
+                    preempts_equal: changed,
                     queued_at: now,
                 });
                 queued_any = true;
@@ -166,8 +211,11 @@ impl PanelBroker {
         }
     }
 
-    fn peek_score(&self) -> Option<u16> {
-        self.lock_interrupts().peek().map(|alert| alert.score)
+    fn has_preempting_alert(&self, current_score: u16) -> bool {
+        self.lock_interrupts().peek().is_some_and(|alert| {
+            alert.score > current_score
+                || (alert.score == current_score && alert.preempts_equal)
+        })
     }
 
     /// Pops the highest-priority alert that still describes the present.
@@ -229,9 +277,8 @@ impl PanelBroker {
     ///
     /// This is the single primitive behind both the rotation dwell and the
     /// post-alert hold. A rotation frame passes `current_score = 0`, so anything
-    /// queued preempts it; an alert passes its own score, so only a strictly
-    /// higher one displaces the remainder. Equal scores wait their turn, which
-    /// is what keeps two comparable events from trading the panel.
+    /// queued preempts it. A new material state may also replace an equally
+    /// scored alert; a periodic reassertion waits for the normal hold to end.
     pub(crate) async fn wait_or_preempt(&self, current_score: u16, dwell: Duration) {
         let started = tokio::time::Instant::now();
         let deadline = started + dwell;
@@ -242,11 +289,7 @@ impl PanelBroker {
             let notified = self.wake.notified();
             let now = tokio::time::Instant::now();
             let on_screen_for = now.duration_since(started);
-            if on_screen_for >= MIN_ON_SCREEN
-                && self
-                    .peek_score()
-                    .is_some_and(|queued| queued > current_score)
-            {
+            if on_screen_for >= MIN_ON_SCREEN && self.has_preempting_alert(current_score) {
                 return;
             }
             if now >= deadline {
@@ -303,12 +346,13 @@ struct AlertCandidate<'a> {
     notice_key: Option<&'a str>,
     alert_key: String,
     score: u16,
+    retains_priority: bool,
 }
 
 /// Current interrupt candidates, with stable semantic deduplication.
 ///
-/// * Bridge movement samples share one condition identity and re-alert only
-///   when the engine changes urgency (for example Likely -> Open).
+/// * Bridge movement samples share one condition identity. Urgency and ETA
+///   bands are material, while raw AIS position churn is not.
 /// * Weather forecast-bin ids are deliberately ignored. Its band already says
 ///   whether rain/wind timing or intensity changed enough to matter.
 /// * Authored items keep their own identities, and severity/urgency is included
@@ -319,8 +363,13 @@ fn alert_candidates(channel: &ChannelSnapshot) -> Vec<AlertCandidate<'_>> {
             .then(|| AlertCandidate {
                 tracker_id: format!("{}\0condition", channel.id),
                 notice_key: None,
-                alert_key: format!("bridge:{:?}", channel.priority.urgency),
+                alert_key: format!(
+                    "bridge:{:?}:{}",
+                    channel.priority.urgency,
+                    imminence_band(channel.priority.imminence_minutes)
+                ),
                 score: channel.priority.score,
+                retains_priority: true,
             })
             .into_iter()
             .collect();
@@ -337,6 +386,11 @@ fn alert_candidates(channel: &ChannelSnapshot) -> Vec<AlertCandidate<'_>> {
                     .and_then(|signal| signal.band.as_deref())
                     .map_or_else(|| channel.material_key.clone(), str::to_owned),
                 score: channel.priority.score,
+                retains_priority: channel.kind == ChannelKindDto::Weather
+                    && channel
+                        .signal
+                        .as_ref()
+                        .is_some_and(|signal| signal_contains_rain(signal.band.as_deref())),
             })
             .into_iter()
             .collect();
@@ -376,9 +430,28 @@ fn alert_candidates(channel: &ChannelSnapshot) -> Vec<AlertCandidate<'_>> {
                 notice_key: Some(notice.key.as_str()),
                 alert_key,
                 score: notice.priority.score,
+                retains_priority: channel.kind == ChannelKindDto::Weather
+                    && signal_contains_rain(notice.signal.band.as_deref()),
             }
         })
         .collect()
+}
+
+/// ETA bands are changes in what the driver should do; second-by-second AIS
+/// movement inside one band is not. This mirrors the weather lead bands.
+fn imminence_band(minutes: Option<u16>) -> &'static str {
+    match minutes {
+        Some(0..=5) => "0-5",
+        Some(6..=15) => "6-15",
+        Some(16..=30) => "16-30",
+        Some(31..=60) => "31-60",
+        Some(_) => "60+",
+        None => "unknown",
+    }
+}
+
+fn signal_contains_rain(band: Option<&str>) -> bool {
+    band.is_some_and(|band| band.split('+').any(|part| part.starts_with("rain-")))
 }
 
 /// The ordinary cadence: every current notice gets one slot, highest priority

@@ -2309,16 +2309,16 @@ mod panel {
         );
     }
 
-    /// An onset interrupts immediately, then remains in the ordinary
-    /// score-ordered live set. Remaining relevant is not a second event and
-    /// therefore never creates a hidden repeat count.
+    /// Regression for the live report: the app said "opening in 8–24m" while
+    /// the panel kept advancing through ordinary slides. A current bridge
+    /// warning owns the interrupt lane until it resolves.
     #[tokio::test]
-    async fn a_continuing_imminent_event_interrupts_only_once() {
+    async fn a_bridge_opening_in_eight_to_twenty_four_minutes_keeps_panel_priority() {
         let (mut snapshot, preferences) = epaper_snapshot().await;
         // Paused only now: the fixture's store needs a real clock to open.
         tokio::time::pause();
         let broker = PanelBroker::default();
-        raise_imminent(&mut snapshot, "bridge.brickell", 493, "likely:3-8", 5);
+        raise_imminent(&mut snapshot, "bridge.brickell", 493, "likely:8-24", 8);
 
         broker.ingest(&snapshot, &preferences);
         assert!(
@@ -2329,17 +2329,93 @@ mod panel {
             "the warning has to reach the panel at all"
         );
 
-        // The hold expires and nothing material changed. It stays first in
-        // rotation because of its score, but does not interrupt again.
+        // The hold expires and nothing material changed. The warning is still
+        // actionable, so it must already be queued ahead of ordinary rotation.
         tokio::time::advance(PanelBroker::alert_hold() + Duration::from_secs(1)).await;
         broker.ingest(&snapshot, &preferences);
         assert!(
             matches!(
                 broker.next(&snapshot, &preferences, 0),
-                Some(PanelSelection::Rotation { ref channel_id, .. }) if channel_id == "bridge.brickell"
+                Some(PanelSelection::Alert { ref channel_id, .. }) if channel_id == "bridge.brickell"
             ),
-            "a continuing event must rotate without interrupting twice"
+            "an active bridge warning must not surrender the panel to ordinary slides"
         );
+    }
+
+    /// Tightening the ETA is a material status change even though both states
+    /// have HeadsUp urgency and the same numeric score. It must replace the old
+    /// bridge frame after only the physical-display safety floor.
+    #[tokio::test]
+    async fn a_tighter_bridge_eta_preempts_an_equally_scored_alert() {
+        let (mut snapshot, preferences) = epaper_snapshot().await;
+        tokio::time::pause();
+        let broker = PanelBroker::default();
+        raise_imminent(&mut snapshot, "bridge.brickell", 493, "likely:16-30", 24);
+        broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert { .. })
+        ));
+
+        raise_imminent(&mut snapshot, "bridge.brickell", 493, "likely:8-24", 8);
+        broker.ingest(&snapshot, &preferences);
+        let started = tokio::time::Instant::now();
+        broker
+            .wait_or_preempt(493, std::time::Duration::from_secs(45))
+            .await;
+        let held = tokio::time::Instant::now().duration_since(started);
+        assert!(held >= std::time::Duration::from_secs(8), "held {held:?}");
+        assert!(held < std::time::Duration::from_secs(45), "held {held:?}");
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert { ref channel_id, .. }) if channel_id == "bridge.brickell"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_rain_warning_keeps_panel_priority_until_it_clears() {
+        let (mut snapshot, preferences) = epaper_snapshot().await;
+        tokio::time::pause();
+        let broker = PanelBroker::default();
+        let weather = snapshot
+            .channels
+            .iter_mut()
+            .find(|channel| channel.id == "weather.miami")
+            .unwrap();
+        weather.active = true;
+        weather.notices = vec![notice(
+            "rain-window",
+            "Rain in 8 minutes",
+            Some("rain-amount:6-15:light"),
+            470,
+        )];
+        weather.signal = Some(weather.notices[0].signal.clone());
+        weather.priority = weather.notices[0].priority;
+
+        broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert { ref channel_id, .. }) if channel_id == "weather.miami"
+        ));
+
+        tokio::time::advance(PanelBroker::alert_hold() + Duration::from_secs(1)).await;
+        broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert { ref channel_id, .. }) if channel_id == "weather.miami"
+        ));
+
+        snapshot
+            .channels
+            .iter_mut()
+            .find(|channel| channel.id == "weather.miami")
+            .unwrap()
+            .active = false;
+        broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Rotation { .. })
+        ));
     }
 
     #[tokio::test]
@@ -2649,8 +2725,12 @@ mod panel {
         let broker = PanelBroker::default();
         raise(&mut snapshot, "weather.miami", 470, "rain:6-15");
         broker.ingest(&snapshot, &preferences);
+        assert!(matches!(
+            broker.next(&snapshot, &preferences, 0),
+            Some(PanelSelection::Alert { .. })
+        ));
 
-        // Equal score waits out the full hold rather than trading the panel.
+        // With no newly queued state, the current alert gets its full hold.
         let started = tokio::time::Instant::now();
         broker
             .wait_or_preempt(470, std::time::Duration::from_secs(45))
