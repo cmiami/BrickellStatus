@@ -664,3 +664,19 @@ describe('RiverLine', () => {
     expect(document.querySelectorAll('.stacked')).toHaveLength(0);
   });
 });
+
+describe('RiverLine duplicate hulls', () => {
+  // The schematic and the manifest both key on the MMSI. Two rows for one hull
+  // aborted the render of the whole live deck rather than drawing it twice.
+  it('renders one row per MMSI when a hull arrives twice', () => {
+    const { container } = render(RiverLine, {
+      corridor: CORRIDOR,
+      vesselTracks: [vessel(), vessel({ branch: 'north_approach', sMeters: -800 })],
+      intervals: INTERVALS,
+      generatedAt: '2026-08-17T17:50:00Z',
+      localTimeZone: 'America/New_York'
+    });
+
+    expect(compactText(container.querySelector('.manifest-head p'))).toBe('LIVE TRAFFIC · 1');
+  });
+});
