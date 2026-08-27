@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "brickellstatus-collectors"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "async-trait",
  "brickellstatus-tls",
@@ -426,7 +426,7 @@ dependencies = [
 
 [[package]]
 name = "brickellstatus-desktop"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "base64 0.23.1",
  "brickellstatus-collectors",
@@ -480,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "brickellstatus-hub"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "anyhow",
  "tokio",
@@ -509,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "brickellstatus-projection"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "brickellstatus-eink",
  "brickellstatus-runtime",
@@ -519,7 +519,7 @@ dependencies = [
 
 [[package]]
 name = "brickellstatus-runtime"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "async-trait",
  "brickellstatus-collectors",
@@ -545,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "brickellstatus-storage"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "libsqlite3-sys",
  "serde",
