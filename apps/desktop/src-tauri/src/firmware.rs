@@ -4,10 +4,11 @@
 //! in a board can bring it up without a toolchain, and without being asked what
 //! they plugged in.
 //!
-//! The display library binds one board's pinout and controller per image, so
-//! `platformio.ini` builds one environment per panel. Nobody chooses between
-//! them: every build runs the same probe at boot and reports the board it
-//! actually found, so
+//! The display library binds one board's pinout per image, so `platformio.ini`
+//! builds one environment per product-facing panel. Vision Master builds run
+//! the same safe wiring probe at boot and report the board they actually found,
+//! while the Wireless Paper image selects its supported display controller at
+//! boot, so
 //!
 //! - a board already running this firmware names itself, and the matching build
 //!   is written;
@@ -15,11 +16,16 @@
 //!   if the probe then reports a different board the app writes the right one
 //!   without asking again.
 //!
-//! E213 carries two internal controller images behind one product-facing panel
+//! Vision Master E213 carries two internal controller images behind one
+//! product-facing panel
 //! identity. Their BUSY polarity is opposite, so the wrong image blocks before
 //! it can answer READY. Flash recovery is objective: write one, query READY,
 //! try the other once only on silence, and remember only the image that answers.
 //! Retained e-paper pixels are never treated as proof that firmware booted.
+//!
+//! Wireless Paper V1.1 through V1.2 use Heltec's controller-ID query inside the
+//! one bundled image. There is no revision choice in the app and no speculative
+//! retry against the panel glass.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -27,7 +33,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use brickellstatus_eink::PanelModel;
+use brickellstatus_eink::{PanelHardware, PanelModel};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -57,14 +63,11 @@ const REQUIRED_OFFSETS: [u32; 4] = [
 /// being flashed onto one of these.
 pub const EXPECTED_CHIP: &str = "esp32s3";
 
-/// Manifest revision this app reads. Version 2 names the board each build
-/// drives, which is what lets the app pick one without asking.
-pub const MANIFEST_SCHEMA_VERSION: u32 = 3;
+/// Manifest revision this app reads. Version 4 separates exact board hardware
+/// from framebuffer geometry, so same-size boards cannot cross-flash pinouts.
+pub const MANIFEST_SCHEMA_VERSION: u32 = 4;
 
-/// Which E213 panel controller a build drives.
-///
-/// Only meaningful on the E213, whose two revisions are electrically identical.
-/// Every other board has exactly one build and nothing to choose.
+/// Which controller image a 250×122 board build carries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PanelRevision {
@@ -108,6 +111,11 @@ pub struct FirmwareVariantSpec {
     /// Board this build drives, which is what the device's own probe reports
     /// back and therefore what a flash decision is made from.
     pub panel: PanelModel,
+    /// Exact board and pinout this image drives.
+    ///
+    /// Required since schema 4 so equal framebuffer dimensions never collapse
+    /// distinct board pinouts.
+    pub hardware: PanelHardware,
     /// Which E213 controller this build carries, on the board that has two.
     #[serde(default)]
     pub panel_revision: Option<PanelRevision>,
@@ -144,6 +152,7 @@ pub struct FirmwareVariant {
     pub id: String,
     pub label: String,
     pub panel: PanelModel,
+    pub hardware: PanelHardware,
     pub panel_revision: Option<PanelRevision>,
     pub segments: Vec<FlashSegment>,
 }
@@ -188,10 +197,13 @@ pub fn validate_current_banner(
             .map(Some)
             .ok_or_else(|| "the panel reported MISMATCH without naming its board".into());
     }
-    if banner.panel != Some(written.panel) || banner.board != Some(written.panel) {
+    if banner.panel != Some(written.panel)
+        || banner.board != Some(written.panel)
+        || banner.hardware != Some(written.hardware)
+    {
         return Err(format!(
             "the panel READY response does not identify the written {} image",
-            written.panel.label()
+            written.hardware.display_name()
         ));
     }
     Ok(None)
@@ -275,54 +287,67 @@ impl FirmwareBundle {
         self.variants.iter().find(|variant| variant.id == id)
     }
 
-    /// The build to write to a board.
+    /// The build to write to an exact board family.
     ///
     /// `board` is what the device reported about itself, so on everything but a
-    /// virgin board this is a fact rather than a guess. `revision` selects the
-    /// last E213 controller image that objectively answered READY; it is an
-    /// internal recovery detail, not a panel choice shown to the reader.
+    /// virgin board this is a fact rather than a guess. `revision` selects a
+    /// previously established Vision Master E213 controller. Wireless Paper has
+    /// one image and selects its controller internally.
+    pub fn for_hardware(
+        &self,
+        hardware: PanelHardware,
+        revision: Option<PanelRevision>,
+    ) -> Option<&FirmwareVariant> {
+        let for_hardware = || {
+            self.variants
+                .iter()
+                .filter(|variant| variant.hardware == hardware)
+        };
+        revision
+            .and_then(|revision| {
+                for_hardware().find(|variant| variant.panel_revision == Some(revision))
+            })
+            // With nothing remembered, the first build listed for the board is
+            // the one to try. `bundle_firmware.py` lists the current revision
+            // first for exactly this reason.
+            .or_else(|| for_hardware().next())
+    }
+
+    /// Compatibility selection for the original Vision Master-only manifest.
     pub fn for_board(
         &self,
         board: PanelModel,
         revision: Option<PanelRevision>,
     ) -> Option<&FirmwareVariant> {
-        let for_board = || {
-            self.variants
-                .iter()
-                .filter(|variant| variant.panel == board)
+        let hardware = match board {
+            PanelModel::E213 => PanelHardware::VisionMasterE213,
+            PanelModel::E290 => PanelHardware::VisionMasterE290,
         };
-        revision
-            .and_then(|revision| {
-                for_board().find(|variant| variant.panel_revision == Some(revision))
-            })
-            // With nothing remembered, the first build listed for the board is
-            // the one to try. `bundle_firmware.py` lists the current revision
-            // first for exactly this reason.
-            .or_else(|| for_board().next())
+        self.for_hardware(hardware, revision)
     }
 
-    /// Every other controller image that could drive this board.
+    /// Every other controller image built for this exact board family.
     ///
-    /// These are recovery images, not user-facing panel choices. E-paper keeps
-    /// its last image without power, so looking at the glass cannot prove the
-    /// firmware that was just written actually booted. Recovery is selected
-    /// only from the board's `READY INK1` response (or its absence).
-    pub fn alternatives_for(&self, board: PanelModel, written: &str) -> Vec<&FirmwareVariant> {
+    /// Callers may use this for bounded Vision Master recovery. Wireless Paper
+    /// has no alternatives because its one image detects the controller at boot.
+    pub fn alternatives_for(
+        &self,
+        hardware: PanelHardware,
+        written: &str,
+    ) -> Vec<&FirmwareVariant> {
         self.variants
             .iter()
-            .filter(|variant| variant.panel == board && variant.id != written)
+            .filter(|variant| variant.hardware == hardware && variant.id != written)
             .collect()
     }
 
     /// One objective recovery image after a freshly written build boots.
     ///
     /// A positive `READY INK1` without `MISMATCH` finishes the flash. A board
-    /// mismatch names the panel whose image should be written next. Silence is
-    /// actionable only for an E213 image: its two controller revisions share
-    /// the same board probe, and the wrong controller blocks forever on the
-    /// opposite BUSY polarity before it can announce READY. Each image is
-    /// returned at most once, which makes recovery bounded even when hardware
-    /// is absent or damaged.
+    /// mismatch names the hardware whose image should be written next. Silence
+    /// tries the other controller only for Vision Master E213, whose opposite
+    /// BUSY polarities make READY an objective discriminator. Wireless Paper
+    /// needs no host-side controller recovery.
     pub fn recovery_after_boot(
         &self,
         written: &FirmwareVariant,
@@ -333,18 +358,19 @@ impl FirmwareBundle {
             if !banner.mismatch {
                 return None;
             }
-            let board = banner.board?;
+            let hardware = banner.hardware?;
             return self
                 .variants
                 .iter()
-                .find(|variant| variant.panel == board && !attempted.contains(&variant.id));
+                .find(|variant| variant.hardware == hardware && !attempted.contains(&variant.id));
         }
 
-        if written.panel != PanelModel::E213 {
+        if written.hardware != PanelHardware::VisionMasterE213 {
             return None;
         }
+
         self.variants.iter().find(|variant| {
-            variant.panel == PanelModel::E213
+            variant.hardware == written.hardware
                 && variant.id != written.id
                 && !attempted.contains(&variant.id)
         })
@@ -374,6 +400,14 @@ fn resolve_variant(
     }
     if spec.images.is_empty() {
         return Err(FirmwareError::NoImages(spec.id));
+    }
+
+    let hardware = spec.hardware;
+    if hardware.panel() != spec.panel {
+        return Err(FirmwareError::HardwarePanel {
+            hardware,
+            panel: spec.panel,
+        });
     }
 
     let directory = root.join(&spec.id);
@@ -413,6 +447,7 @@ fn resolve_variant(
         id: spec.id,
         label: spec.label,
         panel: spec.panel,
+        hardware,
         panel_revision: spec.panel_revision,
         segments,
     })
@@ -844,6 +879,11 @@ pub enum FirmwareError {
     DuplicateVariant(String),
     #[error("firmware variant requires a non-empty id and label")]
     VariantIdentity,
+    #[error("firmware hardware {hardware:?} does not carry panel {panel:?}")]
+    HardwarePanel {
+        hardware: PanelHardware,
+        panel: PanelModel,
+    },
     #[error("firmware variant {0:?} declares no images")]
     NoImages(String),
     #[error("firmware image offset {value:?} is not a number")]
@@ -1046,7 +1086,7 @@ mod tests {
     fn manifest_json(images: &str) -> String {
         format!(
             r#"{{
-              "schemaVersion": 3,
+              "schemaVersion": 4,
               "chip": "esp32s3",
               "firmwareVersion": 2,
               "sourceRevision": "abc1234",
@@ -1055,6 +1095,7 @@ mod tests {
                   "id": "vision-master-e213",
                   "label": "Vision Master E213 (original panel)",
                   "panel": "e213",
+                  "hardware": "visionMasterE213",
                   "panelRevision": "original",
                   "images": [{images}]
                 }}
@@ -1086,14 +1127,28 @@ mod tests {
     fn every_board_manifest() -> String {
         format!(
             r#"{{
-              "schemaVersion": 3,
+              "schemaVersion": 4,
               "chip": "esp32s3",
               "firmwareVersion": 2,
               "sourceRevision": "abc1234",
               "variants": [
-                {{"id":"vision-master-e213","label":"Original panel","panel":"e213","panelRevision":"original","images":[{FULL_IMAGES}]}},
-                {{"id":"vision-master-e213-v11","label":"Panel v1.1","panel":"e213","panelRevision":"v11","images":[{FULL_IMAGES}]}},
-                {{"id":"vision-master-e290","label":"E290","panel":"e290","images":[{FULL_IMAGES}]}}
+                {{"id":"vision-master-e213","label":"Original panel","panel":"e213","hardware":"visionMasterE213","panelRevision":"original","images":[{FULL_IMAGES}]}},
+                {{"id":"vision-master-e213-v11","label":"Panel v1.1","panel":"e213","hardware":"visionMasterE213","panelRevision":"v11","images":[{FULL_IMAGES}]}},
+                {{"id":"vision-master-e290","label":"E290","panel":"e290","hardware":"visionMasterE290","images":[{FULL_IMAGES}]}}
+              ]
+            }}"#
+        )
+    }
+
+    fn wireless_paper_manifest() -> String {
+        format!(
+            r#"{{
+              "schemaVersion": 4,
+              "chip": "esp32s3",
+              "firmwareVersion": 6,
+              "sourceRevision": "wp12345",
+              "variants": [
+                {{"id":"wireless-paper","label":"Wireless Paper","panel":"e213","hardware":"wirelessPaper","images":[{FULL_IMAGES}]}}
               ]
             }}"#
         )
@@ -1204,7 +1259,7 @@ mod tests {
     fn rejects_a_legacy_manifest_by_schema_before_reading_version() {
         let fixture = Fixture::new("legacy-schema");
         let manifest = manifest_json(FULL_IMAGES)
-            .replace("\"schemaVersion\": 3", "\"schemaVersion\": 2")
+            .replace("\"schemaVersion\": 4", "\"schemaVersion\": 2")
             .replace("\"firmwareVersion\": 2,", "");
         fixture.manifest(&manifest);
         assert!(matches!(
@@ -1261,13 +1316,13 @@ mod tests {
         }
         fixture.manifest(
             &r#"{
-              "schemaVersion": 3,
+              "schemaVersion": 4,
               "chip": "esp32s3",
               "firmwareVersion": 2,
               "variants": [
-                {"id":"vision-master-e213","label":"Original panel","panel":"e213","panelRevision":"original","images":[IMAGES]},
-                {"id":"vision-master-e213-v11","label":"Panel v1.1","panel":"e213","panelRevision":"v11","images":[IMAGES]},
-                {"id":"vision-master-e290","label":"E290","panel":"e290","images":[IMAGES]}
+                {"id":"vision-master-e213","label":"Original panel","panel":"e213","hardware":"visionMasterE213","panelRevision":"original","images":[IMAGES]},
+                {"id":"vision-master-e213-v11","label":"Panel v1.1","panel":"e213","hardware":"visionMasterE213","panelRevision":"v11","images":[IMAGES]},
+                {"id":"vision-master-e290","label":"E290","panel":"e290","hardware":"visionMasterE290","images":[IMAGES]}
               ]
             }"#
             .replace("IMAGES", FULL_IMAGES),
@@ -1333,6 +1388,42 @@ mod tests {
                 .is_none(),
             "neither E213 image may be written twice"
         );
+    }
+
+    #[test]
+    fn wireless_paper_is_one_autodetecting_image() {
+        let fixture = Fixture::new("wireless-paper");
+        write_variant_images(&fixture, "wireless-paper");
+        fixture.manifest(&wireless_paper_manifest());
+        let bundle = FirmwareBundle::load(&fixture.root).unwrap();
+
+        assert_eq!(
+            bundle
+                .for_hardware(PanelHardware::WirelessPaper, None)
+                .unwrap()
+                .id,
+            "wireless-paper"
+        );
+
+        let first = bundle.variant("wireless-paper").unwrap();
+        let attempted = BTreeSet::from([first.id.clone()]);
+        assert!(
+            bundle
+                .recovery_after_boot(first, None, &attempted)
+                .is_none(),
+            "controller selection belongs inside the universal image"
+        );
+    }
+
+    #[test]
+    fn a_wireless_paper_banner_cannot_verify_a_vision_master_image() {
+        let fixture = Fixture::new("hardware-banner-validation");
+        write_variant_images(&fixture, "vision-master-e213");
+        fixture.manifest(&manifest_json(FULL_IMAGES));
+        let bundle = FirmwareBundle::load(&fixture.root).unwrap();
+        let written = bundle.variant("vision-master-e213").unwrap();
+        let banner = DeviceBanner::parse("READY INK1 250x122 3904 abc1234 WPAPER 26B4 FW2");
+        assert!(validate_current_banner(&banner, written, 2, Some("abc1234")).is_err());
     }
 
     #[test]
@@ -1465,7 +1556,7 @@ mod tests {
         assert!(bundle.for_board(PanelModel::E213, None).is_some());
         assert_eq!(
             bundle
-                .alternatives_for(PanelModel::E213, "vision-master-e213")
+                .alternatives_for(PanelHardware::VisionMasterE213, "vision-master-e213",)
                 .iter()
                 .map(|variant| variant.id.as_str())
                 .collect::<Vec<_>>(),
@@ -1474,7 +1565,7 @@ mod tests {
         );
         assert!(
             bundle
-                .alternatives_for(PanelModel::E290, "vision-master-e290")
+                .alternatives_for(PanelHardware::VisionMasterE290, "vision-master-e290",)
                 .is_empty(),
             "a board with one build has nothing else to try"
         );

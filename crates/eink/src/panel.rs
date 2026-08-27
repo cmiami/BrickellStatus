@@ -29,11 +29,11 @@ pub(crate) const MARGIN_LEFT: i32 = 4;
 /// Gap between the content area and the rail.
 const RAIL_GUTTER: i32 = 4;
 
-/// A physical e-paper panel this instrument knows how to draw.
+/// A physical e-paper panel geometry this instrument knows how to draw.
 ///
-/// The board reports which one it is; nobody is asked to choose. Adding a third
-/// means adding a variant here and the geometry it draws at, not a second
-/// layout.
+/// More than one board can carry the same glass. [`PanelHardware`] names the
+/// board and this type names the framebuffer it accepts, keeping a Wireless
+/// Paper from becoming a fake Vision Master merely because both are 250×122.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PanelModel {
@@ -42,6 +42,61 @@ pub enum PanelModel {
     E213,
     /// Heltec Vision Master E290, 296×128.
     E290,
+}
+
+/// The board around a supported e-paper panel.
+///
+/// This is distinct from [`PanelModel`]: the Vision Master E213 and Wireless
+/// Paper have the same geometry, but different display wiring, USB interfaces,
+/// controller recovery images, and battery circuits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PanelHardware {
+    /// Heltec Vision Master E213.
+    VisionMasterE213,
+    /// Heltec Vision Master E290.
+    VisionMasterE290,
+    /// Heltec Wireless Paper board family.
+    WirelessPaper,
+}
+
+impl PanelHardware {
+    /// Framebuffer geometry carried by this board.
+    pub const fn panel(self) -> PanelModel {
+        match self {
+            Self::VisionMasterE213 | Self::WirelessPaper => PanelModel::E213,
+            Self::VisionMasterE290 => PanelModel::E290,
+        }
+    }
+
+    /// Short token spoken in the firmware READY banner.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::VisionMasterE213 => "E213",
+            Self::VisionMasterE290 => "E290",
+            Self::WirelessPaper => "WPAPER",
+        }
+    }
+
+    /// Operator-facing board name.
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::VisionMasterE213 => "Vision Master E213",
+            Self::VisionMasterE290 => "Vision Master E290",
+            Self::WirelessPaper => "Wireless Paper",
+        }
+    }
+
+    /// Board named by a firmware banner token.
+    pub fn from_label(label: &str) -> Option<Self> {
+        [
+            Self::VisionMasterE213,
+            Self::VisionMasterE290,
+            Self::WirelessPaper,
+        ]
+        .into_iter()
+        .find(|hardware| hardware.label().eq_ignore_ascii_case(label.trim()))
+    }
 }
 
 impl PanelModel {
@@ -218,6 +273,19 @@ mod tests {
         );
         assert_eq!(PanelModel::from_dimensions(250, 128), None);
         assert_eq!(PanelModel::from_dimensions(0, 0), None);
+    }
+
+    #[test]
+    fn hardware_and_geometry_do_not_conflate_wireless_paper_with_e213() {
+        assert_eq!(PanelHardware::WirelessPaper.panel(), PanelModel::E213);
+        assert_eq!(
+            PanelHardware::from_label("WPAPER"),
+            Some(PanelHardware::WirelessPaper)
+        );
+        assert_eq!(
+            PanelHardware::from_label("E213"),
+            Some(PanelHardware::VisionMasterE213)
+        );
     }
 
     #[test]

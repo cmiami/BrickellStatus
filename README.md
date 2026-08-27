@@ -6,7 +6,7 @@
   <img alt="Rust 1.97.1" src="https://img.shields.io/badge/Rust-1.97.1-0F2A44?style=for-the-badge&logo=rust&logoColor=white" />
   <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-174F78?style=for-the-badge&logo=tauri&logoColor=white" />
   <img alt="Svelte 5" src="https://img.shields.io/badge/Svelte-5-F2A900?style=for-the-badge&logo=svelte&logoColor=white" />
-  <img alt="ESP32-S3" src="https://img.shields.io/badge/ESP32--S3-E213%20%7C%20E290-46515B?style=for-the-badge&logo=espressif&logoColor=white" />
+  <img alt="ESP32-S3" src="https://img.shields.io/badge/ESP32--S3-Vision%20Master%20%7C%20Wireless%20Paper-46515B?style=for-the-badge&logo=espressif&logoColor=white" />
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-176B47?style=for-the-badge" />
 </p>
 

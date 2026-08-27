@@ -151,10 +151,11 @@ describe('remembered e-paper route', () => {
       port: '/dev/cu.usbmodem14B4201',
       bundledBuild: 'abc1234',
       board: 'e213',
+      hardware: 'visionMasterE213',
       recommendedVariantId: 'vision-master-e213-v11',
       variants: [
-        { id: 'vision-master-e213-v11', label: 'Vision Master E213', panel: 'e213', panelRevision: 'v11', totalBytes: 529_104 },
-        { id: 'vision-master-e213', label: 'Vision Master E213', panel: 'e213', panelRevision: 'original', totalBytes: 529_104 }
+        { id: 'vision-master-e213-v11', label: 'Vision Master E213', panel: 'e213', hardware: 'visionMasterE213', panelRevision: 'v11', totalBytes: 529_104 },
+        { id: 'vision-master-e213', label: 'Vision Master E213', panel: 'e213', hardware: 'visionMasterE213', panelRevision: 'original', totalBytes: 529_104 }
       ],
       requirement: { state: 'upToDate', build: 'abc1234' }
     };
@@ -177,6 +178,45 @@ describe('remembered e-paper route', () => {
     );
   });
 
+  it('reflashes Wireless Paper with its universal image, not a same-size board image', async () => {
+    const draft = preferencesFixture();
+    mocks.getCapabilities.mockResolvedValue({ usbDisplay: true, firmwareFlashing: true });
+    mocks.getStatus.mockResolvedValue({
+      state: 'disconnected',
+      transport: null,
+      panel: 'e213',
+      detail: 'Panel is not answering.'
+    });
+    const firmware = {
+      port: '/dev/cu.usbserial-0001',
+      bundledBuild: 'abc1234',
+      board: 'e213',
+      hardware: 'wirelessPaper',
+      // Even a stale recommendation cannot cross the hardware-family boundary.
+      recommendedVariantId: 'vision-master-e213-v11',
+      variants: [
+        { id: 'vision-master-e213-v11', label: 'Vision Master E213', panel: 'e213', hardware: 'visionMasterE213', panelRevision: 'v11', totalBytes: 529_104 },
+        { id: 'wireless-paper', label: 'Wireless Paper', panel: 'e213', hardware: 'wirelessPaper', totalBytes: 529_104 }
+      ],
+      requirement: { state: 'upToDate', build: 'abc1234' }
+    };
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === 'get_firmware_status') return firmware;
+      if (command === 'flash_firmware') return null;
+      throw new Error(`unexpected command ${command}`);
+    });
+
+    render(EpaperOutputPanel, { draft });
+
+    await fireEvent.click(await screen.findByRole('button', { name: 'Reflash firmware' }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith('flash_firmware', {
+        variantId: 'wireless-paper',
+        port: '/dev/cu.usbserial-0001'
+      })
+    );
+  });
+
   it('does not offer a reflash that would downgrade newer panel firmware', async () => {
     const draft = preferencesFixture();
     mocks.getCapabilities.mockResolvedValue({ usbDisplay: true, firmwareFlashing: true });
@@ -191,9 +231,10 @@ describe('remembered e-paper route', () => {
       bundledBuild: 'abc1234',
       bundledVersion: 4,
       board: 'e290',
+      hardware: 'visionMasterE290',
       recommendedVariantId: 'vision-master-e290',
       variants: [
-        { id: 'vision-master-e290', label: 'Vision Master E290', panel: 'e290', totalBytes: 529_104 }
+        { id: 'vision-master-e290', label: 'Vision Master E290', panel: 'e290', hardware: 'visionMasterE290', totalBytes: 529_104 }
       ],
       requirement: { state: 'deviceNewer', device: 5, bundled: 4 }
     });

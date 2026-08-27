@@ -15,7 +15,18 @@ use super::{
     safe_device_text, validate_for_transport,
 };
 
-/// One Espressif-compatible native USB serial interface discovered on the host.
+/// How a supported panel exposes its serial port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UsbDeviceKind {
+    /// ESP32-S3 native USB CDC / Serial-JTAG, used by Vision Master boards.
+    EspressifNative,
+    /// Silicon Labs CP210x USB-to-UART bridge used by Wireless Paper.
+    /// Detection uses the exact default VID/PID shipped on the board; the flash
+    /// layer still constrains this interface to Wireless Paper firmware.
+    Cp210xUart,
+}
+
+/// One compatible panel USB serial interface discovered on the host.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UsbDeviceInfo {
     /// The board's own identifier, stable across reboots and reflashes — on an
@@ -23,6 +34,9 @@ pub struct UsbDeviceInfo {
     /// board that does not change when the firmware does, which makes it the
     /// key anything wanting to remember a board has to use.
     pub serial_number: Option<String>,
+    /// USB interface family, used to constrain a deliberate firmware write to
+    /// the corresponding board pinout.
+    pub kind: UsbDeviceKind,
     /// Stable serial device path used to open this interface.
     pub port: String,
     /// Concise device label assembled from USB descriptors.
@@ -45,11 +59,15 @@ pub struct UsbConnectionInfo {
 
 /// USB vendor ID used by the ESP32-S3 native USB/JTAG interface.
 pub const ESPRESSIF_USB_VID: u16 = 0x303a;
+/// Silicon Labs vendor ID used by the Wireless Paper's CP2102 bridge.
+pub const CP210X_USB_VID: u16 = 0x10c4;
+/// Default CP2102/CP210x UART bridge product ID.
+pub const CP210X_USB_PID: u16 = 0xea60;
 
 /// Native USB CDC configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UsbConfig {
-    /// Explicit device path; `None` discovers an Espressif interface.
+    /// Explicit device path; `None` discovers a compatible panel interface.
     pub port: Option<String>,
     /// Firmware serial rate.
     pub baud_rate: u32,
@@ -109,18 +127,18 @@ impl UsbTransport {
     async fn connect(&self) -> Result<(SerialStream, Option<String>, String), TransportError> {
         let port_name = match &self.config.port {
             Some(port) => {
-                let attached = discover_espressif_devices().await?;
+                let attached = discover_panel_usb_devices().await?;
                 if !attached.iter().any(|device| device.port == *port) {
                     return Err(TransportError::Io {
                         transport: TransportKind::Usb,
                         message: format!(
-                            "{port} is not an attached Espressif USB display interface"
+                            "{port} is not an attached compatible panel USB interface"
                         ),
                     });
                 }
                 port.clone()
             }
-            None => discover_espressif_port()
+            None => discover_panel_usb_port()
                 .await?
                 .ok_or(TransportError::NoUsbDevice)?,
         };
@@ -170,7 +188,7 @@ impl UsbTransport {
                 .config
                 .port
                 .clone()
-                .unwrap_or_else(|| "Espressif USB".into()),
+                .unwrap_or_else(|| "Panel USB".into()),
             ready_observed: state.ready_observed,
             banner: state.banner.clone(),
         })
@@ -258,13 +276,22 @@ impl PacketTransport for UsbTransport {
     }
 }
 
-/// Finds the best available Espressif USB CDC path without opening it.
-pub async fn discover_espressif_port() -> Result<Option<String>, TransportError> {
-    Ok(discover_espressif_devices()
-        .await?
-        .into_iter()
-        .next()
-        .map(|device| device.port))
+/// Finds the first supported panel USB path without opening it.
+///
+/// Native USB retains priority when both product families are attached. A lone
+/// exact CP2102 match is the Wireless Paper first-run path, which keeps setup to
+/// the same detect-and-flash interaction as the existing boards.
+pub async fn discover_panel_usb_port() -> Result<Option<String>, TransportError> {
+    let devices = discover_panel_usb_devices().await?;
+    Ok(devices
+        .iter()
+        .find(|device| device.kind == UsbDeviceKind::EspressifNative)
+        .or_else(|| {
+            devices
+                .iter()
+                .find(|device| device.kind == UsbDeviceKind::Cp210xUart)
+        })
+        .map(|device| device.port.clone()))
 }
 
 /// Drops the `/dev/tty.*` twin of a device that also offers `/dev/cu.*`.
@@ -290,8 +317,26 @@ fn prefer_callout_nodes(devices: &mut Vec<UsbDeviceInfo>) {
     });
 }
 
-/// Lists compatible Espressif USB serial interfaces without opening them.
-pub async fn discover_espressif_devices() -> Result<Vec<UsbDeviceInfo>, TransportError> {
+/// Identifies serial interfaces the supported panels use.
+///
+/// CP2102 matching is deliberately exact to keep the scan list narrow. A
+/// running board still proves itself with `READY INK1`; a blank exact match is
+/// offered only the Wireless Paper image by the desktop flash guard.
+fn classify_usb_device(vid: u16, pid: u16, descriptor: &str) -> Option<UsbDeviceKind> {
+    if vid == ESPRESSIF_USB_VID
+        || descriptor.contains("espressif")
+        || descriptor.contains("usb jtag")
+    {
+        return Some(UsbDeviceKind::EspressifNative);
+    }
+    if vid == CP210X_USB_VID && pid == CP210X_USB_PID {
+        return Some(UsbDeviceKind::Cp210xUart);
+    }
+    None
+}
+
+/// Lists compatible panel USB serial interfaces without opening them.
+pub async fn discover_panel_usb_devices() -> Result<Vec<UsbDeviceInfo>, TransportError> {
     tokio::task::spawn_blocking(|| {
         let ports = tokio_serial::available_ports().map_err(|error| usb_io(error.to_string()))?;
         let mut devices = ports
@@ -301,12 +346,14 @@ pub async fn discover_espressif_devices() -> Result<Vec<UsbDeviceInfo>, Transpor
                     let product = details.product.as_deref().unwrap_or_default().trim();
                     let manufacturer = details.manufacturer.as_deref().unwrap_or_default().trim();
                     let descriptor = format!("{product} {manufacturer}").to_ascii_lowercase();
-                    let compatible = details.vid == ESPRESSIF_USB_VID
-                        || descriptor.contains("espressif")
-                        || descriptor.contains("usb jtag");
-                    compatible.then(|| {
+                    classify_usb_device(details.vid, details.pid, &descriptor).map(|kind| {
                         let name = if product.is_empty() {
-                            "Unverified Espressif serial device".into()
+                            match kind {
+                                UsbDeviceKind::EspressifNative => {
+                                    "Unverified Espressif serial device".into()
+                                }
+                                UsbDeviceKind::Cp210xUart => "Wireless Paper USB".into(),
+                            }
                         } else {
                             product.to_owned()
                         };
@@ -316,12 +363,17 @@ pub async fn discover_espressif_devices() -> Result<Vec<UsbDeviceInfo>, Transpor
                             facts.push(manufacturer.to_owned());
                         }
                         UsbDeviceInfo {
-                            serial_number: details
-                                .serial_number
-                                .as_deref()
+                            // A native ESP32 descriptor identifies the MCU.
+                            // A CP2102 serial identifies only the bridge and is
+                            // commonly the non-unique factory value "0001", so
+                            // it must not become a durable board identity.
+                            serial_number: (kind == UsbDeviceKind::EspressifNative)
+                                .then_some(details.serial_number.as_deref())
+                                .flatten()
                                 .map(str::trim)
                                 .filter(|value| !value.is_empty())
                                 .map(str::to_owned),
+                            kind,
                             port: port.port_name,
                             name,
                             detail: facts.join(" · "),
@@ -530,5 +582,22 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn usb_classification_accepts_both_supported_panel_interfaces() {
+        assert_eq!(
+            classify_usb_device(ESPRESSIF_USB_VID, 0x1001, "esp32-s3 usb jtag"),
+            Some(UsbDeviceKind::EspressifNative)
+        );
+        assert_eq!(
+            classify_usb_device(CP210X_USB_VID, CP210X_USB_PID, "cp2102 usb to uart"),
+            Some(UsbDeviceKind::Cp210xUart)
+        );
+        assert_eq!(
+            classify_usb_device(0x1209, 0x0001, "custom cp210x bridge"),
+            None
+        );
+        assert_eq!(classify_usb_device(0x1a86, 0x7523, "ch340"), None);
     }
 }

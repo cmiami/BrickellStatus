@@ -25,8 +25,8 @@ pub use ble::{
 };
 #[cfg(feature = "usb")]
 pub use usb::{
-    ESPRESSIF_USB_VID, UsbConfig, UsbConnectionInfo, UsbDeviceInfo, UsbTransport,
-    discover_espressif_devices, discover_espressif_port,
+    CP210X_USB_PID, CP210X_USB_VID, ESPRESSIF_USB_VID, UsbConfig, UsbConnectionInfo, UsbDeviceInfo,
+    UsbDeviceKind, UsbTransport, discover_panel_usb_devices, discover_panel_usb_port,
 };
 
 /// Backward-compatible INK1 GATT service UUID, shared by every panel.
@@ -40,7 +40,7 @@ pub const TX_UUID: Uuid = Uuid::from_u128(0x8b7a0002_4f4b_4a9b_9d6e_1d0c1a2b3c4d
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportKind {
-    /// Native USB CDC serial.
+    /// USB serial, either native CDC or a board-mounted UART bridge.
     Usb,
     /// Bluetooth Low Energy GATT.
     Ble,

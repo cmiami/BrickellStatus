@@ -5,7 +5,7 @@
   import { getPlatformCapabilities } from '$lib/api';
   import { onMount } from 'svelte';
 
-  import { PANEL_GEOMETRY, type FirmwareStatus } from '$lib/types';
+  import { PANEL_GEOMETRY, PANEL_HARDWARE_LABEL, type FirmwareStatus } from '$lib/types';
 
   let status = $state<FirmwareStatus | null>(null);
   let dismissed = $state(false);
@@ -19,11 +19,11 @@
   let error = $state<string | null>(null);
   let done = $state(false);
 
-  // E213 has two internal controller images, but they are recovery mechanics,
-  // not two panels for a reader to identify. The native flash command requires
-  // an objective READY response and tries the other E213 image once when the
-  // first is silent. The glass is never used as proof: e-paper can retain a
-  // readable image from dead firmware indefinitely.
+  // Vision Master E213 has two internal controller images, but they are
+  // objective recovery mechanics: opposite BUSY polarity makes the wrong one
+  // unable to answer READY. Wireless Paper has one image and identifies its
+  // display controller inside the firmware, so neither path asks the reader to
+  // choose a board revision.
 
   const notable = $derived(
     status?.requirement.state === 'required' ||
@@ -31,13 +31,30 @@
   );
   const prompted = $derived(!dismissed && !!status && notable);
 
+  const hardwareVariants = $derived(
+    status?.hardware
+      ? status.variants.filter((item) => item.hardware === status?.hardware)
+      : []
+  );
+
   const variant = $derived(
-    status?.variants.find((item) => item.id === status?.recommendedVariantId) ??
-      status?.variants[0] ??
+    status?.variants.find(
+      (item) =>
+        item.id === status?.recommendedVariantId &&
+        (!status.hardware || item.hardware === status.hardware)
+    ) ??
+      (hardwareVariants.length === 1 ? hardwareVariants[0] : undefined) ??
+      (!status?.hardware && status?.variants.length === 1 ? status.variants[0] : undefined) ??
       null
   );
 
-  const panelName = $derived(status?.board ? PANEL_GEOMETRY[status.board].label : null);
+  const panelName = $derived(
+    status?.hardware
+      ? PANEL_HARDWARE_LABEL[status.hardware]
+      : status?.board
+        ? PANEL_GEOMETRY[status.board].label
+        : null
+  );
   const percent = $derived(total > 0 ? Math.min(100, Math.round((written / total) * 100)) : 0);
   const canFlash = $derived(flashingSupported && !!status?.port && !!variant && status?.requirement.state === 'required');
 
@@ -171,7 +188,7 @@
     {:else if error}
       <p class="failed" role="alert">{error}</p>
     {:else if done}
-      <p class="done" role="status">Firmware written and verified.</p>
+      <p class="done" role="status">Firmware written and boot verified.</p>
     {/if}
 
     <div class="firmware-actions">

@@ -47,14 +47,34 @@ struct PanelWiring {
 
 constexpr PanelWiring kE213{"E213", 250, 122, 1};
 constexpr PanelWiring kE290{"E290", 296, 128, 6};
+constexpr PanelWiring kWirelessPaper{"WPAPER", 250, 122, 7};
 
-#if defined(Vision_Master_E290)
+#if defined(BRICKELLSTATUS_WIRELESS_PAPER)
+// Wireless Paper's display bus is half-duplex: GPIO2 is driven while sending a
+// command, then released while the controller answers on the same wire. Heltec
+// uses this 0x2F query in its V1.1/V1.2 firmware to choose the display driver.
+constexpr uint8_t kWirelessPaperVextPin = 45;
+constexpr uint8_t kWirelessPaperDataPin = 2;
+constexpr uint8_t kWirelessPaperClockPin = 3;
+constexpr uint8_t kWirelessPaperCsPin = 4;
+constexpr uint8_t kWirelessPaperDcPin = 5;
+constexpr uint8_t kWirelessPaperResetPin = 6;
+
+enum class WirelessPaperController : uint8_t {
+  Lcmen2r13efc1,
+  E0213a367,
+};
+#endif
+
+#if defined(BRICKELLSTATUS_WIRELESS_PAPER)
+constexpr const PanelWiring &kBuiltFor = kWirelessPaper;
+#elif defined(Vision_Master_E290)
 constexpr const PanelWiring &kBuiltFor = kE290;
 #else
 constexpr const PanelWiring &kBuiltFor = kE213;
 #endif
 
-/// Peripheral power, active HIGH and on the same pin on both boards.
+/// Vision Master peripheral power, used only by its non-driving board probe.
 constexpr uint8_t kVextPin = 18;
 
 constexpr uint16_t kWidth = kBuiltFor.width;
@@ -68,11 +88,25 @@ constexpr uint32_t kFrameAssemblyTimeoutMs = 1000;
 constexpr uint32_t kBleAdvertisingHealthCheckMs = 2000;
 constexpr uint32_t kLoopWatchdogTimeoutSeconds = 30;
 
-// Both Vision Master boards use this same gated battery divider. These values
-// come from their schematics and the board definitions used by Meshtastic.
+// Battery telemetry follows each PCB's own gated divider. Wireless Paper's
+// display BUSY is GPIO7, so reusing the Vision Master pins here would contend
+// with the panel on every READY/ACK. Its schematic instead places an active-LOW
+// 10k/10k divider on GPIO19/20.
+#if defined(BRICKELLSTATUS_WIRELESS_PAPER)
+constexpr uint8_t kBatteryAdcControlPin = 19;
+constexpr uint8_t kBatteryAdcPin = 20;
+constexpr uint8_t kBatteryAdcControlActive = LOW;
+// `analogReadMilliVolts` applies the ESP32-S3 ADC calibration/attenuation;
+// this factor is only the schematic's nominal 10k/10k divider ratio.
+constexpr uint16_t kBatteryMultiplierMilli = 2000;
+constexpr auto kBatteryAdcAttenuation = ADC_11db;
+#else
 constexpr uint8_t kBatteryAdcControlPin = 46;
 constexpr uint8_t kBatteryAdcPin = 7;
+constexpr uint8_t kBatteryAdcControlActive = HIGH;
 constexpr uint16_t kBatteryMultiplierMilli = 5047;  // 4.9 * 1.03
+constexpr auto kBatteryAdcAttenuation = ADC_2_5db;
+#endif
 constexpr size_t kBatterySampleCount = 9;
 constexpr uint32_t kBatterySampleIntervalMs = 30000;
 // A single-cell LiPo below this level needs attention. The wider clear point
@@ -160,10 +194,9 @@ char bannerLine[112] = "READY";
 /// name could not pick between them.
 ///
 /// The last two octets of the factory MAC settle it. They are unique per board,
-/// they survive a reflash -- which a random suffix would not, and reflashing is
-/// exactly what someone does while working out which panel revision they have
-/// -- and the host already reads this MAC while flashing, so it can work out
-/// the same four characters without asking the board for them.
+/// and they survive a routine firmware update, which a random suffix would not.
+/// The host already reads this MAC while flashing, so it can work out the same
+/// four characters without asking the board for them.
 char boardId[5] = "0000";
 
 void composeBoardId() {
@@ -175,8 +208,80 @@ void composeBoardId() {
   snprintf(boardId, sizeof(boardId), "%02X%02X", mac[4], mac[5]);
 }
 
+#if defined(BRICKELLSTATUS_WIRELESS_PAPER)
+WirelessPaperController detectWirelessPaperController() {
+  // Vext is active LOW. Give the rail the same settling time used by Heltec's
+  // reference query before touching the controller.
+  pinMode(kWirelessPaperVextPin, OUTPUT);
+  digitalWrite(kWirelessPaperVextPin, LOW);
+  delay(100);
+
+  pinMode(kWirelessPaperClockPin, OUTPUT);
+  pinMode(kWirelessPaperDcPin, OUTPUT);
+  pinMode(kWirelessPaperCsPin, OUTPUT);
+  pinMode(kWirelessPaperResetPin, OUTPUT);
+  digitalWrite(kWirelessPaperClockPin, LOW);
+  digitalWrite(kWirelessPaperDcPin, HIGH);
+  digitalWrite(kWirelessPaperCsPin, HIGH);
+
+  digitalWrite(kWirelessPaperResetPin, LOW);
+  delay(20);
+  digitalWrite(kWirelessPaperResetPin, HIGH);
+  delay(20);
+
+  digitalWrite(kWirelessPaperDcPin, LOW);
+  digitalWrite(kWirelessPaperCsPin, LOW);
+  pinMode(kWirelessPaperDataPin, OUTPUT);
+
+  uint8_t command = 0x2F;
+  for (uint8_t bit = 0; bit < 8; ++bit) {
+    digitalWrite(kWirelessPaperDataPin,
+                 (command & 0x80) != 0 ? HIGH : LOW);
+    command <<= 1;
+    digitalWrite(kWirelessPaperClockPin, HIGH);
+    delayMicroseconds(1);
+    digitalWrite(kWirelessPaperClockPin, LOW);
+    delayMicroseconds(1);
+  }
+  delay(10);
+
+  digitalWrite(kWirelessPaperDcPin, HIGH);
+  pinMode(kWirelessPaperDataPin, INPUT_PULLUP);
+  uint8_t chipId = 0;
+  for (int8_t bit = 7; bit >= 0; --bit) {
+    digitalWrite(kWirelessPaperClockPin, LOW);
+    delayMicroseconds(1);
+    digitalWrite(kWirelessPaperClockPin, HIGH);
+    delayMicroseconds(1);
+    if (digitalRead(kWirelessPaperDataPin) == HIGH) {
+      chipId |= static_cast<uint8_t>(1U << bit);
+    }
+  }
+  digitalWrite(kWirelessPaperCsPin, HIGH);
+
+  // Heltec's documented split: E0213A367 answers with Chip ID bits 01;
+  // LCMEN2R13EFC1 does not. V1.0's SSD1680 also answers 01, so this firmware
+  // intentionally makes no unsupported claim that it can distinguish V1.0.
+  const WirelessPaperController controller =
+      (chipId & 0x03) == 0x01
+          ? WirelessPaperController::E0213a367
+          : WirelessPaperController::Lcmen2r13efc1;
+  Serial.printf("PANEL controller-id=0x%02X driver=%s\n", chipId,
+                controller == WirelessPaperController::E0213a367
+                    ? "E0213A367"
+                    : "LCMEN2R13EFC1");
+  return controller;
+}
+#endif
+
 BaseDisplay *makeDisplay() {
-#if defined(Vision_Master_E290)
+#if defined(BRICKELLSTATUS_WIRELESS_PAPER)
+  if (detectWirelessPaperController() ==
+      WirelessPaperController::E0213a367) {
+    return new EInkDisplay_WirelessPaperV1_2();
+  }
+  return new EInkDisplay_WirelessPaperV1_1();
+#elif defined(Vision_Master_E290)
   return new DEPG0290BNS800();
 #elif BRICKELLSTATUS_PANEL_V11
   return new EInkDisplay_VisionMasterE213V1_1();
@@ -221,10 +326,10 @@ void composeBanner();
 
 void setupBatteryTelemetry() {
   pinMode(kBatteryAdcControlPin, OUTPUT);
-  digitalWrite(kBatteryAdcControlPin, LOW);
+  digitalWrite(kBatteryAdcControlPin, !kBatteryAdcControlActive);
   pinMode(kBatteryAdcPin, INPUT);
   analogReadResolution(12);
-  analogSetPinAttenuation(kBatteryAdcPin, ADC_2_5db);
+  analogSetPinAttenuation(kBatteryAdcPin, kBatteryAdcAttenuation);
 }
 
 /// Takes one bounded, median-filtered reading when the prior one is stale.
@@ -241,14 +346,14 @@ bool refreshBatteryTelemetry() {
   batterySampled = true;
   lastBatterySampleAt = now;
 
-  digitalWrite(kBatteryAdcControlPin, HIGH);
+  digitalWrite(kBatteryAdcControlPin, kBatteryAdcControlActive);
   delay(10);
   std::array<uint32_t, kBatterySampleCount> samples{};
   for (uint32_t &sample : samples) {
     sample = analogReadMilliVolts(kBatteryAdcPin);
     delay(1);
   }
-  digitalWrite(kBatteryAdcControlPin, LOW);
+  digitalWrite(kBatteryAdcControlPin, !kBatteryAdcControlActive);
 
   std::sort(samples.begin(), samples.end());
   const uint32_t pinMillivolts = samples[samples.size() / 2];
@@ -658,8 +763,6 @@ void drawWaitingScreen() {
   // the whole job of this screen, so the name is shown verbatim rather than
   // described -- what is on the glass is what appears in the picker.
   //
-  // Reading it at all is also the proof that this build drives this panel
-  // revision: the wrong build hangs before it can draw anything.
   // The exact string this board advertises, at the size of something meant to
   // be read across a desk. Matching a board to an entry in a list is the whole
   // job of this screen, so it is printed verbatim rather than described.
@@ -821,6 +924,13 @@ void setup() {
   composeBoardId();
   setupBatteryTelemetry();
   refreshBatteryTelemetry();
+#if defined(BRICKELLSTATUS_WIRELESS_PAPER)
+  // The CP2102 USB bridge identifies the Wireless Paper PCB to the host. The
+  // firmware then queries the display controller itself in makeDisplay(), so
+  // neither the reader nor the app has to choose a panel revision.
+  attached = &kWirelessPaper;
+  driving = true;
+#else
   attached = probePanel();
   // Only a positive identification of the *other* board stops this build from
   // driving. A probe that could not tell falls back to the board this image was
@@ -828,6 +938,7 @@ void setup() {
   // the probe is allowed to redirect a flash, never to take a working panel out
   // of service because it read an unfamiliar line.
   driving = attached == nullptr || attached == &kBuiltFor;
+#endif
   composeBanner();
 
   // Bring up the radio before touching the e-paper driver. If a damaged panel

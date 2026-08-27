@@ -473,8 +473,11 @@ export interface EinkPreview {
 /// Which e-paper board is attached. Reported by the board itself; never asked.
 export type PanelModel = 'e213' | 'e290';
 
-/// Which E213 panel controller a build carries. The one thing about the
-/// hardware that cannot be read back, and so the only thing ever remembered.
+/** Exact board around the display; E213 geometry is shared by two pinouts. */
+export type PanelHardware = 'visionMasterE213' | 'visionMasterE290' | 'wirelessPaper';
+
+/// Vision Master E213 controller build used by its verified recovery path.
+/// Wireless Paper identifies its display controller inside one universal build.
 export type PanelRevision = 'original' | 'v11';
 
 export type FlashRequirement =
@@ -498,6 +501,7 @@ export interface FirmwareVariantSummary {
   id: string;
   label: string;
   panel: PanelModel;
+  hardware: PanelHardware;
   panelRevision?: PanelRevision;
   totalBytes: number;
 }
@@ -509,6 +513,8 @@ export interface FirmwareStatus {
   bundledVersion?: number;
   /** The board that answered, when one has. */
   board?: PanelModel;
+  /** Exact board family, distinct from framebuffer geometry. */
+  hardware?: PanelHardware;
   /** The build to write to it, decided from what the board reported. */
   recommendedVariantId?: string;
   variants: FirmwareVariantSummary[];
@@ -520,6 +526,12 @@ export interface FirmwareStatus {
 export const PANEL_GEOMETRY: Record<PanelModel, { width: number; height: number; label: string }> = {
   e213: { width: 250, height: 122, label: 'E213' },
   e290: { width: 296, height: 128, label: 'E290' }
+};
+
+export const PANEL_HARDWARE_LABEL: Record<PanelHardware, string> = {
+  visionMasterE213: 'Vision Master E213',
+  visionMasterE290: 'Vision Master E290',
+  wirelessPaper: 'Wireless Paper'
 };
 
 // One observed radar composite, as a MapLibre raster template rather than as

@@ -1,25 +1,27 @@
 # BrickellStatus — Heltec e-paper panel firmware
 
-This firmware turns a Heltec Vision Master board into a host-driven, one-bit
-status display. The Rust host renders the complete image and sends it over
-native USB CDC or Bluetooth Low Energy. The board only identifies itself,
-validates frames, and displays them.
+This firmware turns a Heltec Vision Master or Wireless Paper board into a
+host-driven, one-bit status display. The Rust host renders the complete image
+and sends it over USB serial or Bluetooth Low Energy. The board only identifies
+itself, validates frames, and displays them.
 
 ## Hardware scope
 
 - Vision Master **E213**, 250 × 122 — original (`V1`) and revised (`V1.1`) panels.
 - Vision Master **E290**, 296 × 128.
+- **Wireless Paper**, 250 × 122 — `V1.1`, `V1.1.1`, and `V1.2`.
 - This project does **not** initialize or use Wi-Fi.
 - This project does **not** initialize or use LoRa. It is appropriate for the
   no-LoRa monitor boards; no radio module is required.
-- USB and BLE are the only host transports.
+- USB and BLE are the only host transports. Vision Master uses native USB CDC;
+  Wireless Paper uses its onboard CP2102 bridge and UART0.
 - The board has no runtime controls to operate. Power it and use the desktop
   app for discovery, connection, rotation, and proof-frame actions.
 
 ## The board identifies itself
 
-Nobody is asked which board they plugged in. The two boards carry the same six
-display GPIOs with the roles permuted:
+Nobody is asked which board they plugged in. The two Vision Master boards carry
+the same six display GPIOs with the roles permuted:
 
 | pin | 1 | 2 | 3 | 4 | 5 | 6 |
 |---|---|---|---|---|---|---|
@@ -42,10 +44,11 @@ image was written for, which is how this firmware behaved before it could ask at
 all. The probe is allowed to redirect a flash; it is not allowed to take a
 working panel out of service over an unfamiliar reading.
 
-The display library binds one board's pinout and controller per image, so each
-environment below carries one of them. A build that lands on a board it can see
-is the wrong one leaves the panel alone and says so, and the desktop app writes
-the right image without asking anything:
+The display library binds one board pinout per image. Vision Master controller
+classes remain separate recovery builds; Wireless Paper carries both supported
+classes and selects one at boot. A Vision Master build that detects the other
+Vision Master leaves the panel alone and says so, and the desktop app writes the
+right image without asking anything:
 
 ```text
 READY INK1 0x0 0 <build> E290 <board-id> FW2 MISMATCH
@@ -56,6 +59,19 @@ controllers use opposite `BUSY` polarity. The wrong image blocks before the
 decoder loop and never answers `READY INK1`. The app writes one internal E213
 image, sends the repeatable identity query, and tries the other image once only
 when READY is absent. It remembers only the image that answers.
+
+Wireless Paper has a third pinout: MOSI 2, CLK 3, CS 4, DC 5, RST 6, BUSY 7,
+with an active-LOW peripheral rail on GPIO 45. Its USB-C port uses the CP2102
+bridge identity the desktop scans for, so plugging in a board produces the same
+single Flash offer as Vision Master. The flash command is constrained to the
+Wireless Paper pinout.
+
+There is one Wireless Paper image. At boot it runs Heltec's `0x2F` controller
+query and selects LCMEN2R13EFC1 for V1.1 or E0213A367 for V1.1.1/V1.2 before
+drawing. No display revision is exposed in the app. Original V1.0 is outside
+this target: its SSD1680 reports the same public ID bits as E0213A367, and there
+is no published reliable discriminator. The firmware does not guess from
+undocumented OTP contents.
 
 ## Build and flash
 
@@ -72,6 +88,9 @@ pio run --project-dir firmware/panel -e vision-master-e213
 
 # E290
 pio run --project-dir firmware/panel -e vision-master-e290
+
+# Wireless Paper V1.1 through V1.2 (controller detected at boot)
+pio run --project-dir firmware/panel -e wireless-paper
 ```
 
 Serial diagnostics:
@@ -85,7 +104,14 @@ read when a board comes up blank:
 
 ```text
 PROBE attempt=0 pin1=driven pin6=floating
-READY INK1 250x122 3904 9f3c2ab E213 26B4 FW4 BAT4012
+READY INK1 250x122 3904 9f3c2ab E213 26B4 FW6 BAT4012
+```
+
+Wireless Paper reports the controller decision before READY:
+
+```text
+PANEL controller-id=0x01 driver=E0213A367
+READY INK1 250x122 3904 9f3c2ab WPAPER 26B4 FW6 BAT4012
 ```
 
 ## Wire contract
@@ -106,8 +132,8 @@ assumption that there was one answer had to go.
 - identity query: a single `?` byte between frames repeats the full
   `READY INK1 ...` banner
 
-The trailing `FW<n>` is the monotonic firmware release shared by E213 and
-E290. It is the only field used to decide upgrade direction: lower means the
+The trailing `FW<n>` is the monotonic firmware release shared by every board.
+It is the only field used to decide upgrade direction: lower means the
 bundled firmware is newer, higher means the desktop app must be updated and
 must not downgrade the panel. The adjacent source build identifies exact bytes
 but is never ordered. Clean builds use the last firmware Git revision; dirty
@@ -121,12 +147,14 @@ A host that sends the geometry the attached panel does not have is answered
 
 ## Battery status
 
-The E213 and E290 share the same battery circuit: GPIO 46 enables the voltage
-divider, and GPIO 7 reads it with 2.5 dB ADC attenuation. Firmware powers that
-divider only for a bounded nine-sample median reading, applies the board's
-`4.9 × 1.03` divider calibration, and refreshes it at most once every 30
-seconds. Values outside the plausible 2,500–5,000 mV range are omitted. An
-omitted `BAT` token means unknown — commonly no attached battery — never zero.
+The E213 and E290 share a battery circuit: GPIO 46 enables the divider and GPIO
+7 reads it with 2.5 dB ADC attenuation, using the board's `4.9 × 1.03`
+calibration. Wireless Paper has a separate active-LOW GPIO 19 gate and a 10k /
+10k divider on GPIO 20, read at 11 dB attenuation and scaled by two. Firmware
+powers either divider only for a bounded nine-sample median reading and
+refreshes it at most once every 30 seconds. Values outside the plausible
+2,500–5,000 mV range are omitted. An omitted `BAT` token means unknown —
+commonly no attached battery — never zero.
 
 `LOWBAT` enters at or below 3,400 mV and clears only at or above 3,550 mV, so a
 battery near the boundary does not repeatedly alert. READY uses `LOWBAT`; ACK
@@ -173,8 +201,9 @@ has to know which panel it is drawing for before it draws. ACK and NACK are
 notified transiently, then the characteristic's readable value is restored to
 the current READY banner. A later reconnect therefore still reads geometry,
 version, identity, and the latest battery measurement instead of an old ACK.
-USB serial is 115,200 baud. BLE clients must subscribe to TX before writing
-packet chunks to RX so that a fast acknowledgement cannot be missed.
+USB serial is 115,200 baud over native CDC (Vision Master) or the onboard
+CP2102/UART0 bridge (Wireless Paper). BLE clients must subscribe to TX before
+writing packet chunks to RX so that a fast acknowledgement cannot be missed.
 
 The repeated identity query also makes E213 controller recovery objective. The
 two E213 images use opposite BUSY polarity; the wrong one blocks before the

@@ -136,9 +136,9 @@ shape available, because the hardware is visibly present and still unusable.
 
 The package installs
 [`70-brickellstatus-espressif.rules`](../apps/desktop/src-tauri/linux/70-brickellstatus-espressif.rules)
-into `/usr/lib/udev/rules.d/`, tagging Espressif's USB vendor (`303a`) with
-`uaccess`. systemd-logind then puts an ACL for the **active local session** on
-the node.
+into `/usr/lib/udev/rules.d/`, tagging Espressif native USB (`303a`) and the
+Wireless Paper's Silicon Labs CP2102 bridge (`10c4:ea60`) with `uaccess`.
+systemd-logind then puts an ACL for the **active local session** on the node.
 
 That is deliberately narrower than the usual advice of adding the account to
 `dialout`, which grants that account every serial device on the machine,
@@ -146,10 +146,8 @@ permanently, whether or not it is the session sitting at the keyboard. It also
 needs no logout — the post-install scriptlet reloads udev and retriggers `tty`
 devices, so a board plugged in before the install works immediately.
 
-USB-UART bridge chips (CP210x, CH340, FTDI) are deliberately not covered: the
-app's own discovery filter in `crates/eink/src/transport/usb.rs` does not
-recognise them either, so a rule for them would open devices that never appear
-in the picker.
+Other USB-UART bridge families remain deliberately uncovered: the app does not
+recognise them, so a rule would open devices that never appear in the picker.
 
 ## Wayland
 
@@ -258,12 +256,14 @@ Run this against the exact package the release will ship, on Fedora 44.
    the app is listed in GNOME Settings → Notifications.
 7. **Hardware, unplugged first** — with no board attached, confirm the panel
    picker reports nothing found rather than erroring.
-8. **Hardware, plugged in after install** — attach an E213 or E290 and confirm
-   it appears **without** replugging, which is what the post-install udev
-   retrigger buys. Confirm `getfacl /dev/ttyACM0` shows an ACL for your user.
-9. **Flash** — flash the bundled firmware to a board and confirm the app
-   reports the build id it wrote. This is the step that proves serial write
-   access, not just enumeration.
+8. **Hardware, plugged in after install** — attach a Vision Master E213/E290 or
+   Wireless Paper and confirm it appears **without** replugging, which is what
+   the post-install udev retrigger buys. Confirm `getfacl` on its `ttyACM` or
+   `ttyUSB` node shows an ACL for your user.
+9. **Flash** — confirm the app detects the board family and offers one Flash
+   action, then flash the bundled firmware and confirm the app reports the
+   build id it wrote. Wireless Paper must not show a display-revision choice.
+   This is the step that proves serial write access, not just enumeration.
 10. **Remove** — `sudo dnf remove brickellstatus` and confirm the udev rule is
     gone from `/usr/lib/udev/rules.d/`.
 

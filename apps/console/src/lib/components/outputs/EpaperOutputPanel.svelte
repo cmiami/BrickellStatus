@@ -97,15 +97,25 @@
   const geometry = $derived(PANEL_GEOMETRY[panel]);
   const detected = $derived(Boolean(deviceStatus.panel));
 
-  // E213's two controller images are internal recovery candidates, not two
-  // panel choices. This single reflash action starts with the recommended image;
-  // the backend requires READY and tries the other E213 controller once when
-  // needed, without treating retained pixels as proof that firmware is alive.
+  // Geometry alone is not enough: Vision Master E213 and Wireless Paper share
+  // the same framebuffer size but have different wiring. Prefer the backend's
+  // recommendation, then permit a fallback only when the exact hardware family
+  // has one image. Wireless Paper's image identifies its controller at boot.
+  const hardwareReflashBuilds = $derived(
+    firmware?.hardware
+      ? firmware.variants.filter((variant) => variant.hardware === firmware?.hardware)
+      : []
+  );
   const reflashBuild = $derived(
     !flashingSupported || firmware?.requirement.state === 'deviceNewer'
       ? null
-      : firmware?.variants.find((variant) => variant.id === firmware?.recommendedVariantId) ??
-        firmware?.variants.find((variant) => variant.panel === panel) ??
+      : firmware?.variants.find(
+          (variant) =>
+            variant.id === firmware?.recommendedVariantId &&
+            (!firmware.hardware || variant.hardware === firmware.hardware)
+        ) ??
+        (hardwareReflashBuilds.length === 1 ? hardwareReflashBuilds[0] : undefined) ??
+        (!firmware?.hardware && firmware?.variants.length === 1 ? firmware.variants[0] : undefined) ??
         null
   );
 
@@ -390,7 +400,7 @@
         <div class="panel-rescue">
           <div>
             <strong>Panel firmware</strong>
-            <span>Reinstall and verify the firmware bundled with this app. E213 controller selection is automatic.</span>
+            <span>Reinstall and verify the firmware bundled with this app. Vision Master E213 controller recovery is automatic.</span>
           </div>
           <button class="secondary-action" onclick={reflashPanelFirmware} disabled={reflashingFirmware}>
             {reflashingFirmware ? 'Reflashing…' : 'Reflash firmware'}

@@ -37,6 +37,64 @@ fn flash_recovery_never_moves_to_a_different_or_anonymous_usb_board() {
 }
 
 #[test]
+fn firmware_status_follows_the_selected_usb_board_not_port_sort_order() {
+    use brickellstatus_eink::transport::{UsbDeviceInfo, UsbDeviceKind};
+
+    let devices = vec![
+        UsbDeviceInfo {
+            serial_number: Some("vision-master".into()),
+            kind: UsbDeviceKind::EspressifNative,
+            port: "/dev/cu.usbmodem-first".into(),
+            name: "ESP32-S3".into(),
+            detail: "VID 303A".into(),
+        },
+        UsbDeviceInfo {
+            serial_number: None,
+            kind: UsbDeviceKind::Cp210xUart,
+            port: "/dev/cu.usbserial-selected".into(),
+            name: "CP2102".into(),
+            detail: "VID 10C4 · PID EA60".into(),
+        },
+    ];
+
+    assert_eq!(
+        firmware_usb_device(&devices, "/dev/cu.usbserial-selected").map(|device| device.kind),
+        Some(UsbDeviceKind::Cp210xUart)
+    );
+    assert_eq!(
+        firmware_usb_device(&devices, "/dev/cu.missing").map(|device| device.kind),
+        Some(UsbDeviceKind::EspressifNative)
+    );
+    assert_eq!(
+        firmware_usb_device(&devices[1..], "/dev/cu.missing"),
+        Some(&devices[1]),
+        "a lone exact CP2102 match should receive the Wireless Paper flash offer"
+    );
+}
+
+#[test]
+fn flash_pinouts_are_constrained_by_the_selected_usb_interface() {
+    use brickellstatus_eink::transport::UsbDeviceKind;
+
+    assert!(firmware_variant_matches_usb(
+        UsbDeviceKind::Cp210xUart,
+        PanelHardware::WirelessPaper,
+    ));
+    assert!(!firmware_variant_matches_usb(
+        UsbDeviceKind::Cp210xUart,
+        PanelHardware::VisionMasterE213,
+    ));
+    assert!(firmware_variant_matches_usb(
+        UsbDeviceKind::EspressifNative,
+        PanelHardware::VisionMasterE290,
+    ));
+    assert!(!firmware_variant_matches_usb(
+        UsbDeviceKind::EspressifNative,
+        PanelHardware::WirelessPaper,
+    ));
+}
+
+#[test]
 fn every_flash_entry_point_refuses_a_detected_firmware_downgrade() {
     let newer = DeviceBanner::parse("READY INK1 250x122 3904 future E213 26B4 FW3");
     assert!(refuse_firmware_downgrade(&newer, 2).is_err());

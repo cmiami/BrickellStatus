@@ -28,7 +28,7 @@
 //! disagreements — a board that cannot name its build must not be reported as
 //! running the wrong one.
 
-use crate::PanelModel;
+use crate::{PanelHardware, PanelModel};
 
 /// What the firmware banner told us about the attached board.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -39,8 +39,14 @@ pub struct DeviceBanner {
     /// announced. Absent on a build sitting on the wrong board.
     pub panel: Option<PanelModel>,
     /// Board the firmware's probe actually found, whether or not it can drive
-    /// it. This is the identity a flash decision is made from.
+    /// it, reduced to framebuffer geometry for rendering and legacy callers.
     pub board: Option<PanelModel>,
+    /// Exact board family around that panel.
+    ///
+    /// The Wireless Paper and Vision Master E213 share a 250×122 framebuffer,
+    /// but flashing one board's pinout onto the other is not safe. Firmware
+    /// selection therefore uses this identity instead of geometry alone.
+    pub hardware: Option<PanelHardware>,
     /// Whether the firmware reported that it cannot drive the board it is on.
     pub mismatch: bool,
     /// Build identity, when the firmware is new enough to report one.
@@ -93,9 +99,11 @@ impl DeviceBanner {
             .filter(|value| !value.is_empty())
             .filter(|value| !value.eq_ignore_ascii_case(UNKNOWN_BUILD))
             .map(str::to_owned);
-        let board = tokens
+        let hardware = tokens
             .get(5)
-            .and_then(|name| PanelModel::from_label(name))
+            .and_then(|name| PanelHardware::from_label(name));
+        let board = hardware
+            .map(PanelHardware::panel)
             // Firmware old enough to omit the board name is firmware from
             // before there was a second board, so what it draws is what it is.
             .or(panel);
@@ -126,6 +134,7 @@ impl DeviceBanner {
             saw_ready: true,
             panel,
             board,
+            hardware,
             mismatch,
             build,
             firmware_version,
@@ -196,11 +205,20 @@ mod tests {
         let banner =
             DeviceBanner::parse("READY INK1 296x128 4736 9f3c2ab E290 26B4 FW3 BAT3375 LOWBAT");
         assert_eq!(banner.board_id.as_deref(), Some("26B4"));
+        assert_eq!(banner.hardware, Some(PanelHardware::VisionMasterE290));
         assert_eq!(banner.firmware_version, Some(3));
         assert!(!banner.version_malformed);
         assert!(!banner.mismatch);
         assert_eq!(banner.battery_millivolts, Some(3375));
         assert_eq!(banner.low_battery, Some(true));
+    }
+
+    #[test]
+    fn wireless_paper_keeps_its_hardware_identity_at_e213_geometry() {
+        let banner = DeviceBanner::parse("READY INK1 250x122 3904 abc1234 WPAPER 26B4 FW6 BAT4012");
+        assert_eq!(banner.panel, Some(PanelModel::E213));
+        assert_eq!(banner.board, Some(PanelModel::E213));
+        assert_eq!(banner.hardware, Some(PanelHardware::WirelessPaper));
     }
 
     #[test]

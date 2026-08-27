@@ -116,11 +116,16 @@ Windows 11 VM.
    browser, including URLs containing `&`.
 8. **Geolocation** — "Locate this computer once" produces either a position or
    the documented error copy; search and pin-drop still work without one.
-9. **USB / e-ink** — Parallels → Devices → USB → connect "Espressif USB
-   JTAG/serial debug unit". Device Manager shows a COM port on the inbox
-   `usbser.sys` driver with no driver install; the in-app scan finds it (VID
-   0x303A); connect; the test frame returns `ACK INK1`; rotation renders.
-10. **Firmware flash** — flash a variant and watch progress. Set the Parallels
+9. **USB / e-ink** — test both interfaces: Vision Master as "Espressif USB
+   JTAG/serial debug unit" (VID 0x303A, inbox `usbser.sys`) and Wireless Paper
+   as a Silicon Labs CP210x COM port (VID 0x10C4 / PID 0xEA60). The in-app scan
+   finds each; connect; the test frame returns `ACK INK1`; rotation renders. If
+   Windows does not expose the CP210x COM port, install Silicon Labs' official
+   CP210x VCP driver before treating discovery as an app failure.
+10. **Firmware flash** — flash each board family and watch progress. On Wireless
+    Paper, confirm the exact CP2102 interface produces one Wireless Paper offer
+    and one Flash action, with no display-revision choice. Boot verification
+    returns over the same CP2102 UART. Set the Parallels
     USB assignment to reconnect to Windows automatically: the board
     re-enumerates after the post-flash reset, and if the Mac reclaims it the
     QA run stalls. Windows keeps COM numbers sticky per device serial, so the

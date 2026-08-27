@@ -34,12 +34,12 @@ use brickellstatus_projection::{
 use brickellstatus_projection::{local_clock, span_code, upstream_spans};
 // Re-exported because the live-frame binary drives the same path the app does.
 use brickellstatus_eink::{
-    DeviceBanner, FULL_REFRESH_CHURN, MonoFrame, PanelModel, RadarFigure, RefreshMode,
-    RenderConfig, preview_png_bytes, radar_figure_from_png, render_channel_card,
+    DeviceBanner, FULL_REFRESH_CHURN, MonoFrame, PanelHardware, PanelModel, RadarFigure,
+    RefreshMode, RenderConfig, preview_png_bytes, radar_figure_from_png, render_channel_card,
     render_channel_card_with_radar, render_snapshot, series_figure,
     transport::{
         BleConfig, BleDeviceInfo, BleTransport, TransportError, TransportKind, TransportReceipt,
-        UsbConfig, UsbTransport, discover_ble_devices, discover_espressif_devices,
+        UsbConfig, UsbDeviceKind, UsbTransport, discover_ble_devices, discover_panel_usb_devices,
         is_durable_ble_device_name,
     },
 };
@@ -536,7 +536,7 @@ impl DisplayController {
             },
             ..BleConfig::default()
         };
-        let (usb, ble) = tokio::join!(discover_espressif_devices(), discover_ble(&ble_config));
+        let (usb, ble) = tokio::join!(discover_panel_usb_devices(), discover_ble(&ble_config));
         let mut devices = Vec::new();
         let mut errors = Vec::new();
         match usb {
@@ -545,7 +545,7 @@ impl DisplayController {
                 name: device.name,
                 transport: DisplayConnectionTransport::Usb,
                 detail: format!(
-                    "{} · unverified Espressif serial candidate · {}",
+                    "{} · unverified compatible panel serial candidate · {}",
                     device.port, device.detail
                 ),
                 signal_strength: None,
@@ -1149,7 +1149,7 @@ fn mirror_status_to_tray(app: &AppHandle, status: &DisplayConnectionStatus) {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FirmwareStatus {
-    /// Serial port of the attached Espressif board, when one is present.
+    /// Serial port of an attached supported panel board, when one is present.
     pub port: Option<String>,
     /// Build this app ships, when it ships one.
     pub bundled_build: Option<String>,
@@ -1158,9 +1158,10 @@ pub struct FirmwareStatus {
     pub bundled_version: Option<u32>,
     /// Which board is attached, as the board itself reported it.
     pub board: Option<PanelModel>,
-    /// The build to write to it, worked out from that report and from whatever
-    /// answered the one question hardware cannot. The interface flashes this;
-    /// it does not offer a menu.
+    /// Exact board family, distinct from its framebuffer geometry.
+    pub hardware: Option<PanelHardware>,
+    /// The build to write to it. Wireless Paper has one image and selects its
+    /// supported display controller inside the firmware at boot.
     pub recommended_variant_id: Option<String>,
     /// Variants available to flash.
     pub variants: Vec<FirmwareVariantSummary>,
@@ -1178,6 +1179,7 @@ pub struct FirmwareVariantSummary {
     /// Board this build drives, so the interface can offer only the builds that
     /// could possibly apply to what is attached.
     pub panel: PanelModel,
+    pub hardware: PanelHardware,
     pub panel_revision: Option<firmware::PanelRevision>,
     pub total_bytes: usize,
 }
@@ -1191,6 +1193,42 @@ fn firmware_root(app: &AppHandle) -> Option<std::path::PathBuf> {
         // `firmware:bundle` -- would otherwise report a directory that is not
         // there and fail later with a confusing read error.
         .filter(|path| path.is_dir())
+}
+
+/// USB board whose firmware status should be reported.
+///
+/// A reader's explicit port wins. Otherwise preserve the existing native-USB
+/// preference, then recognize the exact CP2102 interface shipped on Wireless
+/// Paper so a board by itself gets the same first-run Flash offer.
+fn firmware_usb_device<'a>(
+    devices: &'a [brickellstatus_eink::transport::UsbDeviceInfo],
+    preferred_port: &str,
+) -> Option<&'a brickellstatus_eink::transport::UsbDeviceInfo> {
+    devices
+        .iter()
+        .find(|device| !preferred_port.trim().is_empty() && device.port == preferred_port)
+        .or_else(|| {
+            devices
+                .iter()
+                .find(|device| device.kind == UsbDeviceKind::EspressifNative)
+        })
+        .or_else(|| {
+            devices
+                .iter()
+                .find(|device| device.kind == UsbDeviceKind::Cp210xUart)
+        })
+}
+
+/// Whether the selected USB interface can safely receive this board pinout.
+///
+/// This is checked inside the Tauri command, not only in the interface, so a
+/// stale status object or direct command invocation cannot cross-flash a
+/// Wireless Paper and Vision Master.
+fn firmware_variant_matches_usb(kind: UsbDeviceKind, hardware: PanelHardware) -> bool {
+    match kind {
+        UsbDeviceKind::EspressifNative => hardware != PanelHardware::WirelessPaper,
+        UsbDeviceKind::Cp210xUart => hardware == PanelHardware::WirelessPaper,
+    }
 }
 
 /// Reports whether an attached board needs the bundled firmware.
@@ -1212,13 +1250,19 @@ async fn get_firmware_status(
         preferences.display.transport,
         &preferences.display.ble_name,
     );
-    let devices = brickellstatus_eink::transport::discover_espressif_devices()
+    let devices = brickellstatus_eink::transport::discover_panel_usb_devices()
         .await
         .unwrap_or_default();
-    let port = devices.first().map(|device| device.port.clone());
-    let attached_serial = devices
-        .first()
-        .and_then(|device| device.serial_number.clone());
+    // Firmware status follows the panel the reader selected. Port sorting is
+    // not device selection: with a Vision Master and Wireless Paper attached,
+    // taking the first path could recommend one board's pinout for the other.
+    let attached = firmware_usb_device(&devices, &preferences.display.serial_port);
+    let port = attached.map(|device| device.port.clone());
+    let attached_serial = attached.and_then(|device| device.serial_number.clone());
+    let usb_hardware_hint = attached.and_then(|device| match device.kind {
+        UsbDeviceKind::Cp210xUart => Some(PanelHardware::WirelessPaper),
+        UsbDeviceKind::EspressifNative => None,
+    });
 
     let Some(root) = firmware_root(&app) else {
         return Ok(FirmwareStatus {
@@ -1226,6 +1270,7 @@ async fn get_firmware_status(
             bundled_build: None,
             bundled_version: None,
             board: None,
+            hardware: None,
             recommended_variant_id: None,
             variants: Vec::new(),
             requirement: firmware::FlashRequirement::NoDevice,
@@ -1241,6 +1286,7 @@ async fn get_firmware_status(
                 bundled_build: None,
                 bundled_version: None,
                 board: None,
+                hardware: None,
                 recommended_variant_id: None,
                 variants: Vec::new(),
                 requirement: firmware::FlashRequirement::NoDevice,
@@ -1336,9 +1382,9 @@ async fn get_firmware_status(
     // What the board said it is. A board that has not spoken this session is
     // not guessed at here; the last build written to it is the better answer,
     // and that is what the record holds.
-    let reported = match &probe {
-        firmware::DeviceProbe::Answered(banner) => banner.board,
-        _ => None,
+    let (reported, reported_hardware) = match &probe {
+        firmware::DeviceProbe::Answered(banner) => (banner.board, banner.hardware),
+        _ => (None, None),
     };
     // Drawing follows the device, so a board that named itself has just told
     // the display route which panel to render for.
@@ -1349,14 +1395,26 @@ async fn get_firmware_status(
         .as_ref()
         .and_then(|record| bundle.variant(&record.variant_id))
         .and_then(|variant| variant.panel_revision);
-    let board = reported.or_else(|| {
-        remembered
-            .as_ref()
-            .and_then(|record| bundle.variant(&record.variant_id))
-            .map(|variant| variant.panel)
-    });
-    let recommended_variant_id = board
-        .and_then(|board| bundle.for_board(board, remembered_revision))
+    let remembered_hardware = remembered
+        .as_ref()
+        .and_then(|record| bundle.variant(&record.variant_id))
+        .map(|variant| variant.hardware);
+    let hardware = reported_hardware
+        .or(remembered_hardware)
+        // The exact CP2102 identity used by Wireless Paper establishes its
+        // pinout for the first-run offer. Native USB still cannot tell E213
+        // from E290, so the existing probe/recovery path remains in charge.
+        .or(usb_hardware_hint);
+    let board = reported
+        .or_else(|| hardware.map(PanelHardware::panel))
+        .or_else(|| {
+            remembered
+                .as_ref()
+                .and_then(|record| bundle.variant(&record.variant_id))
+                .map(|variant| variant.panel)
+        });
+    let recommended_variant_id = hardware
+        .and_then(|hardware| bundle.for_hardware(hardware, remembered_revision))
         // With no board known at all — a virgin board that has never spoken —
         // the first build in the bundle is the one to try, and the firmware
         // will say so if it lands on something else.
@@ -1368,6 +1426,7 @@ async fn get_firmware_status(
         bundled_build: bundle.source_revision.clone(),
         bundled_version: Some(bundle.firmware_version),
         board,
+        hardware,
         recommended_variant_id,
         variants: bundle
             .variants()
@@ -1376,6 +1435,7 @@ async fn get_firmware_status(
                 id: variant.id.clone(),
                 label: variant.label.clone(),
                 panel: variant.panel,
+                hardware: variant.hardware,
                 panel_revision: variant.panel_revision,
                 total_bytes: variant.total_bytes(),
             })
@@ -1399,6 +1459,23 @@ async fn flash_firmware(
         .variant(&variant_id)
         .ok_or_else(|| format!("unknown firmware variant {variant_id:?}"))?
         .clone();
+    let preferences = state.engine.get_preferences().await;
+    let selected_device = brickellstatus_eink::transport::discover_panel_usb_devices()
+        .await
+        .map_err(|error| format!("could not verify the selected USB port: {error}"))?
+        .into_iter()
+        .find(|device| device.port == port)
+        .ok_or_else(|| format!("{port} is not an attached compatible panel USB interface"))?;
+    if !firmware_variant_matches_usb(selected_device.kind, initial_variant.hardware) {
+        return Err(format!(
+            "{} cannot be written through the selected {} interface; no firmware was written",
+            initial_variant.label,
+            match selected_device.kind {
+                UsbDeviceKind::EspressifNative => "native Espressif USB",
+                UsbDeviceKind::Cp210xUart => "CP210x UART",
+            }
+        ));
+    }
     let bundled_build = bundle.source_revision.clone();
     let bundled_version = bundle.firmware_version;
     if let Some(banner) = panel_banner_before_flash(&state.display, &port).await {
@@ -1421,7 +1498,6 @@ async fn flash_firmware(
     };
     let port_for_status = port.clone();
 
-    let preferences = state.engine.get_preferences().await;
     // Keep automatic reconnect parked for the complete write / verify /
     // recovery transaction. Restoring the display route between controller
     // images can seize the serial port before the READY query gets to ask what
@@ -1688,12 +1764,24 @@ fn refuse_firmware_downgrade(banner: &DeviceBanner, bundled_version: u32) -> Res
 /// speak, or a port somebody else already holds. Each of those is a reason to
 /// leave the reader's transport choice alone rather than guess.
 async fn adoptable_panel_port() -> Option<String> {
-    let port = brickellstatus_eink::transport::discover_espressif_port()
-        .await
-        .ok()
-        .flatten()?;
-    let banner = banner_after_flash(&port, None).await.ok()??;
-    banner.saw_ready.then_some(port)
+    let devices = discover_panel_usb_devices().await.ok()?;
+    for device in devices {
+        let transport = UsbTransport::new(UsbConfig {
+            port: Some(device.port.clone()),
+            ..Default::default()
+        });
+        let banner = transport
+            .ensure_connected()
+            .await
+            .ok()
+            .and_then(|info| info.banner)
+            .map(|line| DeviceBanner::parse(&line));
+        transport.disconnect().await;
+        if banner.is_some_and(|banner| banner.saw_ready && !banner.mismatch) {
+            return Some(device.port);
+        }
+    }
+    None
 }
 
 /// Reads the banner a freshly flashed board speaks at boot.
@@ -1708,7 +1796,7 @@ async fn banner_after_flash(
 ) -> Result<Option<DeviceBanner>, String> {
     let deadline = tokio::time::Instant::now() + FIRMWARE_REENUMERATION_TIMEOUT;
     let attached = loop {
-        match discover_espressif_devices().await {
+        match discover_panel_usb_devices().await {
             Ok(devices) => {
                 if let Some(device) = devices.into_iter().find(|device| device.port == port) {
                     break device;
@@ -1809,7 +1897,7 @@ where
 
 /// The USB serial number of the board at `port`, when it reports one.
 async fn attached_board_serial(port: &str) -> Option<String> {
-    brickellstatus_eink::transport::discover_espressif_devices()
+    brickellstatus_eink::transport::discover_panel_usb_devices()
         .await
         .ok()?
         .into_iter()

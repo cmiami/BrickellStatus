@@ -48,7 +48,7 @@ pub use model::{
     ConfidenceBand, EtaRange, Evidence, Freshness, LiveSnapshot, SnapshotError, SnapshotState,
     SpanStatus,
 };
-pub use panel::PanelModel;
+pub use panel::{PanelHardware, PanelModel};
 pub use preview::{PreviewError, preview_png_bytes, save_preview_png, save_scaled_preview_png};
 pub use protocol::{
     FLAG_FULL_REFRESH, FULL_REFRESH_CHURN, HEADER_SIZE, INK1_MAGIC, MAX_PACKET_SIZE, ProtocolError,

@@ -47,25 +47,36 @@ LAYOUT = [
 
 # E213 is one product-facing panel with two internal controller images. The app
 # never asks a reader to choose between them: it requires READY from the first
-# and tries the other once on silence. `panelRevision` exists only so the image
-# that objectively answered can lead the next repair attempt.
+# and tries the other once on silence. Wireless Paper controller detection runs
+# inside its single firmware image, so that board also remains one product and
+# one Flash action.
 VARIANTS = [
     {
         "id": "vision-master-e213-v11",
         "label": "Vision Master E213",
         "panel": "e213",
+        "hardware": "visionMasterE213",
         "panelRevision": "v11",
     },
     {
         "id": "vision-master-e213",
         "label": "Vision Master E213",
         "panel": "e213",
+        "hardware": "visionMasterE213",
         "panelRevision": "original",
     },
     {
         "id": "vision-master-e290",
         "label": "Vision Master E290",
         "panel": "e290",
+        "hardware": "visionMasterE290",
+        "panelRevision": None,
+    },
+    {
+        "id": "wireless-paper",
+        "label": "Wireless Paper",
+        "panel": "e213",
+        "hardware": "wirelessPaper",
         "panelRevision": None,
     },
 ]
@@ -221,9 +232,9 @@ def main() -> int:
         variants.append({**variant, "images": images})
 
     manifest = {
-        # 3: the manifest carries the same monotonic firmware version as every
-        # device banner, so upgrade ordering never depends on Git hashes.
-        "schemaVersion": 3,
+        # 4: exact board hardware is separate from framebuffer geometry, and
+        # the manifest carries the device banner's monotonic firmware version.
+        "schemaVersion": 4,
         "chip": "esp32s3",
         "firmwareVersion": firmware_version(),
         "sourceRevision": source_revision(),

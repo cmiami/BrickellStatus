@@ -18,9 +18,10 @@ vi.mock('$lib/api', () => ({
   getPlatformCapabilities: vi.fn(async () => ({ usbDisplay: true, firmwareFlashing: true }))
 }));
 
-const E213_V11 = { id: 'vision-master-e213-v11', label: 'Panel v1.1', panel: 'e213', panelRevision: 'v11', totalBytes: 529_104 } as const;
-const E213_V1 = { id: 'vision-master-e213', label: 'Original panel', panel: 'e213', panelRevision: 'original', totalBytes: 529_104 } as const;
-const E290 = { id: 'vision-master-e290', label: 'E290', panel: 'e290', totalBytes: 529_104 } as const;
+const E213_V11 = { id: 'vision-master-e213-v11', label: 'Panel v1.1', panel: 'e213', hardware: 'visionMasterE213', panelRevision: 'v11', totalBytes: 529_104 } as const;
+const E213_V1 = { id: 'vision-master-e213', label: 'Original panel', panel: 'e213', hardware: 'visionMasterE213', panelRevision: 'original', totalBytes: 529_104 } as const;
+const E290 = { id: 'vision-master-e290', label: 'E290', panel: 'e290', hardware: 'visionMasterE290', totalBytes: 529_104 } as const;
+const WP = { id: 'wireless-paper', label: 'Wireless Paper', panel: 'e213', hardware: 'wirelessPaper', totalBytes: 529_104 } as const;
 
 function status(overrides: Partial<FirmwareStatus>): FirmwareStatus {
   return {
@@ -102,6 +103,54 @@ describe('FirmwarePrompt', () => {
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
     expect(screen.queryByText(/can you read the display/i)).toBeNull();
     expect(screen.queryByRole('button', { name: /other panel/i })).toBeNull();
+  });
+
+  it('offers the detected Wireless Paper its one universal firmware image', async () => {
+    serve(
+      status({
+        port: '/dev/cu.usbserial-0001',
+        board: 'e213',
+        hardware: 'wirelessPaper',
+        recommendedVariantId: 'wireless-paper',
+        variants: [E213_V11, WP] as unknown as FirmwareStatus['variants']
+      })
+    );
+    const { default: FirmwarePrompt } = await import('./FirmwarePrompt.svelte');
+    render(FirmwarePrompt);
+
+    expect(await screen.findByText(/Wireless Paper/i)).toBeInTheDocument();
+    expect(screen.queryByRole('combobox')).toBeNull();
+    (await flashButton()).click();
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('flash_firmware', {
+        variantId: 'wireless-paper',
+        port: '/dev/cu.usbserial-0001'
+      })
+    );
+  });
+
+  it('will not cross-flash a same-size Vision Master image onto Wireless Paper', async () => {
+    serve(
+      status({
+        port: '/dev/cu.usbserial-0001',
+        board: 'e213',
+        hardware: 'wirelessPaper',
+        recommendedVariantId: 'vision-master-e213-v11',
+        variants: [E213_V11, WP] as unknown as FirmwareStatus['variants']
+      })
+    );
+    const { default: FirmwarePrompt } = await import('./FirmwarePrompt.svelte');
+    render(FirmwarePrompt);
+
+    (await flashButton()).click();
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('flash_firmware', {
+        variantId: 'wireless-paper',
+        port: '/dev/cu.usbserial-0001'
+      })
+    );
   });
 
   it('closes without a question on a board that has only one build', async () => {

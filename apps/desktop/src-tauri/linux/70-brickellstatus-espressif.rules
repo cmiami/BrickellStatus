@@ -14,10 +14,10 @@
 # keyboard. It also survives a Wayland session with no shell involvement and
 # takes effect on the next replug rather than the next logout.
 #
-# The vendor below is the one the app itself matches on. USB-UART bridge chips
-# (CP210x, CH340, FTDI) are deliberately absent: the app's discovery filter
-# does not recognise them either, so a rule for them would open devices that
-# never appear in the picker.
+# The identities below are exactly the interfaces the app scans: native
+# Espressif USB on Vision Master and the exact default CP2102 identity shipped
+# on Wireless Paper. Other USB-UART families remain closed and absent from
+# discovery.
 
 ACTION!="add|change", GOTO="brickellstatus_end"
 SUBSYSTEM!="tty", GOTO="brickellstatus_end"
@@ -26,5 +26,10 @@ SUBSYSTEM!="tty", GOTO="brickellstatus_end"
 # board exposes in download mode and the TinyUSB CDC port the flashed firmware
 # brings up (ARDUINO_USB_CDC_ON_BOOT=1 in firmware/panel/platformio.ini).
 ATTRS{idVendor}=="303a", TAG+="uaccess"
+
+# Silicon Labs CP2102 default identity used by Wireless Paper. The app offers
+# only the Wireless Paper image through this interface, and READY INK1 remains
+# application-level verification after firmware is present.
+ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", TAG+="uaccess"
 
 LABEL="brickellstatus_end"
