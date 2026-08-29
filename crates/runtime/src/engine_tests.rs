@@ -1347,12 +1347,53 @@ fn long_range_eta_is_informational_and_cannot_activate_bridge_channel() {
     assert_eq!(prediction.predictive_state, BridgeState::Likely);
     assert_eq!(decision.state, BridgeStateDto::Clear);
     assert_eq!(decision.eta_min, Some(90));
-    assert_eq!(decision.state_label, "Road open");
-    assert_eq!(decision.action, "Alerts begin at T-30.");
+    assert_eq!(decision.eta_max, Some(90));
+    assert_eq!(decision.state_label, "Bridge closed");
+    assert_eq!(decision.meaning, "Traffic is flowing.");
+    assert_eq!(
+        decision.action,
+        "Opening ETA is tracked; alerts begin at T-30."
+    );
     assert_eq!(
         channel_urgency(ChannelKindDto::Bridge, None, &decision),
         UrgencyDto::Routine
     );
+}
+
+#[test]
+fn alert_eta_never_publishes_a_far_edge_beyond_thirty_minutes() {
+    let now_ms = "2026-08-15T14:00:00Z"
+        .parse::<Timestamp>()
+        .unwrap()
+        .as_millisecond();
+    let transit = BridgeEvidence {
+        observation_id: ObservationId::from("wide-alert-transit"),
+        source_id: SourceId::from("bbpilots.bridge.brickell"),
+        observed_at: TimestampMillis(now_ms),
+        expires_at: None,
+        availability: AvailabilityStatus::Live,
+        reliability: Confidence::CERTAIN,
+        fact: BridgeObservation::ScheduledTransit {
+            vessel: "Test tow".into(),
+            exempt: true,
+            eta: Some(EtaRangeMinutes::new(3, 61)),
+        },
+    };
+    let mut prediction = BridgePredictor::default()
+        .evaluate(TimestampMillis(now_ms), &[transit], None)
+        .unwrap();
+    // Exercise the public boundary with the exact payload users reported. A
+    // schedule-aligned or older persisted prediction can be wider than the
+    // current raw-arrival tightening performed above.
+    prediction.eta = Some(EtaRangeMinutes::new(3, 61));
+    let decision = decision_snapshot(&prediction, "America/New_York").unwrap();
+
+    assert_eq!(prediction.eta, Some(EtaRangeMinutes::new(3, 61)));
+    assert_eq!(decision.state, BridgeStateDto::Likely);
+    assert_eq!((decision.eta_min, decision.eta_max), (Some(3), Some(30)));
+    assert_eq!(decision.state_label, "Opening likely");
+    assert_eq!(decision.meaning, "Bridge is closed; traffic is flowing.");
+    assert_eq!(decision.action, "Traffic may be blocked within 30 minutes.");
 }
 
 #[tokio::test]

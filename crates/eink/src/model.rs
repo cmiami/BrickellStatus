@@ -20,9 +20,11 @@ impl SnapshotState {
     /// Short, unambiguous display label.
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Clear => "CLEAR",
-            Self::Likely => "LIKELY",
-            Self::Open => "BRIDGE OPEN",
+            // The title immediately above already names the bridge. These
+            // mechanical positions stay whole on the smaller E213 panel.
+            Self::Clear => "CLOSED",
+            Self::Likely => "OPENING",
+            Self::Open => "OPEN",
             Self::Offline => "OFFLINE",
         }
     }
@@ -40,9 +42,9 @@ impl SnapshotState {
     /// Plain road consequence, independent of the internal bridge state.
     pub const fn road_meaning(self) -> &'static str {
         match self {
-            Self::Clear | Self::Likely => "ROAD OPEN NOW",
-            Self::Open => "ROAD BLOCKED",
-            Self::Offline => "ROAD STATUS UNKNOWN",
+            Self::Clear | Self::Likely => "TRAFFIC FLOWING",
+            Self::Open => "TRAFFIC BLOCKED",
+            Self::Offline => "TRAFFIC STATUS UNKNOWN",
         }
     }
 }
@@ -320,5 +322,14 @@ mod tests {
     #[test]
     fn eta_ranges_are_ordered() {
         assert_eq!(EtaRange::new(8, 3), EtaRange::new(8, 8));
+    }
+
+    #[test]
+    fn bridge_position_and_traffic_consequence_are_unambiguous() {
+        assert_eq!(SnapshotState::Clear.label(), "CLOSED");
+        assert_eq!(SnapshotState::Clear.road_meaning(), "TRAFFIC FLOWING");
+        assert_eq!(SnapshotState::Likely.label(), "OPENING");
+        assert_eq!(SnapshotState::Open.label(), "OPEN");
+        assert_eq!(SnapshotState::Open.road_meaning(), "TRAFFIC BLOCKED");
     }
 }

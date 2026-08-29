@@ -213,7 +213,7 @@ The palette is a restrained daylight instrument: cold paper and graphite, with m
 
 **The Instrument Voice Rule.** Condensed uppercase states facts; Public Sans sentences explain them. Never set paragraphs in the display face.
 
-**The Plain Status Rule.** Use the simplest accurate term: bridge `UP`, `DOWN`, or `NO READING`; system `WORKING`, `NEEDS ATTENTION`, or `OFFLINE`; actions such as `REFRESH`, `CONNECT`, and `DISCONNECT`. Never expose internal terms such as poll, collector circuit, engine verdict, dispatch, or route as the primary label when a common word says the same thing.
+**The Plain Status Rule.** Name the bridge before its road consequence: `BRIDGE OPEN · TRAFFIC BLOCKED`, `BRIDGE CLOSED · TRAFFIC FLOWING`, or `NO READING · TRAFFIC STATUS UNKNOWN`; system `WORKING`, `NEEDS ATTENTION`, or `OFFLINE`; actions such as `REFRESH`, `CONNECT`, and `DISCONNECT`. Never use `ROAD OPEN` for a closed bridge: it makes the road and the movable span sound like the same object. Never expose internal terms such as poll, collector circuit, engine verdict, dispatch, or route as the primary label when a common word says the same thing.
 
 ## Layout
 
@@ -321,7 +321,7 @@ Panel setup is a three-step procedure—switch it on, find it, and send a test f
 - **Do** let evidence strips carry density while the current-decision field keeps substantial empty space.
 - **Do** expose source age, offline state, and user routing policy wherever a signal appears.
 - **Do** reserve amber for an item that can genuinely interrupt the user's attention.
-- **Do** use `UP`, `DOWN`, and `NO READING` for bridge position, with `ROAD MOVING` or `ROAD STOPPED` only as the consequence.
+- **Do** pair `BRIDGE OPEN` with `TRAFFIC BLOCKED`, and `BRIDGE CLOSED` with `TRAFFIC FLOWING`; use `NO READING` with `TRAFFIC STATUS UNKNOWN` when position is unavailable.
 - **Do** label an immediate data update `REFRESH`; reserve source and transport jargon for exported details or developer logs.
 - **Do** keep side-profile vessel art upright and mirror it left or right; a separate route arrow carries the exact diagonal heading.
 - **Do** judge vessel marks unlabeled at 48, 56, and 68 px, including mirrored and expected-opener states.

@@ -321,7 +321,7 @@ impl PanelBroker {
 
 /// Whether a channel has earned a place on the panel right now.
 ///
-/// The anchor is exempt from having to be active, because "Road open" is the
+/// The anchor is exempt from having to be active, because "Bridge closed" is the
 /// answer this app exists to give and is worth the whole screen. Nothing else
 /// is: a channel with nothing to report has only its own empty state to show,
 /// and a panel that spends a slot saying no feed items matched has taken the

@@ -17,8 +17,8 @@ use brickellstatus_eink::{
     Evidence, Freshness, LiveSnapshot, MonoFrame, RenderConfig, SnapshotState, render_snapshot,
 };
 use brickellstatus_runtime::{
-    AppPreferences, AppSnapshot, AvailabilityDto, BridgeStateDto, ChannelKindDto, ChannelSnapshot,
-    UrgencyDto,
+    AppPreferences, AppSnapshot, AvailabilityDto, BRIDGE_ALERT_HORIZON_MINUTES, BridgeStateDto,
+    ChannelKindDto, ChannelSnapshot, UrgencyDto,
 };
 use jiff::{Timestamp, tz::TimeZone};
 use std::collections::BTreeMap;
@@ -133,10 +133,7 @@ pub fn display_snapshot(snapshot: &AppSnapshot) -> LiveSnapshot {
     );
     output.channel = snapshot.decision.subject.to_ascii_uppercase();
     output.road_meaning = snapshot.decision.meaning.to_ascii_uppercase();
-    output.eta = snapshot
-        .decision
-        .eta_min
-        .map(|minimum| EtaRange::new(minimum, snapshot.decision.eta_max.unwrap_or(minimum)));
+    output.eta = panel_alert_eta(state, snapshot.decision.eta_min, snapshot.decision.eta_max);
     if state.is_predictive() {
         output.confidence_percent = snapshot.decision.confidence_bps.map(bps_to_percent);
     }
@@ -157,6 +154,24 @@ pub fn display_snapshot(snapshot: &AppSnapshot) -> LiveSnapshot {
         TimeZone::get(&snapshot.local_time_zone).ok().as_ref(),
     );
     output
+}
+
+/// The panel is an interrupt surface, so it never prints an ETA outside the
+/// alert horizon even if it receives an older or independently constructed
+/// runtime snapshot. Long-range timing remains available to the live app.
+fn panel_alert_eta(
+    state: SnapshotState,
+    minimum: Option<u16>,
+    maximum: Option<u16>,
+) -> Option<EtaRange> {
+    if !state.is_predictive() {
+        return None;
+    }
+    let minimum = minimum.filter(|minutes| *minutes <= BRIDGE_ALERT_HORIZON_MINUTES)?;
+    Some(EtaRange::new(
+        minimum,
+        maximum.unwrap_or(minimum).min(BRIDGE_ALERT_HORIZON_MINUTES),
+    ))
 }
 
 /// Condenses a bridge name into the two or three characters the E213 has room
@@ -268,4 +283,25 @@ pub fn interrupt_allows(
     _snapshot: &AppSnapshot,
 ) -> bool {
     channel.enabled && channel.active && !matches!(channel.priority.urgency, UrgencyDto::Routine)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panel_alert_eta_intersects_the_model_range_with_thirty_minutes() {
+        assert_eq!(
+            panel_alert_eta(SnapshotState::Likely, Some(3), Some(61)),
+            Some(EtaRange::new(3, 30))
+        );
+        assert_eq!(
+            panel_alert_eta(SnapshotState::Likely, Some(31), Some(61)),
+            None
+        );
+        assert_eq!(
+            panel_alert_eta(SnapshotState::Clear, Some(3), Some(61)),
+            None
+        );
+    }
 }

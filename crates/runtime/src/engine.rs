@@ -2409,12 +2409,25 @@ fn decision_snapshot(
             .is_some_and(|eta| eta.earliest > BRIDGE_ALERT_HORIZON_MINUTES);
     let (state_label, meaning, action) = if tracks_opening_beyond_alert_horizon {
         (
-            "Road open",
-            "Opening ETA tracked beyond the alert range.",
-            "Alerts begin at T-30.",
+            "Bridge closed",
+            "Traffic is flowing.",
+            "Opening ETA is tracked; alerts begin at T-30.",
         )
     } else {
         decision_copy(state)
+    };
+    // The model keeps its full ETA for calibration and the clear state keeps it
+    // as quiet, long-range context. Once that range becomes an alert, publish
+    // only the portion inside the alert horizon. Otherwise a range such as
+    // 3–61 minutes truthfully enters at its near edge but tells the panel user
+    // that the alert reaches an hour into the future.
+    let (eta_min, eta_max) = match (state, prediction.eta) {
+        (BridgeStateDto::Open, _) | (_, None) => (None, None),
+        (BridgeStateDto::Likely, Some(eta)) => (
+            Some(eta.earliest),
+            Some(eta.latest.min(BRIDGE_ALERT_HORIZON_MINUTES)),
+        ),
+        (BridgeStateDto::Clear, Some(eta)) => (Some(eta.earliest), Some(eta.latest)),
     };
     let confidence_basis = {
         let labels = prediction
@@ -2448,8 +2461,8 @@ fn decision_snapshot(
         state_label: state_label.into(),
         meaning: meaning.into(),
         action: action.into(),
-        eta_min: prediction.eta.map(|eta| eta.earliest),
-        eta_max: prediction.eta.map(|eta| eta.latest),
+        eta_min,
+        eta_max,
         confidence_bps: Some(prediction.confidence.basis_points),
         confidence_label: Some(confidence_label(prediction.confidence.basis_points).into()),
         confidence_basis,
@@ -2690,15 +2703,19 @@ fn bridge_interval_dto(
 /// surface after being deliberately removed from the panels.
 fn decision_copy(state: BridgeStateDto) -> (&'static str, &'static str, &'static str) {
     match state {
-        BridgeStateDto::Clear => ("Road open", "No opening expected.", "Traffic is moving."),
+        BridgeStateDto::Clear => (
+            "Bridge closed",
+            "Traffic is flowing.",
+            "No opening expected.",
+        ),
         // Status, not advice. Whether another route exists, and whether it is
         // worth taking, is something the driver knows and this app does not.
         BridgeStateDto::Likely => (
             "Opening likely",
-            "An opening is expected shortly.",
-            "Traffic will stop when it opens.",
+            "Bridge is closed; traffic is flowing.",
+            "Traffic may be blocked within 30 minutes.",
         ),
-        BridgeStateDto::Open => ("Bridge open", "The span is up.", "Traffic is stopped."),
+        BridgeStateDto::Open => ("Bridge open", "Traffic is blocked.", "The span is up."),
     }
 }
 
