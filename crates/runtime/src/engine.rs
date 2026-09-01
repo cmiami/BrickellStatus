@@ -2406,7 +2406,7 @@ fn decision_snapshot(
         && prediction.predictive_state == BridgeState::Likely
         && prediction
             .eta
-            .is_some_and(|eta| eta.earliest > BRIDGE_ALERT_HORIZON_MINUTES);
+            .is_some_and(|eta| eta.latest > BRIDGE_ALERT_HORIZON_MINUTES);
     let (state_label, meaning, action) = if tracks_opening_beyond_alert_horizon {
         (
             "Bridge closed",
@@ -2417,10 +2417,9 @@ fn decision_snapshot(
         decision_copy(state)
     };
     // The model keeps its full ETA for calibration and the clear state keeps it
-    // as quiet, long-range context. Once that range becomes an alert, publish
-    // only the portion inside the alert horizon. Otherwise a range such as
-    // 3–61 minutes truthfully enters at its near edge but tells the panel user
-    // that the alert reaches an hour into the future.
+    // as quiet, long-range context. A likely state now requires both edges to
+    // be inside the alert horizon; retain the far-edge cap as a defensive
+    // boundary for older persisted predictions and manually constructed data.
     let (eta_min, eta_max) = match (state, prediction.eta) {
         (BridgeStateDto::Open, _) | (_, None) => (None, None),
         (BridgeStateDto::Likely, Some(eta)) => (

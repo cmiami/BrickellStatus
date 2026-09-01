@@ -1361,7 +1361,7 @@ fn long_range_eta_is_informational_and_cannot_activate_bridge_channel() {
 }
 
 #[test]
-fn alert_eta_never_publishes_a_far_edge_beyond_thirty_minutes() {
+fn a_window_straddling_thirty_minutes_remains_informational() {
     let now_ms = "2026-08-15T14:00:00Z"
         .parse::<Timestamp>()
         .unwrap()
@@ -1376,24 +1376,24 @@ fn alert_eta_never_publishes_a_far_edge_beyond_thirty_minutes() {
         fact: BridgeObservation::ScheduledTransit {
             vessel: "Test tow".into(),
             exempt: true,
-            eta: Some(EtaRangeMinutes::new(3, 61)),
+            eta: Some(EtaRangeMinutes::new(24, 31)),
         },
     };
-    let mut prediction = BridgePredictor::default()
+    let prediction = BridgePredictor::default()
         .evaluate(TimestampMillis(now_ms), &[transit], None)
         .unwrap();
-    // Exercise the public boundary with the exact payload users reported. A
-    // schedule-aligned or older persisted prediction can be wider than the
-    // current raw-arrival tightening performed above.
-    prediction.eta = Some(EtaRangeMinutes::new(3, 61));
     let decision = decision_snapshot(&prediction, "America/New_York").unwrap();
 
-    assert_eq!(prediction.eta, Some(EtaRangeMinutes::new(3, 61)));
-    assert_eq!(decision.state, BridgeStateDto::Likely);
-    assert_eq!((decision.eta_min, decision.eta_max), (Some(3), Some(30)));
-    assert_eq!(decision.state_label, "Opening likely");
-    assert_eq!(decision.meaning, "Bridge is closed; traffic is flowing.");
-    assert_eq!(decision.action, "Traffic may be blocked within 30 minutes.");
+    assert_eq!(prediction.eta, Some(EtaRangeMinutes::new(24, 31)));
+    assert_eq!(prediction.predictive_state, BridgeState::Likely);
+    assert_eq!(decision.state, BridgeStateDto::Clear);
+    assert_eq!((decision.eta_min, decision.eta_max), (Some(24), Some(31)));
+    assert_eq!(decision.state_label, "Bridge closed");
+    assert_eq!(decision.meaning, "Traffic is flowing.");
+    assert_eq!(
+        decision.action,
+        "Opening ETA is tracked; alerts begin at T-30."
+    );
 }
 
 #[tokio::test]

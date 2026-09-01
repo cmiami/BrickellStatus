@@ -22,14 +22,14 @@ use thiserror::Error;
 /// Bump this when score semantics, feature construction, or shipped weights
 /// change. Durable forecast samples use it to keep unlike models out of the
 /// same calibration bucket.
-pub const BRIDGE_FORECAST_MODEL_VERSION: &str = "brickell-v3";
+pub const BRIDGE_FORECAST_MODEL_VERSION: &str = "brickell-v4";
 
 /// Maximum ETA at which a predictive opening becomes a public alert.
 ///
 /// Longer-range vessel motion remains visible as an informational ETA and is
 /// retained in the calibration trace. It must not raise bridge urgency,
-/// activate delivery, or interrupt the e-ink rotation until the near edge of
-/// its opening window reaches this boundary.
+/// activate delivery, or interrupt the e-ink rotation until the entire opening
+/// window reaches this boundary.
 pub const BRIDGE_ALERT_HORIZON_MINUTES: u16 = 30;
 
 /// Learned opening propensity that makes a currently committed hull a known opener.
@@ -113,7 +113,12 @@ impl Default for BridgeThresholds {
     fn default() -> Self {
         Self {
             likely: HysteresisThreshold {
-                enter: 0.58,
+                // Replayed over 134 continuously observed openings across the
+                // v2/v3 forecast traces. At 0.64, v3 precision rose from 44%
+                // to 49% without reducing replay recall, while v2 false alert
+                // episodes fell by 23. Keep the lower exit threshold: it
+                // prevents one approach from fragmenting into repeated alerts.
+                enter: 0.64,
                 exit: 0.45,
             },
         }
@@ -149,31 +154,12 @@ pub struct EvidenceWeights {
     pub corroboration_bonus: f32,
     /// A clock slot is imminent on a day the schedule does not restrict.
     ///
-    /// Measured, not assumed — and re-measured, which moved the number down.
-    ///
-    /// The first calibration read 79% of 14 daytime openings within five
-    /// minutes of an `:00` or `:30` against an "18% chance level". That chance
-    /// figure was wrong: it is the share of an hour lying within five minutes of
-    /// *one* anchor, and there are two per hour, so the correct level is 22/60,
-    /// or 37%. The demonstrated lift was therefore about 2.1x rather than the
-    /// 4.4x it appeared to be.
-    ///
-    /// A second, independent 28-hour window then recorded 34 openings, 19 of
-    /// them daytime, and put the same statistic at 58% — real, but a good deal
-    /// weaker than 79%. Backtested on a held-out tail of that window, a
-    /// clock-only rule scored *below* firing constantly, which is what a base
-    /// rate near 30% does to a weak predictor.
-    ///
-    /// What survived re-measurement is the asymmetry rather than the strength:
-    /// openings cluster from about ten minutes before a slot to five after it,
-    /// not symmetrically around it — the tender starts lifting ahead of the
-    /// scheduled minute. Sixteen of nineteen daytime openings fall in that
-    /// window against a 50% chance level (p ≈ 0.002), where the symmetric
-    /// five-minute window catches only eleven. `schedule_slot_window_minutes`
-    /// already looks *forward* to an approaching slot, which is the right shape.
-    ///
-    /// Both windows are weekends, which the regulation leaves on signal. There
-    /// is still no weekday observation in this table at all.
+    /// Across 134 continuously observed daytime openings, 76 began within five
+    /// minutes of `:00` or `:30` (57% against 33% by chance, 1.70x lift) and 87
+    /// began from ten minutes before through five after (65% against 50%, 1.30x
+    /// lift). The asymmetry is stable: the tender often starts lifting before
+    /// the nominal slot. `schedule_slot_window_minutes` therefore looks forward
+    /// to an approaching slot, but the clock remains context rather than proof.
     ///
     /// Re-derive rather than trusting these figures, which describe the data as
     /// it stood and the record grows every hour the app runs:
@@ -186,20 +172,13 @@ pub struct EvidenceWeights {
 impl Default for EvidenceWeights {
     fn default() -> Self {
         Self {
-            // Rebalanced against 20 hours of recorded openings, then left alone
-            // when a second 28-hour window disagreed with the first. The clock
-            // was the strongest predictor available and the weakest weight here;
-            // ordered upstream movement was the strongest weight and measured
-            // only 1.4x better than chance at its best window, then measured
-            // *below* chance on the second window — 0.86x at twenty minutes,
-            // 0.72x at thirty. Unordered upstream activity beat it both times.
-            //
-            // Nothing is retuned on that, because two disagreeing weekends are
-            // not a calibration set either, and the sign of the disagreement is
-            // the point: the two largest weights in this table rest on the
-            // feature with the least evidence behind it. See the note on
-            // `schedule_clock_slot`. Weekday observation is the missing input,
-            // and the regulation makes weekdays a different problem entirely.
+            // The current audit spans 172 clean openings, including 109 on
+            // weekdays. Ordered upstream movement is predictive, but its best
+            // tested window reaches only 1.57x lift (35% precision against a
+            // 22% base rate), below the pre-registered 2.0x gate for raising
+            // these weights. Keep evidence weights stable and improve the
+            // decision boundary independently; re-run calibrate_bridge.py as
+            // the outcome set grows.
             schedule_scheduled: 0.14,
             schedule_on_signal: 0.0,
             schedule_blackout: 0.0,
@@ -207,7 +186,7 @@ impl Default for EvidenceWeights {
             ais_approaching: 0.46,
             // This is a separate feature rather than a global AIS increase.
             // At the runtime's 0.85 AIS reliability it contributes 0.68: enough
-            // to cross the unchanged 0.58 decision boundary while the fix is
+            // to cross the calibrated 0.64 decision boundary while the fix is
             // fresh, without promoting an unknown hull on proximity alone.
             ais_known_opener_near: 0.80,
             ais_diverging: -0.32,
@@ -1292,13 +1271,13 @@ fn authoritative_state(
     }
 }
 
-/// Keeps long-range motion as context without turning it into an alert.
+/// Keeps a partly long-range arrival window as context without alerting early.
 fn alertable_predictive_state(
     predictive_state: BridgeState,
     eta: Option<EtaRangeMinutes>,
 ) -> BridgeState {
     match (predictive_state, eta) {
-        (BridgeState::Likely, Some(eta)) if eta.earliest <= BRIDGE_ALERT_HORIZON_MINUTES => {
+        (BridgeState::Likely, Some(eta)) if eta.latest <= BRIDGE_ALERT_HORIZON_MINUTES => {
             BridgeState::Likely
         }
         (BridgeState::Likely, _) => BridgeState::Clear,
@@ -1466,6 +1445,7 @@ mod tests {
     #[test]
     fn runtime_strength_ais_plus_upstream_crosses_likely_threshold() {
         let now = scheduled_now();
+        let predictor = BridgePredictor::default();
         let mut ais = evidence(
             "ais-1",
             "local-ais",
@@ -1492,7 +1472,7 @@ mod tests {
             },
         );
         upstream.reliability = Confidence::from_basis_points(3_500);
-        let prediction = BridgePredictor::default()
+        let prediction = predictor
             .evaluate(now, &[ais, upstream], None)
             .expect("prediction");
 
@@ -1503,7 +1483,7 @@ mod tests {
         // reported as the arrival, which promised a time the bridge could not
         // legally open.
         assert_eq!(prediction.eta, Some(EtaRangeMinutes::new(16, 16)));
-        assert!(prediction.confidence.as_score() >= 0.58);
+        assert!(prediction.confidence.as_score() >= predictor.config().thresholds.likely.enter);
     }
 
     fn live_ais(
@@ -1534,12 +1514,12 @@ mod tests {
     }
 
     #[test]
-    fn known_opener_with_a_tight_eta_crosses_the_unchanged_boundary() {
+    fn known_opener_with_a_tight_eta_crosses_the_calibrated_boundary() {
         // Friday 23:10 EDT is on signal and outside the daytime clock feature,
         // so the hull has to support the decision without schedule weight.
         let now = millis("2026-08-15T03:10:00Z");
         let predictor = BridgePredictor::default();
-        assert_eq!(predictor.config().thresholds.likely.enter, 0.58);
+        assert_eq!(predictor.config().thresholds.likely.enter, 0.64);
         assert_eq!(predictor.config().weights.ais_approaching, 0.46);
         let pepin = live_ais(
             "pepin-inbound",
@@ -1555,8 +1535,10 @@ mod tests {
 
         assert_eq!(prediction.predictive_state, BridgeState::Likely);
         assert_eq!(prediction.state, BridgeState::Likely);
-        assert!(prediction.predictive_score.as_score() >= 0.58);
-        assert_eq!(prediction.model_version, "brickell-v3");
+        assert!(
+            prediction.predictive_score.as_score() >= predictor.config().thresholds.likely.enter
+        );
+        assert_eq!(prediction.model_version, "brickell-v4");
     }
 
     fn exempt_transit_at(now: TimestampMillis, minutes: u16) -> BridgeEvidence {
@@ -1586,18 +1568,33 @@ mod tests {
     }
 
     #[test]
-    fn predictive_alert_begins_at_thirty_minutes_not_thirty_one() {
+    fn predictive_alert_begins_when_the_entire_window_reaches_thirty_minutes() {
         let now = millis("2026-08-15T14:00:00Z");
         let predictor = BridgePredictor::default();
         let outside = predictor
             .evaluate(now, &[exempt_transit_at(now, 31)], None)
             .expect("outside prediction");
+        let straddling = evidence(
+            "straddling-transit",
+            "bbpilots.bridge.brickell",
+            now,
+            BridgeObservation::ScheduledTransit {
+                vessel: "Wide-window tow".into(),
+                exempt: true,
+                eta: Some(EtaRangeMinutes::new(24, 31)),
+            },
+        );
+        let straddling = predictor
+            .evaluate(now, &[straddling], Some(&outside))
+            .expect("straddling prediction");
         let boundary = predictor
-            .evaluate(now, &[exempt_transit_at(now, 30)], Some(&outside))
+            .evaluate(now, &[exempt_transit_at(now, 30)], Some(&straddling))
             .expect("boundary prediction");
 
         assert_eq!(outside.predictive_state, BridgeState::Likely);
         assert_eq!(outside.state, BridgeState::Clear);
+        assert_eq!(straddling.predictive_state, BridgeState::Likely);
+        assert_eq!(straddling.state, BridgeState::Clear);
         assert_eq!(boundary.predictive_state, BridgeState::Likely);
         assert_eq!(boundary.state, BridgeState::Likely);
         assert_eq!(boundary.urgency, Urgency::TimeSensitive);
@@ -1641,7 +1638,10 @@ mod tests {
             .expect("prediction");
 
         assert_eq!(prediction.state, BridgeState::Clear);
-        assert!(prediction.predictive_score.as_score() < 0.58);
+        assert!(
+            prediction.predictive_score.as_score()
+                < BridgePredictor::default().config().thresholds.likely.enter
+        );
     }
 
     #[test]
@@ -1741,11 +1741,10 @@ mod tests {
     #[test]
     fn outbound_progress_maps_to_high_and_very_high_confidence() {
         let now = scheduled_now();
-        // Asserts the ordering rather than the weights. The previous version
-        // hard-coded 0.68 and 0.88, which were the weight-table values spelled
-        // a second time, so retuning the table could only ever "fail" this test
-        // by disagreeing with itself.
-        let confidence_for = |stage| {
+        // High progression is useful context but its measured lift remains
+        // below the pre-registered threshold for a standalone warning. Reaching
+        // the nearest upstream bridge is the stronger, actionable stage.
+        let prediction_for = |stage| {
             let outbound = evidence(
                 "outbound-sequence",
                 "fl511",
@@ -1756,17 +1755,19 @@ mod tests {
                     eta: Some(EtaRangeMinutes::new(8, 12)),
                 },
             );
-            let prediction = BridgePredictor::default()
+            BridgePredictor::default()
                 .evaluate(now, &[outbound], None)
-                .expect("prediction");
-            assert_eq!(prediction.state, BridgeState::Likely);
-            prediction.confidence.as_score()
+                .expect("prediction")
         };
-        let high = confidence_for(OutboundProgressStage::High);
-        let very_high = confidence_for(OutboundProgressStage::VeryHigh);
+        let high = prediction_for(OutboundProgressStage::High);
+        let very_high = prediction_for(OutboundProgressStage::VeryHigh);
+        assert_eq!(high.state, BridgeState::Clear);
+        assert_eq!(very_high.state, BridgeState::Likely);
         assert!(
-            very_high > high,
-            "reaching the nearest upstream bridge must outrank being two away: {very_high} vs {high}"
+            very_high.confidence > high.confidence,
+            "reaching the nearest upstream bridge must outrank being two away: {} vs {}",
+            very_high.confidence.as_score(),
+            high.confidence.as_score()
         );
     }
 

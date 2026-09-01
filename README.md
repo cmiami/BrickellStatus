@@ -125,9 +125,10 @@ telemetry. Secrets live in a private per-user credential file — sealed to your
 Windows account with DPAPI, held owner-only on macOS — and are never written to
 preferences.
 
-> **Proof-of-concept, August 2026.** FL511 bridge history is accumulating and the
-> prediction weights are calibrated against only a few hours of it, so treat the
-> confidence numbers as early. AISStream is delivering vessel detail again (the
+> **Proof-of-concept, August 2026.** FL511 bridge history now includes more than
+> eight days of collection (192 continuously confirmed hours and 172 clean
+> openings as of August 31), but it still covers only one calendar week, so
+> treat confidence numbers as early. AISStream is delivering vessel detail again (the
 > [upstream issue](https://github.com/aisstream/aisstream/issues/30) remains open,
 > so treat availability as provider-intermittent); the collector now tracks the
 > Miami River in channel coordinates along a surveyed corridor and records every

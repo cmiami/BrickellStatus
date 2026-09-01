@@ -14,8 +14,10 @@ Pre-registered gates:
   paired movements in that direction, and only when its IQR is at most 40 min.
 * Forecast quality is scored per alert episode, not per correlated minute:
   precision, recall, false alerts, warning lead, and ETA-interval coverage.
-  A predictive row is only replayed as an alert when its ETA reaches the
-  product's 30-minute alert horizon; longer-range rows remain calibration data.
+  Starting with brickell-v4, a predictive row is replayed as an alert only
+  when its entire ETA interval reaches the product's 30-minute alert horizon;
+  longer-range rows remain calibration data. Older traces retain their shipped
+  near-edge behavior so historical model scores do not change retroactively.
 
 Rows created before successful-reading continuity was recorded are identified
 as legacy data. They are never presented as continuous coverage.
@@ -510,15 +512,18 @@ def alert_episodes(
         if bridge_is_up:
             previous = sample
             continue
+        eta_reached_horizon = (
+            sample.eta_min is not None
+            and sample.eta_max is not None
+            and (
+                sample.eta_max <= ALERT_HORIZON
+                if sample.model.startswith("brickell-v4")
+                else sample.eta_min <= ALERT_HORIZON
+            )
+        )
         alertable = (
             sample.state == "likely"
-            and (
-                not apply_alert_horizon
-                or (
-                    sample.eta_min is not None
-                    and sample.eta_min <= ALERT_HORIZON
-                )
-            )
+            and (not apply_alert_horizon or eta_reached_horizon)
         )
         if alertable and not active:
             episodes.append(sample)
