@@ -25,7 +25,8 @@ use brickellstatus_collectors::{
     AIS_CROSSINGS_CURSOR_KEY, AIS_TRACK_RETENTION_SECONDS, AIS_VESSEL_CATALOG_CURSOR_KEY,
     AIS_VESSEL_TRACKS_CURSOR_KEY, AisCrossing, AisVesselCatalogEntry, BRIDGE_LATITUDE,
     BRIDGE_LONGITUDE, CollectContext, Collector, CollectorBatch, CollectorCursor, CollectorError,
-    CollectorItem, HealthState, ItemKind, corridor_geometry, project,
+    CollectorItem, HealthState, ItemKind, RiverBranch, corridor_geometry, eta_window_minutes,
+    project,
 };
 use brickellstatus_model::{
     Availability, AvailabilityStatus, BridgeControllerState, BridgeObservation,
@@ -1210,7 +1211,10 @@ impl RuntimeEngine {
     async fn load_ais_propensities(&self) -> Result<BTreeMap<String, u16>, RuntimeError> {
         Ok(self
             .store
-            .list_ais_ledger(500)
+            // Labelled hulls sort first, so this only has to exceed the number
+            // of hulls with an outcome; four weeks of catalog growth must not
+            // push a known opener out of the map.
+            .list_ais_ledger(2_000)
             .await?
             .into_iter()
             .filter_map(|entry| {
@@ -1968,11 +1972,16 @@ fn upstream_distance_meters(bridge_key: &str) -> Option<f64> {
     }
 }
 
-/// Miami River transit speeds. Tug-assisted commercial traffic works the low
-/// end; the yachts and sailboats behind most openings work the high end. The
-/// span between them is why this is a window and not a point.
-const RIVER_SPEED_SLOW_KNOTS: f64 = 3.0;
-const RIVER_SPEED_FAST_KNOTS: f64 = 6.0;
+/// Miami River transit speeds between an upstream lift and the Brickell lift.
+///
+/// These were 3 and 6 knots. Measured lags from each upstream lift to the
+/// Brickell lift for the same outbound hull (Aug 23 to Sep 1 2026) imply 2.3
+/// to 3.9 knots made good, slowest nearest the span where hulls ease off and
+/// queue: SW 2 Ave 759 m in a median 8.7 min, W Flagler 1 223 m in 17.5, NW 12
+/// Ave 2 845 m in 30.2, NW 22 Ave 4 611 m in 40.6. Six knots never happened
+/// over a whole leg, so the old fast edge promised lifts that came late.
+const RIVER_SPEED_SLOW_KNOTS: f64 = 2.5;
+const RIVER_SPEED_FAST_KNOTS: f64 = 5.0;
 const METRES_PER_KNOT_MINUTE: f64 = 1_852.0 / 60.0;
 
 /// When a vessel that just cleared `bridge_key` could reach Brickell.
@@ -2019,6 +2028,9 @@ fn detect_outbound_progress(
     now_ms: i64,
 ) -> Option<DetectedOutboundProgress> {
     const WINDOW_MS: i64 = 30 * 60 * 1_000;
+    /// Lag from a SW 2 Ave lift to the Brickell lift for the same outbound
+    /// hull: median 8.7 minutes, interquartile 6.0 to 14.8 (n = 33).
+    const NEAREST_LIFT_WINDOW_MS: i64 = 12 * 60 * 1_000;
     let cutoff = now_ms.saturating_sub(WINDOW_MS);
     let openings = transitions
         .iter()
@@ -2034,7 +2046,12 @@ fn detect_outbound_progress(
         })
         .collect::<Vec<_>>();
 
-    let (earlier, later) = openings.iter().enumerate().find_map(|(index, earlier)| {
+    // An ordered run: a farther bascule lifted, then a nearer one. SW 1 St
+    // and NW 17 Ave have not reported a lift since mid-August 2026 (FL511
+    // shows them permanently down while their neighbours lift many times a
+    // day); they stay in the chain because the pairing tolerates skipped
+    // ranks, so a run that steps over a silent bridge still reads as a run.
+    let ordered = openings.iter().enumerate().find_map(|(index, earlier)| {
         openings[index + 1..]
             .iter()
             .rev()
@@ -2043,14 +2060,34 @@ fn detect_outbound_progress(
                     && earlier.0.occurred_at_ms < later.0.occurred_at_ms
                     && later.0.occurred_at_ms - earlier.0.occurred_at_ms <= WINDOW_MS
             })
-            .map(|later| (*earlier, *later))
+            .map(|later| (earlier.0.occurred_at_ms, *later))
+    });
+    // Failing that, the nearest upstream bascule on its own. SW 2 Ave sits 759
+    // metres above Brickell and lifts for the same hull minutes before it; its
+    // own predecessors are often invisible (SW 1 St is silent and W Flagler
+    // reports far fewer lifts). Measured over 183 openings: a SW 2 Ave lift in
+    // the last twelve minutes precedes a Brickell lift within thirty in 66% of
+    // minutes against a 39% base rate, and as a standalone rule scores 63%
+    // precision at 63% recall with a twelve-minute median lead. The target
+    // guard below is what keeps it from firing on the inbound echo, where SW 2
+    // Ave lifts a few minutes *after* Brickell for a hull that has already
+    // passed.
+    let (progress_started_at_ms, later) = ordered.or_else(|| {
+        openings
+            .iter()
+            .filter(|(transition, rank)| {
+                *rank == 1
+                    && transition.occurred_at_ms >= now_ms.saturating_sub(NEAREST_LIFT_WINDOW_MS)
+            })
+            .max_by_key(|(transition, _)| transition.occurred_at_ms)
+            .map(|nearest| (nearest.0.occurred_at_ms, *nearest))
     })?;
 
     let target_opened_during_progress = transitions.iter().any(|transition| {
         transition.relation == "target"
             && transition.from_state == "down"
             && transition.to_state == "up"
-            && transition.occurred_at_ms >= earlier.0.occurred_at_ms.saturating_sub(WINDOW_MS)
+            && transition.occurred_at_ms >= progress_started_at_ms.saturating_sub(WINDOW_MS)
             && transition.occurred_at_ms <= now_ms
     });
     if target_opened_during_progress {
@@ -2203,26 +2240,27 @@ fn bridge_fact(
 fn known_opener_prearm_eta(item: &CollectorItem) -> Option<EtaRangeMinutes> {
     let distance_meters = item.attributes.get("distance_meters")?.as_f64()?;
     let speed_knots = item.attributes.get("sog_knots")?.as_f64()?;
-    known_opener_eta_from_motion(distance_meters, speed_knots)
+    let branch = item
+        .attributes
+        .get("branch")
+        .and_then(Value::as_str)
+        .and_then(RiverBranch::parse);
+    let s_signed = item.attributes.get("s_meters").and_then(Value::as_f64);
+    known_opener_eta_from_motion(distance_meters, speed_knots, branch, s_signed)
 }
 
-fn known_opener_eta_from_motion(distance_meters: f64, speed_knots: f64) -> Option<EtaRangeMinutes> {
-    if !distance_meters.is_finite() || !speed_knots.is_finite() || distance_meters <= 50.0 {
+fn known_opener_eta_from_motion(
+    distance_meters: f64,
+    speed_knots: f64,
+    branch: Option<RiverBranch>,
+    s_signed: Option<f64>,
+) -> Option<EtaRangeMinutes> {
+    if !speed_knots.is_finite() {
         return None;
     }
-
     let meters_per_second = speed_knots * KNOTS_TO_METERS_PER_SECOND;
-    if meters_per_second <= 0.25 {
-        return None;
-    }
-    let minutes = distance_meters / meters_per_second / 60.0;
-    if !minutes.is_finite() || !(0.25..=75.0).contains(&minutes) {
-        return None;
-    }
-
-    let earliest = (minutes * 0.75).floor().max(1.0) as u16;
-    let latest = (minutes * 1.35).ceil().clamp(f64::from(earliest), 90.0) as u16;
-    Some(EtaRangeMinutes::new(earliest, latest))
+    eta_window_minutes(distance_meters, meters_per_second, branch, s_signed)
+        .map(|(earliest, latest)| EtaRangeMinutes::new(earliest, latest))
 }
 
 #[derive(Clone)]

@@ -38,14 +38,20 @@ use crate::{
 const DEFAULT_SCHEDULE_URL: &str = "https://bbpilots.com/";
 const DEFAULT_TIME_ZONE: &str = "America/New_York";
 
-/// Placeholder transit allowances between the pilots' scheduled time and the
-/// Brickell Avenue Bridge. These are starting guesses, not measurements: the
-/// board publishes boarding times at the sea buoy or the berth, and the real
-/// offset varies with tug handling, traffic, and the Coast Guard closure
-/// windows. Every emitted estimate carries `eta_calibrated: false` until these
-/// are replaced by values learned from observed openings.
+/// Transit allowances between the pilots' scheduled time and the Brickell
+/// Avenue Bridge, in minutes after the board time.
+///
+/// Both started as guesses (60 and +20). Matching each board row to the same
+/// hull's own AIS crossing of the bridge line (Aug 17 to Sep 1 2026) measured
+/// them: arrivals cross a median 58 minutes after the board time (n = 7,
+/// interquartile 54 to 65), so 60 stands. Departures cross a median 8 minutes
+/// *before* it (n = 6, every one negative, interquartile 11 to 6 before), so
+/// the old +20 had the wrong sign and missed by about half an hour: the board
+/// time for a departure is not when the tow leaves the berth. Both samples are
+/// below the pre-registered twenty-pair gate, so every emitted estimate still
+/// carries `eta_calibrated: false`; the sign, however, is not in doubt.
 const DEFAULT_INBOUND_TRANSIT_MINUTES: i64 = 60;
-const DEFAULT_OUTBOUND_TRANSIT_MINUTES: i64 = 20;
+const DEFAULT_OUTBOUND_TRANSIT_MINUTES: i64 = -8;
 
 /// A page far smaller than this means the board did not render at all, which is
 /// worth distinguishing from a genuinely empty schedule.
@@ -242,11 +248,14 @@ impl BbPilotsCollector {
                 config.time_zone
             ))
         })?;
-        if !(0..=720).contains(&config.inbound_transit_minutes)
-            || !(0..=720).contains(&config.outbound_transit_minutes)
+        // A departure crosses the bridge before its board time, so the
+        // allowance may be negative; two hours before is already implausible.
+        if !(-120..=720).contains(&config.inbound_transit_minutes)
+            || !(-120..=720).contains(&config.outbound_transit_minutes)
         {
             return Err(CollectorError::Configuration(
-                "Biscayne Bay Pilots transit allowances must be between 0 and 720 minutes".into(),
+                "Biscayne Bay Pilots transit allowances must be between -120 and 720 minutes"
+                    .into(),
             ));
         }
         Ok(Self { config, fetcher })
@@ -825,6 +834,15 @@ mod tests {
         assert_eq!(
             outbound.attributes["bridge_eta_offset_minutes"],
             json!(DEFAULT_OUTBOUND_TRANSIT_MINUTES)
+        );
+        // A departure reaches the bridge before its board time, not after.
+        let outbound_eta = outbound.attributes["bridge_eta_at"]
+            .as_str()
+            .and_then(|value| value.parse::<chrono::DateTime<chrono::Utc>>().ok())
+            .expect("departure eta");
+        assert!(
+            outbound_eta < outbound.starts_at.expect("board time"),
+            "departure eta must precede the board time"
         );
 
         // Deep-draft traffic gets no ETA at all rather than a misleading one.

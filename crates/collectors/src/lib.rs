@@ -27,7 +27,8 @@ mod yahoo_chart;
 pub use ais_stream::{
     AIS_CROSSINGS_CURSOR_KEY, AIS_TRACK_RETENTION_SECONDS, AIS_VESSEL_CATALOG_CURSOR_KEY,
     AIS_VESSEL_TRACKS_CURSOR_KEY, AisCrossing, AisStreamApiKey, AisStreamCollector,
-    AisStreamConfig, AisStreamSubscription, AisVesselCatalogEntry,
+    AisStreamConfig, AisStreamSubscription, AisVesselCatalogEntry, eta_window_minutes,
+    eta_window_multipliers,
 };
 pub use bbpilots::{
     BbPilotsCollector, BbPilotsConfig, BbpMovement, BbpParseError, BbpSchedule, MovementAction,

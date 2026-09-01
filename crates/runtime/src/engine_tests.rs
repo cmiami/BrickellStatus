@@ -507,12 +507,14 @@ fn ordered_outbound_openings_raise_high_then_very_high_confidence() {
 }
 
 #[test]
-fn a_single_or_inbound_upstream_opening_is_not_outbound_evidence() {
+fn a_single_far_or_inbound_upstream_opening_is_not_outbound_evidence() {
     let now_ms = 1_786_741_200_000;
+    // One lift of a bridge two or more spans away says nothing about
+    // direction; it needs a nearer lift after it to read as a run.
     assert!(
         detect_outbound_progress(
             &[transition(
-                "sw_2_ave",
+                "w_flagler",
                 "upstream",
                 "down",
                 "up",
@@ -529,6 +531,43 @@ fn a_single_or_inbound_upstream_opening_is_not_outbound_evidence() {
         transition("sw_1_st", "upstream", "down", "up", now_ms - 3 * 60_000),
     ];
     assert!(detect_outbound_progress(&inbound, now_ms).is_none());
+}
+
+#[test]
+fn the_nearest_upstream_lift_alone_is_very_high_unless_brickell_just_lifted() {
+    let now_ms = 1_786_741_200_000;
+    // SW 2 Ave on its own, three minutes ago: the hull that raised it is
+    // 759 metres from Brickell and its earlier lifts were at bridges FL511
+    // does not currently report.
+    let alone = vec![transition(
+        "sw_2_ave",
+        "upstream",
+        "down",
+        "up",
+        now_ms - 3 * 60_000,
+    )];
+    let progress = detect_outbound_progress(&alone, now_ms).expect("nearest bridge lifted");
+    assert_eq!(progress.stage, OutboundProgressStage::VeryHigh);
+    assert_eq!(progress.bridge_key, "sw_2_ave");
+
+    // Thirteen minutes is past the observed lag; the hull is through or it
+    // was never coming.
+    let stale = vec![transition(
+        "sw_2_ave",
+        "upstream",
+        "down",
+        "up",
+        now_ms - 13 * 60_000,
+    )];
+    assert!(detect_outbound_progress(&stale, now_ms).is_none());
+
+    // The inbound echo: Brickell lifted for an arriving hull, then SW 2 Ave
+    // lifted for the same hull a few minutes later. Nothing is coming down.
+    let echo = vec![
+        transition("brickell", "target", "down", "up", now_ms - 9 * 60_000),
+        transition("sw_2_ave", "upstream", "down", "up", now_ms - 2 * 60_000),
+    ];
+    assert!(detect_outbound_progress(&echo, now_ms).is_none());
 }
 
 #[test]

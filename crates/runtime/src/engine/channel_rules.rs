@@ -2183,7 +2183,12 @@ fn vessel_tracks(state: &PersistedRuntimeState, now_ms: i64) -> Vec<VesselTrackS
                         .s_meters
                         .map(f64::abs)
                         .and_then(|distance| {
-                            known_opener_eta_from_motion(distance, track.speed_knots)
+                            known_opener_eta_from_motion(
+                                distance,
+                                track.speed_knots,
+                                track.branch.as_deref().and_then(RiverBranch::parse),
+                                track.s_meters,
+                            )
                         })
                 {
                     track.eta_min_minutes = Some(eta.earliest);

@@ -1720,6 +1720,8 @@ fn classify_square_fix(
         course_delta,
         closing_speed,
         route_intersects,
+        None,
+        None,
     );
     Some(FixClassification {
         distance_meters,
@@ -1809,6 +1811,8 @@ fn classify_corridor_fix(
         course_delta,
         closing_speed,
         route_intersects,
+        Some(fix.branch),
+        Some(fix.s_meters),
     );
 
     FixClassification {
@@ -1888,6 +1892,8 @@ fn estimate_eta(
     course_delta: f64,
     closing_speed: Option<f64>,
     route_intersects: bool,
+    branch: Option<RiverBranch>,
+    s_signed: Option<f64>,
 ) -> Option<(u16, u16)> {
     if !route_intersects || distance_meters <= 50.0 {
         return None;
@@ -1896,7 +1902,54 @@ fn estimate_eta(
     let meters_per_second = closing_speed
         .filter(|speed| *speed > 0.25)
         .unwrap_or(projected_speed);
-    if !meters_per_second.is_finite() || meters_per_second <= 0.25 {
+    eta_window_minutes(distance_meters, meters_per_second, branch, s_signed)
+}
+
+/// Bounds on the actual time to the lift as multiples of dead reckoning
+/// (channel distance over speed), one pair per stretch of water.
+///
+/// Measured on the AIS-tracked share of 183 Brickell openings (Aug 23 to
+/// Sep 1 2026) as the 20th and 80th percentile of actual over predicted
+/// minutes, fix by fix, for hulls that went on to need the span raised:
+///
+/// * River trunk, outbound (`s > 0`): 0.62 / 0.83 / 1.12 over 298 fixes. The
+///   hull arrives *early* against dead reckoning because the tender lifts
+///   about 4.6 minutes before it reaches the line. The old 0.75 to 1.35 window
+///   was skewed the wrong way.
+/// * Government Cut, inbound: 0.32 / 0.71 / 1.48 over 327 fixes. Early on
+///   average and wide.
+/// * The two ICW legs, inbound: medians 1.6 and 1.8 on about 28 fixes each,
+///   too thin and too dispersed for more than a wide late-leaning window.
+/// * River trunk, inbound (`s <= 0`, already inside the mouth): 2.24 / 3.69 /
+///   8.83 over 117 fixes. A hull here is queueing for the tender or the slot,
+///   not steaming, so a few minutes of dead reckoning stand for a lift that
+///   comes far later.
+///
+/// A target with no corridor model keeps the generic 0.75 to 1.35 band.
+pub fn eta_window_multipliers(branch: Option<RiverBranch>, s_signed: Option<f64>) -> (f64, f64) {
+    match branch {
+        Some(RiverBranch::River) if s_signed.is_some_and(|s| s > 0.0) => (0.62, 1.12),
+        Some(RiverBranch::River) => (1.50, 6.00),
+        Some(RiverBranch::GovernmentCut) => (0.35, 1.50),
+        Some(RiverBranch::NorthApproach | RiverBranch::SouthApproach) => (0.50, 2.00),
+        None => (0.75, 1.35),
+    }
+}
+
+/// Turns channel distance and a closing speed into the minutes window the
+/// record supports for that stretch of water. Shared with the runtime so a
+/// pre-armed known opener gets the same arithmetic as a committed hull.
+pub fn eta_window_minutes(
+    distance_meters: f64,
+    meters_per_second: f64,
+    branch: Option<RiverBranch>,
+    s_signed: Option<f64>,
+) -> Option<(u16, u16)> {
+    if !distance_meters.is_finite()
+        || distance_meters <= 50.0
+        || !meters_per_second.is_finite()
+        || meters_per_second <= 0.25
+    {
         return None;
     }
     let minutes = distance_meters / meters_per_second / 60.0;
@@ -1905,8 +1958,9 @@ fn estimate_eta(
     if !minutes.is_finite() || !(0.25..=75.0).contains(&minutes) {
         return None;
     }
-    let earliest = (minutes * 0.75).floor().max(1.0) as u16;
-    let latest = (minutes * 1.35).ceil().clamp(f64::from(earliest), 90.0) as u16;
+    let (low, high) = eta_window_multipliers(branch, s_signed);
+    let earliest = (minutes * low).floor().max(1.0) as u16;
+    let latest = (minutes * high).ceil().clamp(f64::from(earliest), 90.0) as u16;
     Some((earliest, latest))
 }
 

@@ -22,7 +22,7 @@ use thiserror::Error;
 /// Bump this when score semantics, feature construction, or shipped weights
 /// change. Durable forecast samples use it to keep unlike models out of the
 /// same calibration bucket.
-pub const BRIDGE_FORECAST_MODEL_VERSION: &str = "brickell-v4";
+pub const BRIDGE_FORECAST_MODEL_VERSION: &str = "brickell-v5";
 
 /// Maximum ETA at which a predictive opening becomes a public alert.
 ///
@@ -113,10 +113,12 @@ impl Default for BridgeThresholds {
     fn default() -> Self {
         Self {
             likely: HysteresisThreshold {
-                // Replayed over 134 continuously observed openings across the
-                // v2/v3 forecast traces. At 0.64, v3 precision rose from 44%
-                // to 49% without reducing replay recall, while v2 false alert
-                // episodes fell by 23. Keep the lower exit threshold: it
+                // Replayed over 183 continuously observed openings (Aug 23 to
+                // Sep 1 2026). On the v3 trace 0.64 lifted episode precision
+                // from 42% to 48% at an unchanged 63% recall; on the v2 trace
+                // from 38% to 43%. The sweep from 0.50 to 0.80 has no knee, so
+                // this is a dial on the ranker, not a fix for it; v5 improves
+                // the inputs instead. Keep the lower exit threshold: it
                 // prevents one approach from fragmenting into repeated alerts.
                 enter: 0.64,
                 exit: 0.45,
@@ -172,13 +174,16 @@ pub struct EvidenceWeights {
 impl Default for EvidenceWeights {
     fn default() -> Self {
         Self {
-            // The current audit spans 172 clean openings, including 109 on
+            // The current audit spans 183 clean openings, including 120 on
             // weekdays. Ordered upstream movement is predictive, but its best
-            // tested window reaches only 1.57x lift (35% precision against a
-            // 22% base rate), below the pre-registered 2.0x gate for raising
-            // these weights. Keep evidence weights stable and improve the
-            // decision boundary independently; re-run calibrate_bridge.py as
-            // the outcome set grows.
+            // tested window reaches only 1.57x lift (34% precision against a
+            // 21% base rate), below the pre-registered 2.0x gate for raising
+            // these weights, and a logistic fit on the same minutes gives the
+            // *ordering* no weight once the count of recent upstream lifts is
+            // known. Weights stay put; v5 changed the inputs that were
+            // measurably wrong instead (ETA windows, the slot snap, the slot
+            // bonus, and a standalone nearest-bridge rule). Re-run
+            // calibrate_bridge.py as the outcome set grows.
             schedule_scheduled: 0.14,
             schedule_on_signal: 0.0,
             schedule_blackout: 0.0,
@@ -294,7 +299,18 @@ impl Default for BridgePredictorConfig {
             weights: EvidenceWeights::default(),
             decay: EvidenceDecay::default(),
             factors: EvidenceFactors::default(),
-            schedule_slot_imminent: 0.34,
+            // Was 0.34, which with `schedule_scheduled` put 0.48 on the clock
+            // alone: three quarters of the decision boundary. On the v3 trace
+            // alerts where the schedule term was at least 0.40 and everything
+            // else under 0.45 ran 3 true to 7 false, and a logistic fit on the
+            // same minutes gives the imminent slot no incremental weight for
+            // *whether* an opening comes within 30 minutes (every slot is
+            // inside that horizon); its value is for *when*, which
+            // `scheduled_eta` already uses it for. Capping the schedule term
+            // at 0.30 replayed to 51% precision at 61% recall against 48% at
+            // 63%. PRODUCT.md forbids alerting on the clock; this keeps it
+            // from ever supplying more than half the threshold.
+            schedule_slot_imminent: 0.16,
             schedule_slot_window_minutes: 12,
             blackout_predictive_factor: 0.75,
         }
@@ -713,7 +729,7 @@ impl BridgePredictor {
         if exempt_transit {
             return Ok(Some(eta));
         }
-        let shift = |minutes: u16| -> Result<u16, PredictionError> {
+        let shift = |minutes: u16, offset_minutes: i64| -> Result<u16, PredictionError> {
             let arrival = TimestampMillis::new(
                 now.0
                     .saturating_add(i64::from(minutes).saturating_mul(60_000)),
@@ -721,14 +737,19 @@ impl BridgePredictor {
             let Some(slot) = self.schedule.ordinary_opening_at_or_after(arrival)? else {
                 return Ok(minutes);
             };
-            // The vessel still has to arrive, so the lead can never pull the
-            // opening earlier than the transit allows.
-            let waited = (slot.0.saturating_sub(now.0)) / 60_000 - SLOT_LEAD_MINUTES;
+            // The vessel still has to arrive, so the near edge can never pull
+            // the opening earlier than the transit allows.
+            let waited = (slot.0.saturating_sub(now.0)) / 60_000 + offset_minutes;
             Ok(u16::try_from(waited.max(0))
                 .unwrap_or(u16::MAX)
                 .max(minutes))
         };
-        let aligned = EtaRangeMinutes::new(shift(eta.earliest)?, shift(eta.latest)?);
+        // A snapped window is the slot plus the spread the tender has been
+        // observed to start in: a minute early through three late.
+        let aligned = EtaRangeMinutes::new(
+            shift(eta.earliest, -SLOT_LEAD_MINUTES)?,
+            shift(eta.latest, i64::from(SLOT_TAIL_MINUTES))?,
+        );
         self.cover_daytime_slot(aligned, now)
     }
 
@@ -1162,15 +1183,19 @@ const DAYTIME_END_HOUR: u8 = 22;
 
 const QUEUE_GRACE_SECONDS: u64 = 20 * 60;
 
-/// How far before a nominal slot an opening actually begins.
+/// How far before a nominal slot a snapped window opens.
 ///
-/// The tender starts the sequence early so the span is up *on* the hour rather
-/// than starting to move then. Across the first eight observed Brickell
-/// openings every one fell within nine minutes of a slot and five of them
-/// started before it, averaging about four minutes early. Snapping a prediction
-/// to the exact slot therefore runs late by roughly that much, on the reading
-/// the panel now spends its largest type on.
-const SLOT_LEAD_MINUTES: i64 = 4;
+/// The first eight observed openings suggested the tender ran about four
+/// minutes early, and this was 4. Sixty-nine weekday openings inside the
+/// restricted period (Aug 23 to Sep 1 2026) say otherwise: as FL511 reports
+/// them they begin a median 1.5 minutes *after* the slot, 56 of 69 within ten
+/// minutes before to five after, and the bulk at one to three minutes late.
+/// AIS crossings confirm the timing base: hulls cross the line a median 4.6
+/// minutes after FL511 first shows the span up, so FL511 is not lagging the
+/// lift. A four-minute lead therefore named a minute the bridge was still down.
+/// One minute early covers the early starters; `SLOT_TAIL_MINUTES` covers the
+/// late ones.
+const SLOT_LEAD_MINUTES: i64 = 1;
 
 /// How long a fact's own prediction stays pending, in seconds.
 ///
@@ -1403,8 +1428,9 @@ mod tests {
     /// twelve-minute imminent window. The sibling test below sits at 15:10,
     /// twenty minutes out, which never reaches `slot_imminent` -- so it scored
     /// 0.14 and passed whatever the cap did. This one scores
-    /// 0.14 + 0.34 = 0.48 against a 0.18 watch threshold, which is the case
-    /// that actually alerted a reader every half hour on no evidence.
+    /// 0.14 + 0.16 = 0.30 (it was 0.48 before v5) against a 0.18 watch
+    /// threshold, which is the case that actually alerted a reader every half
+    /// hour on no evidence.
     fn imminent_slot_now() -> TimestampMillis {
         millis("2026-08-14T19:20:00Z")
     }
@@ -1479,10 +1505,11 @@ mod tests {
         assert_eq!(prediction.state, BridgeState::Likely);
         // 15:10 EDT is inside the hour/half-hour period, so an arrival eight to
         // twelve minutes out cannot open the bridge on arrival: the vessel
-        // waits for 15:30, which is twenty minutes away. The window used to be
-        // reported as the arrival, which promised a time the bridge could not
-        // legally open.
-        assert_eq!(prediction.eta, Some(EtaRangeMinutes::new(16, 16)));
+        // waits for 15:30, which is twenty minutes away, and the span has been
+        // observed to start a minute before through three after the slot. The
+        // window used to be reported as the arrival, which promised a time the
+        // bridge could not legally open.
+        assert_eq!(prediction.eta, Some(EtaRangeMinutes::new(19, 23)));
         assert!(prediction.confidence.as_score() >= predictor.config().thresholds.likely.enter);
     }
 
@@ -1538,7 +1565,7 @@ mod tests {
         assert!(
             prediction.predictive_score.as_score() >= predictor.config().thresholds.likely.enter
         );
-        assert_eq!(prediction.model_version, "brickell-v4");
+        assert_eq!(prediction.model_version, "brickell-v5");
     }
 
     fn exempt_transit_at(now: TimestampMillis, minutes: u16) -> BridgeEvidence {
@@ -2281,9 +2308,11 @@ mod tests {
             )
             .expect("prediction");
         let eta = prediction.eta.expect("an eta");
-        // 18:22 to 19:00 is 38 minutes, less the four the tender starts early.
-        assert_eq!(eta.earliest, 34);
-        assert_eq!(eta.latest, 34);
+        // 18:22 to 19:00 is 38 minutes. The window opens a minute before the
+        // slot and runs three past it, which is where 56 of 69 observed
+        // weekday openings began.
+        assert_eq!(eta.earliest, 37);
+        assert_eq!(eta.latest, 41);
     }
 
     #[test]
@@ -2340,7 +2369,7 @@ mod tests {
     fn the_slot_lead_never_predicts_an_opening_before_the_vessel_arrives() {
         // The tender starting early cannot help a vessel that is not there yet.
         // An arrival two minutes out with a slot three minutes out must report
-        // the arrival, not the slot minus four.
+        // the arrival, not the slot minus the lead.
         let now = millis("2026-08-14T22:27:00Z"); // 18:27 EDT, slot at 18:30.
         let prediction = BridgePredictor::default()
             .evaluate(

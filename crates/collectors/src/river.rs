@@ -42,6 +42,18 @@ impl RiverBranch {
         }
     }
 
+    /// Inverse of [`Self::as_str`], for the branch name a fix carries as an
+    /// item attribute.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "river" => Some(Self::River),
+            "north_approach" => Some(Self::NorthApproach),
+            "government_cut" => Some(Self::GovernmentCut),
+            "south_approach" => Some(Self::SouthApproach),
+            _ => None,
+        }
+    }
+
     /// Widest offset still considered "on the channel" for this branch.
     ///
     /// The river threshold must reject the moored pleasure craft observed

@@ -18,6 +18,15 @@ Pre-registered gates:
   when its entire ETA interval reaches the product's 30-minute alert horizon;
   longer-range rows remain calibration data. Older traces retain their shipped
   near-edge behavior so historical model scores do not change retroactively.
+* Every forecast table carries a chance row: one alert each time the bridge
+  comes back down, matched the same way. With about twenty openings a day and
+  a thirty-minute horizon that trivial policy scores near 50% precision, so
+  precision in the forties or fifties is not skill on its own. Judge a model
+  by its lead, its ETA coverage, and its reliability line instead.
+* Pilots-board offsets are measured against the same hull's own AIS crossing
+  of the bridge line, not against whichever opening came next. The sign of an
+  offset is settled when every paired movement agrees on it; the value is
+  published only after twenty pairs with an IQR of at most 40 minutes.
 
 Rows created before successful-reading continuity was recorded are identified
 as legacy data. They are never presented as continuous coverage.
@@ -183,6 +192,15 @@ def read_forecasts(path: Path) -> list[Forecast] | None:
         sample = Forecast(*row)
         by_minute[(sample.model, sample.minute)] = sample
     return sorted(by_minute.values(), key=lambda sample: sample.at)
+
+
+def model_generation(model: str) -> int:
+    """Numeric suffix of a `brickell-vN` model version; 0 for anything else."""
+    prefix = "brickell-v"
+    if not model.startswith(prefix):
+        return 0
+    digits = "".join(ch for ch in model[len(prefix):] if ch.isdigit())
+    return int(digits) if digits else 0
 
 
 def local(ms: int) -> datetime:
@@ -432,7 +450,83 @@ def upstream_section(ups, openings, spans) -> None:
         print(f"    ordered lift {best:.2f} is inconclusive: keep current weights")
 
 
-def transit_section(transits, openings) -> None:
+def read_ais_crossings(path: Path):
+    """(mmsi, crossed_at_ms, direction, outcome) plus a name -> MMSIs map."""
+    connection = connect(path)
+    try:
+        if not table_exists(connection, "ais_transits"):
+            return [], {}
+        crossings = connection.execute(
+            "SELECT mmsi, crossed_at_ms, direction, outcome FROM ais_transits "
+            "ORDER BY crossed_at_ms"
+        ).fetchall()
+        names = connection.execute(
+            "SELECT mmsi, name FROM ais_vessel_ledger WHERE name IS NOT NULL"
+        ).fetchall()
+    finally:
+        connection.close()
+    by_name: dict[str, list[str]] = defaultdict(list)
+    for mmsi, name in names:
+        by_name[name.strip().casefold()].append(mmsi)
+    return crossings, by_name
+
+
+def transit_offsets_from_ais(transits, crossings, by_name) -> None:
+    """Board time -> the same hull's own crossing of the bridge line.
+
+    Pairing a booking with "the next opening within three hours" mostly pairs
+    it with somebody else's opening when the bridge lifts twenty times a day.
+    The hull's own AIS crossing is the measurement; this is what moved the
+    downriver placeholder from +20 to -8 minutes in v5.
+    """
+    print("\n  AIS-PAIRED OFFSETS (board time -> the hull's own crossing)")
+    if not crossings:
+        print("    no AIS crossings recorded")
+        return
+    by_direction: dict[str, list[tuple[float, str]]] = defaultdict(list)
+    for vessel, _action, direction, scheduled, *_ in transits:
+        for mmsi in by_name.get(vessel.strip().casefold(), []):
+            hit = next(
+                (
+                    row
+                    for row in crossings
+                    if row[0] == mmsi
+                    and scheduled - 60 * MINUTE <= row[1] <= scheduled + 300 * MINUTE
+                ),
+                None,
+            )
+            if hit is not None:
+                by_direction[direction or "unknown"].append(
+                    ((hit[1] - scheduled) / MINUTE, hit[3] or "pending")
+                )
+                break
+    if not by_direction:
+        print("    no board row matched a ledger hull with a crossing")
+        return
+    print(f"    {'direction':<12}{'paired':>8}{'median':>9}{'IQR':>18}{'sign':>12}")
+    for direction, pairs in sorted(by_direction.items()):
+        offsets = sorted(pair[0] for pair in pairs)
+        median = statistics.median(offsets)
+        quartiles = statistics.quantiles(offsets, n=4) if len(offsets) >= 4 else None
+        spread = (
+            f"{quartiles[0]:+.0f} to {quartiles[2]:+.0f} min" if quartiles else "--"
+        )
+        if all(offset < 0 for offset in offsets):
+            sign = "all before"
+        elif all(offset > 0 for offset in offsets):
+            sign = "all after"
+        else:
+            sign = "mixed"
+        print(f"    {direction:<12}{len(offsets):>8}{median:>+6.0f} min{spread:>18}{sign:>12}")
+        if len(offsets) < 20:
+            print(f"      value gate not met: need {20 - len(offsets)} more {direction} pairs")
+        elif quartiles and quartiles[2] - quartiles[0] <= 40:
+            print(f"      supported: publish {median:+.0f} min and mark calibrated")
+        else:
+            print("      sample is large enough but too dispersed to publish as a countdown")
+
+
+def transit_section(transits, openings, ais_pairing=None) -> None:
     print("\nRIVER TRANSITS")
     if transits is None:
         print("  no river_transits table")
@@ -440,6 +534,9 @@ def transit_section(transits, openings) -> None:
     if not transits:
         print("  no pilots-board movements recorded yet")
         return
+    if ais_pairing is not None:
+        transit_offsets_from_ais(transits, *ais_pairing)
+    print("\n  NEXT-OPENING PAIRING (legacy; pairs with whichever opening came next)")
     by_direction = defaultdict(list)
     used_openings: set[int] = set()
     for _vessel, _action, direction, scheduled, placeholder, _first, _last in transits:
@@ -517,7 +614,7 @@ def alert_episodes(
             and sample.eta_max is not None
             and (
                 sample.eta_max <= ALERT_HORIZON
-                if sample.model.startswith("brickell-v4")
+                if model_generation(sample.model) >= 4
                 else sample.eta_min <= ALERT_HORIZON
             )
         )
@@ -607,6 +704,95 @@ def score_forecasts(
         )
 
 
+def score_chance(
+    samples: list[Forecast],
+    openings: list[int],
+    up_spans: list[tuple[int, int]],
+    label: str,
+) -> None:
+    """One alert each time the bridge comes back down, scored like a model.
+
+    This is what "always on" looks like under episode accounting, and it is the
+    number a model has to clear before its precision means anything.
+    """
+    episodes = []
+    previous: Forecast | None = None
+    was_up = True
+    for sample in samples:
+        gap = previous is None or sample.minute - previous.minute > 2 * MINUTE
+        bridge_is_up = any(start <= sample.at <= end for start, end in up_spans)
+        if not bridge_is_up and (was_up or gap):
+            episodes.append(sample)
+        was_up = bridge_is_up
+        previous = sample
+    sample_spans = merge_spans([(s.at, s.at + 2 * MINUTE) for s in samples], 2 * MINUTE)
+    eligible = [
+        opening
+        for opening in openings
+        if any(start <= opening <= end for start, end in sample_spans)
+    ]
+    used: set[int] = set()
+    leads = []
+    for episode in episodes:
+        candidate = next(
+            (
+                opening
+                for opening in eligible
+                if opening not in used
+                and episode.at < opening <= episode.at + ALERT_HORIZON * MINUTE
+            ),
+            None,
+        )
+        if candidate is not None:
+            used.add(candidate)
+            leads.append((candidate - episode.at) / MINUTE)
+    precision = len(leads) / len(episodes) if episodes else 0
+    recall = len(used) / len(eligible) if eligible else 0
+    print(
+        f"  {label:<21}{len(episodes):>7}{precision:>9.0%}"
+        f"{recall:>9.0%}{len(episodes) - len(leads):>8}",
+        end="",
+    )
+    print(f"{statistics.median(leads):>8.1f}m" if leads else f"{'--':>9}", end="")
+    print(f"{'--':>9}")
+
+
+def reliability_line(
+    samples: list[Forecast],
+    openings: list[int],
+    up_spans: list[tuple[int, int]],
+    model: str,
+) -> None:
+    """Is a 0.70 score a 70% chance? Brier score and a coarse reliability table.
+
+    Each bridge-down minute sample is scored against whether a clean opening
+    followed within the alert horizon. A perfectly calibrated score has the
+    observed rate match the score in every band; the Brier score is the mean
+    squared gap (0 is perfect, 0.25 is a coin flip).
+    """
+    pairs = []
+    for sample in samples:
+        if any(start <= sample.at <= end for start, end in up_spans):
+            continue
+        label = any(sample.at < opening <= sample.at + ALERT_HORIZON * MINUTE for opening in openings)
+        pairs.append((sample.score / 10_000, label))
+    if len(pairs) < 100:
+        return
+    brier = statistics.fmean((score - label) ** 2 for score, label in pairs)
+    base = statistics.fmean(label for _, label in pairs)
+    print(
+        f"    reliability    Brier {brier:.3f} (coin flip 0.250, always-base-rate "
+        f"{base * (1 - base):.3f}) over {len(pairs)} bridge-down minutes"
+    )
+    bands = ((0.0, 0.2), (0.2, 0.45), (0.45, 0.64), (0.64, 0.8), (0.8, 1.01))
+    cells = []
+    for low, high in bands:
+        inside = [label for score, label in pairs if low <= score < high]
+        if inside:
+            cells.append(f"{low:.2f}-{min(high, 1.0):.2f}: {statistics.fmean(inside):.0%} of {len(inside)}")
+    print("    score band -> observed opening rate: " + " · ".join(cells))
+
+
 def forecast_section(samples, openings, up_spans) -> None:
     print(
         "\nFORECAST OUTCOMES  "
@@ -626,6 +812,7 @@ def forecast_section(samples, openings, up_spans) -> None:
     )
     for model in sorted({sample.model for sample in samples}):
         model_samples = [sample for sample in samples if sample.model == model]
+        score_chance(model_samples, openings, up_spans, f"{model} chance")
         score_forecasts(
             model_samples,
             openings,
@@ -643,6 +830,7 @@ def forecast_section(samples, openings, up_spans) -> None:
             subset = [sample for sample in model_samples if sample.mode == mode]
             if subset:
                 score_forecasts(subset, openings, up_spans, f"  {mode} <= {ALERT_HORIZON}m")
+        reliability_line(model_samples, openings, up_spans, model)
 
 
 def vessel_section(path: Path) -> None:
@@ -786,7 +974,7 @@ def main() -> int:
     if openings:
         clock_section(openings)
         upstream_section(ups, openings, spans)
-        transit_section(read_transits(path), openings)
+        transit_section(read_transits(path), openings, read_ais_crossings(path))
     else:
         print("\nCLOCK / UPSTREAM / RIVER TRANSITS")
         print("  waiting for continuously observed Brickell openings")
