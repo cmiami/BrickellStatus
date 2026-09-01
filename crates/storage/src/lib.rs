@@ -34,6 +34,15 @@ pub const DEFAULT_AIS_TRACK_RETENTION_MS: i64 = 365 * 24 * 60 * 60 * 1_000;
 /// Default horizon for minute-level forecast evaluation samples.
 pub const DEFAULT_FORECAST_RETENTION_MS: i64 = 2 * 365 * 24 * 60 * 60 * 1_000;
 
+/// The least history any pruning pass may leave behind: four weeks.
+///
+/// Bridge intervals, crossings, the vessel ledger and pilots-board movements
+/// are never pruned at all. Raw fixes and forecast samples default to a year
+/// and two years. This floor exists so that no caller, preference, or future
+/// default can cut the learnable record below the span the calibration needs
+/// to see a full month of weekday and weekend openings.
+pub const MIN_HISTORY_RETENTION_MS: i64 = 28 * 24 * 60 * 60 * 1_000;
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("database error: {0}")]
@@ -1037,6 +1046,12 @@ impl Store {
     /// Calculates the standard two-year forecast-sample cutoff.
     pub fn default_forecast_cutoff_ms(now_ms: i64) -> i64 {
         now_ms.saturating_sub(DEFAULT_FORECAST_RETENTION_MS)
+    }
+
+    /// Pulls a requested pruning cutoff back so that at least
+    /// [`MIN_HISTORY_RETENTION_MS`] of history survives it.
+    pub fn bounded_history_cutoff_ms(now_ms: i64, requested_cutoff_ms: i64) -> i64 {
+        requested_cutoff_ms.min(now_ms.saturating_sub(MIN_HISTORY_RETENTION_MS))
     }
 
     /// Merges the learning tables from the app's pre-rename database.
@@ -2577,6 +2592,23 @@ fn parse_version(value: &str) -> Result<(u64, u64, u64), StorageError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn no_pruning_cutoff_can_undercut_four_weeks_of_history() {
+        let now_ms = 1_787_000_000_000_i64;
+        let day_ms = 24 * 60 * 60 * 1_000;
+        // A caller asking to keep only a week is held to four.
+        assert_eq!(
+            super::Store::bounded_history_cutoff_ms(now_ms, now_ms - 7 * day_ms),
+            now_ms - 28 * day_ms
+        );
+        // A caller keeping a year is left alone.
+        assert_eq!(
+            super::Store::bounded_history_cutoff_ms(now_ms, now_ms - 365 * day_ms),
+            now_ms - 365 * day_ms
+        );
+        assert_eq!(super::MIN_HISTORY_RETENTION_MS, 28 * day_ms);
+    }
+
     use serde_json::json;
     use tempfile::tempdir;
 

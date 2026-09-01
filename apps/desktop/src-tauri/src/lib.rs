@@ -3669,8 +3669,12 @@ async fn run_dispatch_worker(
             // Keep a full seasonal cycle for every observed hull. Storage
             // exempts confirmed bridge-openers from this cutoff, preserving
             // their movement catalog indefinitely.
-            let track_cutoff_ms = Store::default_ais_track_cutoff_ms(now_ms);
-            let forecast_cutoff_ms = Store::default_forecast_cutoff_ms(now_ms);
+            let track_cutoff_ms = Store::bounded_history_cutoff_ms(
+                now_ms,
+                Store::default_ais_track_cutoff_ms(now_ms),
+            );
+            let forecast_cutoff_ms =
+                Store::bounded_history_cutoff_ms(now_ms, Store::default_forecast_cutoff_ms(now_ms));
             match delivery_cutoff {
                 Ok(delivery_cutoff) => {
                     match store.prune_history(&delivery_cutoff, track_cutoff_ms).await {
