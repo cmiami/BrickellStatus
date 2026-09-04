@@ -153,8 +153,9 @@ needed to build the panel firmware the app can flash.
 ```sh
 npm --prefix apps/console ci
 npm --prefix apps/console run tauri:dev      # console + desktop shell
-cargo test --workspace                       # Rust tests
-npm --prefix apps/console test               # console tests
+node scripts/verify.mjs all                 # complete local verification
+node scripts/verify.mjs core                # engine checks without the desktop build
+node scripts/verify.mjs console             # console checks, tests, and build
 npm --prefix apps/console run tauri:build:mac  # unsigned DMG
 npm --prefix apps/console run tauri:build:win  # unsigned Windows installer, cross-compiled
 npm --prefix apps/console run tauri:build:linux  # unsigned Fedora RPM, builds on Fedora
@@ -171,8 +172,10 @@ container. See [`docs/FEDORA_RELEASE.md`](docs/FEDORA_RELEASE.md).
 
 `desktop:prepare` generates the three inputs the Tauri build needs — bundled
 license texts, the panel firmware bundle, and the compiled frontend — and runs
-automatically before a build. Without PlatformIO the firmware bundle is written
-empty and the app reports that it ships no firmware.
+automatically before a build. Only cached firmware that announces the current
+source build id is bundled; missing or stale images are skipped. With none
+available, the app reports that it ships no firmware. Build fresh images with
+`python3 firmware/panel/scripts/bundle_firmware.py` when PlatformIO is installed.
 
 ## Layout
 

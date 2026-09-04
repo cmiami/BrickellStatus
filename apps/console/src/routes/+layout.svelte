@@ -52,9 +52,9 @@
 
   onMount(() => {
     void loadApp();
-    void loadDisplayStatus();
     startSnapshotRefresh();
     startDisplayStatusRefresh();
+    void loadDisplayStatus();
     document.addEventListener('click', openExternalLink);
     const statusListener = import('@tauri-apps/api/event')
       .then(({ listen }) =>

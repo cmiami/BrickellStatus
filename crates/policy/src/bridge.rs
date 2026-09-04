@@ -22,7 +22,7 @@ use thiserror::Error;
 /// Bump this when score semantics, feature construction, or shipped weights
 /// change. Durable forecast samples use it to keep unlike models out of the
 /// same calibration bucket.
-pub const BRIDGE_FORECAST_MODEL_VERSION: &str = "brickell-v5";
+pub const BRIDGE_FORECAST_MODEL_VERSION: &str = "brickell-v6";
 
 /// Maximum ETA at which a predictive opening becomes a public alert.
 ///
@@ -458,6 +458,22 @@ pub struct BridgePredictor {
     schedule: BrickellSchedule,
 }
 
+/// Complete inputs available at a forecast instant. No future outcomes or
+/// present-day vessel ledger are needed to reproduce its score and ETA.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BridgeReplayInput {
+    /// Configuration used for this evaluation.
+    pub config: BridgePredictorConfig,
+    /// Evaluation instant.
+    pub at: TimestampMillis,
+    /// Normalized observations, including original timestamps and health.
+    pub evidence: Vec<BridgeEvidence>,
+    /// Prior predictive state needed to reproduce hysteresis.
+    pub previous_predictive_state: Option<BridgeState>,
+    /// Prior public state needed to reproduce transitions.
+    pub previous_public_state: Option<BridgeState>,
+}
+
 impl BridgePredictor {
     /// Constructs a predictor and validates all policy bounds.
     pub fn new(config: BridgePredictorConfig) -> Result<Self, PredictionError> {
@@ -481,11 +497,35 @@ impl BridgePredictor {
         evidence: &[BridgeEvidence],
         previous: Option<&BridgePrediction>,
     ) -> Result<BridgePrediction, PredictionError> {
+        self.evaluate_states(
+            now,
+            evidence,
+            previous.map(|item| item.predictive_state),
+            previous.map(|item| item.state),
+        )
+    }
+
+    /// Runs a saved evaluation without collectors, network calls, or live data.
+    pub fn replay(input: &BridgeReplayInput) -> Result<BridgePrediction, PredictionError> {
+        Self::new(input.config.clone())?.evaluate_states(
+            input.at,
+            &input.evidence,
+            input.previous_predictive_state,
+            input.previous_public_state,
+        )
+    }
+
+    fn evaluate_states(
+        &self,
+        now: TimestampMillis,
+        evidence: &[BridgeEvidence],
+        previous_predictive_state: Option<BridgeState>,
+        previous_state: Option<BridgeState>,
+    ) -> Result<BridgePrediction, PredictionError> {
         let schedule = self.schedule.evaluate(now)?;
-        // An exempt transit makes the blackout inapplicable rather than merely
-        // less severe: the bridge opens for a tug with a tow at any hour. Score
-        // the rest of the evidence as if the blackout were not in force, while
-        // still reporting the real mode so the explanation stays truthful.
+        // Report exception traffic in the schedule explanation. Each vessel's
+        // own exemption governs its score and ETA below; it cannot transfer an
+        // exemption to another vessel merely by sharing the forecast.
         let exempt_transit = evidence.iter().any(|item| match &item.fact {
             // The runtime already classifies the live hull for the vessel
             // list. Carry that same fact into prediction so a tug ETA is
@@ -519,11 +559,6 @@ impl BridgePredictor {
             }
             _ => false,
         });
-        let scoring_mode = if exempt_transit && schedule.mode == BridgeOperatingMode::Blackout {
-            BridgeOperatingMode::OnSignal
-        } else {
-            schedule.mode
-        };
         // Traffic refused during a restricted period does not disperse; it
         // queues and leaves together on the hour or half-hour. The minutes
         // before a slot are therefore the likeliest time for an opening, which
@@ -549,10 +584,6 @@ impl BridgePredictor {
             clock_slot_imminent,
             &self.config,
         )];
-        // How many upstream bridges are reporting the same run downriver. Each
-        // one is a further sighting of a vessel that is actually moving, which
-        // is what rules out the slow end of the speed range.
-        let mut upstream_sightings = 0_usize;
         let mut positive_sources = BTreeSet::new();
         let mut positive_kinds = BTreeSet::new();
         let mut valid_non_schedule = 0usize;
@@ -572,7 +603,7 @@ impl BridgePredictor {
                 latest_controller = Some((item, *state));
             }
 
-            let scored = self.score_evidence(item, now, scoring_mode);
+            let scored = self.score_evidence(item, now, schedule.mode);
             match scored.disposition {
                 ContributionDisposition::Applied
                 | ContributionDisposition::Informational
@@ -609,10 +640,22 @@ impl BridgePredictor {
                 positive_sources.insert(item.source_id.clone());
                 positive_kinds.insert(scored.kind);
                 if let Some(eta) = evidence_eta(&item.fact, item.observed_at, now) {
-                    if scored.kind == EvidenceKind::Outbound {
-                        upstream_sightings += 1;
-                    }
-                    if best_eta.is_none_or(|current| eta.earliest < current.earliest) {
+                    // A tug booking does not exempt an unrelated yacht. Apply
+                    // the operating schedule to each hypothesis before choosing
+                    // which supported opening window is earliest.
+                    let exempt = match &item.fact {
+                        BridgeObservation::AisTrack {
+                            schedule_exempt, ..
+                        } => *schedule_exempt,
+                        BridgeObservation::ScheduledTransit { exempt, .. } => *exempt,
+                        BridgeObservation::OutboundProgress { .. } => {
+                            schedule.mode == BridgeOperatingMode::Blackout
+                        }
+                        BridgeObservation::Controller { .. } => false,
+                    };
+                    if let Some(eta) = self.scheduled_eta(Some(eta), now, exempt)?
+                        && best_eta.is_none_or(|current| eta.earliest < current.earliest)
+                    {
                         best_eta = Some(eta);
                     }
                 }
@@ -645,11 +688,8 @@ impl BridgePredictor {
             .clamp(0.0, 1.0);
         let schedule_only = positive_kinds.is_empty();
 
-        let (mut predictive_state, held_by_hysteresis) = select_predictive_state(
-            raw_score,
-            previous.map(|item| item.predictive_state),
-            self.config.thresholds,
-        );
+        let (mut predictive_state, held_by_hysteresis) =
+            select_predictive_state(raw_score, previous_predictive_state, self.config.thresholds);
         // A clock window is context, never predictive proof, and PRODUCT.md is
         // explicit that this app does not alert solely because a legal opening
         // slot is approaching. Keep the score for contribution analysis, but
@@ -662,11 +702,9 @@ impl BridgePredictor {
         };
         let predictive_confidence = Confidence::from_score(predictive_score);
 
-        let eta = self.scheduled_eta(
-            best_eta.map(|eta| tighten_eta(eta, upstream_sightings)),
-            now,
-            exempt_transit,
-        )?;
+        // Preserve the supported interval. An arbitrary width cap used to
+        // turn 9..42 into 9..29 and manufacture an alert inside the horizon.
+        let eta = best_eta;
         let public_predictive_state = alertable_predictive_state(predictive_state, eta);
         let authoritative = authoritative_state(latest_controller);
         let public_held_by_hysteresis = authoritative.is_none()
@@ -675,7 +713,6 @@ impl BridgePredictor {
         let (state, confidence) =
             authoritative.unwrap_or((public_predictive_state, predictive_confidence));
 
-        let previous_state = previous.map(|item| item.state);
         let availability = prediction_availability(
             now,
             evidence,
@@ -834,7 +871,8 @@ impl BridgePredictor {
         // come true. Age it from the close of its window instead.
         let pending_seconds = predicted_window_seconds(&item.fact);
         let effective_age = age_seconds.saturating_sub(pending_seconds);
-        let stale = explicitly_expired
+        let stale = item.observed_at > now
+            || explicitly_expired
             || item.availability == AvailabilityStatus::Stale
             || effective_age > u64::from(decay.stale_after_seconds);
         let freshness_factor = if stale {
@@ -853,7 +891,13 @@ impl BridgePredictor {
         let context_factor = if mode == BridgeOperatingMode::Blackout
             && kind == EvidenceKind::Ais
             && raw_weight > 0.0
-        {
+            && !matches!(
+                &item.fact,
+                BridgeObservation::AisTrack {
+                    schedule_exempt: true,
+                    ..
+                }
+            ) {
             self.config.blackout_predictive_factor
         } else {
             1.0
@@ -1145,10 +1189,12 @@ fn classify_fact(
 }
 
 fn evidence_is_active(evidence: &BridgeEvidence, now: TimestampMillis, decay: DecayRule) -> bool {
-    matches!(
-        evidence.availability,
-        AvailabilityStatus::Live | AvailabilityStatus::Degraded
-    ) && !evidence.expires_at.is_some_and(|expires| expires < now)
+    evidence.observed_at <= now
+        && matches!(
+            evidence.availability,
+            AvailabilityStatus::Live | AvailabilityStatus::Degraded
+        )
+        && !evidence.expires_at.is_some_and(|expires| expires < now)
         && evidence.observed_at.age_seconds_at(now) <= u64::from(decay.stale_after_seconds)
 }
 
@@ -1222,15 +1268,6 @@ fn predicted_window_seconds(fact: &BridgeObservation) -> u64 {
     }
 }
 
-/// Widest window worth reporting.
-///
-/// "Opening likely in 9 to 42 minutes" is not a prediction anybody can use --
-/// the bridge is likely to open in the next few hours too. The window came
-/// straight from dividing distance by a speed range spanning 3 to 6 knots, so
-/// its width grew with distance and the farthest bridge produced the vaguest
-/// answer at exactly the moment there was most time to act on a sharp one.
-const MAX_ETA_SPAN_MINUTES: u16 = 20;
-
 /// How near a slot an opening has been observed to begin. Minutes further out
 /// than this are the gap the bridge skips during the day.
 const SLOT_CLUSTER_MINUTES: u8 = 5;
@@ -1246,36 +1283,6 @@ fn minutes_to_nearest_slot(minute: u8) -> u8 {
 /// they belonged to. Three covers the late half of that without stretching the
 /// window into the following gap.
 const SLOT_TAIL_MINUTES: u16 = 3;
-
-/// Narrowest window worth claiming.
-///
-/// Observed openings began within about five minutes either side of the time
-/// they were expected. Reporting anything tighter than this would be inventing
-/// precision the evidence has never shown.
-const MIN_ETA_SPAN_MINUTES: u16 = 6;
-
-/// Brings a raw arrival window down to something actionable.
-///
-/// Each additional upstream bridge that has seen the same run is another
-/// sighting of a vessel confirmed to be moving, which is what rules out the
-/// slow end of the speed range the window was built from. So corroboration
-/// tightens the answer instead of merely raising confidence in a vague one.
-///
-/// The near edge never moves. Only the far edge is pulled in, because pushing
-/// the near edge later would risk saying "not yet" about a bridge that is
-/// already going up, and warning late is the one failure this app cannot have.
-fn tighten_eta(eta: EtaRangeMinutes, upstream_sightings: usize) -> EtaRangeMinutes {
-    let span = eta.latest.saturating_sub(eta.earliest);
-    // One sighting earns the full width, two earns half, and so on.
-    let allowed = MAX_ETA_SPAN_MINUTES
-        .checked_div(u16::try_from(upstream_sightings.max(1)).unwrap_or(1))
-        .unwrap_or(MAX_ETA_SPAN_MINUTES)
-        .max(MIN_ETA_SPAN_MINUTES);
-    if span <= allowed {
-        return eta;
-    }
-    EtaRangeMinutes::new(eta.earliest, eta.earliest.saturating_add(allowed))
-}
 
 fn availability_factor(status: AvailabilityStatus) -> f32 {
     match status {
@@ -1424,6 +1431,55 @@ mod tests {
         millis("2026-08-14T19:10:00Z") // Friday 15:10 EDT, scheduled mode.
     }
 
+    #[test]
+    fn recorded_inputs_reproduce_hysteresis_and_full_prediction() {
+        let now = scheduled_now();
+        let predictor = BridgePredictor::default();
+        let prior = predictor.evaluate(now, &[], None).unwrap();
+        let input = BridgeReplayInput {
+            config: predictor.config().clone(),
+            at: now,
+            evidence: vec![outbound(now)],
+            previous_predictive_state: Some(prior.predictive_state),
+            previous_public_state: Some(prior.state),
+        };
+        let expected = predictor
+            .evaluate(now, &input.evidence, Some(&prior))
+            .unwrap();
+        let decoded: BridgeReplayInput =
+            serde_json::from_str(&serde_json::to_string(&input).unwrap()).unwrap();
+        assert_eq!(BridgePredictor::replay(&decoded).unwrap(), expected);
+    }
+
+    #[test]
+    fn future_dated_observations_cannot_predict_or_override_controller_truth() {
+        let now = scheduled_now();
+        let future = TimestampMillis(now.0 + 60_000);
+        let evidence = [
+            evidence(
+                "future-controller",
+                "fl511",
+                future,
+                BridgeObservation::Controller {
+                    state: BridgeControllerState::Open,
+                },
+            ),
+            outbound(future),
+        ];
+        let prediction = BridgePredictor::default()
+            .evaluate(now, &evidence, None)
+            .unwrap();
+        assert_eq!(prediction.state, BridgeState::Clear);
+        assert!(prediction.eta.is_none());
+        assert!(
+            prediction
+                .contributions
+                .iter()
+                .filter(|c| c.source_id.is_some())
+                .all(|c| c.disposition == ContributionDisposition::Stale)
+        );
+    }
+
     /// 15:20 EDT: ten minutes before the 15:30 slot, so inside the
     /// twelve-minute imminent window. The sibling test below sits at 15:10,
     /// twenty minutes out, which never reaches `slot_imminent` -- so it scored
@@ -1565,7 +1621,7 @@ mod tests {
         assert!(
             prediction.predictive_score.as_score() >= predictor.config().thresholds.likely.enter
         );
-        assert_eq!(prediction.model_version, "brickell-v5");
+        assert_eq!(prediction.model_version, "brickell-v6");
     }
 
     fn exempt_transit_at(now: TimestampMillis, minutes: u16) -> BridgeEvidence {
@@ -2440,46 +2496,49 @@ mod tests {
         }
     }
 
-    /// "Opening likely in 9 to 42 minutes" says nothing a driver can act on --
-    /// the bridge is likely to open in the next few hours too.
     #[test]
-    fn a_window_nobody_can_act_on_is_brought_down_to_one_that_can_be() {
-        let vague = EtaRangeMinutes::new(9, 42);
-        let tightened = tighten_eta(vague, 1);
-        assert_eq!(tightened.earliest, 9, "the near edge never moves");
-        assert_eq!(tightened.latest, 29);
-        assert!(tightened.latest - tightened.earliest <= MAX_ETA_SPAN_MINUTES);
+    fn uncertainty_cannot_be_truncated_to_manufacture_an_actionable_forecast() {
+        let now = scheduled_now();
+        let transit = evidence(
+            "wide",
+            "pilots",
+            now,
+            BridgeObservation::ScheduledTransit {
+                vessel: "Uncertain arrival".into(),
+                exempt: true,
+                eta: Some(EtaRangeMinutes::new(9, 42)),
+            },
+        );
+        let prediction = BridgePredictor::default()
+            .evaluate(now, &[transit], None)
+            .unwrap();
+        assert_eq!(prediction.eta, Some(EtaRangeMinutes::new(9, 42)));
+        assert_eq!(prediction.predictive_state, BridgeState::Likely);
+        assert_eq!(prediction.state, BridgeState::Clear);
+        assert_eq!(prediction.urgency, Urgency::Passive);
     }
 
-    /// Each further upstream bridge is another sighting of a vessel confirmed
-    /// to be moving, which rules out the slow end of the speed range the window
-    /// was built from.
     #[test]
-    fn corroboration_tightens_the_window_rather_than_only_the_confidence() {
-        let vague = EtaRangeMinutes::new(9, 42);
-        let one = tighten_eta(vague, 1);
-        let two = tighten_eta(vague, 2);
-        let three = tighten_eta(vague, 3);
-        assert!(two.latest < one.latest, "{two:?} vs {one:?}");
-        assert!(three.latest < two.latest, "{three:?} vs {two:?}");
-        for tightened in [one, two, three] {
-            assert_eq!(tightened.earliest, vague.earliest);
-        }
-    }
-
-    /// Never so tight that it claims precision the evidence has not shown.
-    #[test]
-    fn tightening_stops_at_the_observed_spread() {
-        let tightened = tighten_eta(EtaRangeMinutes::new(9, 42), 99);
-        assert_eq!(tightened.latest - tightened.earliest, MIN_ETA_SPAN_MINUTES);
-    }
-
-    /// A window that is already sharp is left exactly as it is.
-    #[test]
-    fn an_already_useful_window_is_untouched() {
-        let sharp = EtaRangeMinutes::new(4, 9);
-        assert_eq!(tighten_eta(sharp, 1), sharp);
-        assert_eq!(tighten_eta(sharp, 4), sharp);
+    fn an_unrelated_tug_booking_cannot_exempt_an_ordinary_vessels_arrival() {
+        let now = scheduled_now(); // 15:10, ordinary traffic waits for 15:30.
+        let ordinary = evidence(
+            "ordinary",
+            "ais",
+            now,
+            BridgeObservation::AisTrack {
+                mmsi: Some("000000001".into()),
+                vessel_name: None,
+                movement: VesselMovement::Approaching,
+                route_intersects: true,
+                schedule_exempt: false,
+                eta: Some(EtaRangeMinutes::new(6, 10)),
+                opening_propensity: Some(Confidence::CERTAIN),
+            },
+        );
+        let predicted = BridgePredictor::default()
+            .evaluate(now, &[ordinary, exempt_transit_at(now, 90)], None)
+            .unwrap();
+        assert_eq!(predicted.eta, Some(EtaRangeMinutes::new(19, 23)));
     }
 
     /// The reported case. Sunday 10:05 EDT, a vessel 4 to 15 minutes out: the

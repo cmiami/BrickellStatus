@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use serde_json::{Map, Value, json};
 use url::Url;
 
@@ -24,9 +24,8 @@ const RESPONSE_GRID_SNAP_TOLERANCE_DEGREES: f64 = 0.5;
 /// Precipitation amount, not probability. A bin that says how much rain falls
 /// in a named quarter-hour supports an actual ETA; an hourly chance does not.
 const MINUTELY_FIELDS: &str = "precipitation,rain,showers";
-/// One hour of bins. The rain rule looks half an hour ahead, and the first bin
-/// is the one already in progress, so four leaves margin without asking the
-/// provider for a forecast nobody reads.
+/// One elapsed bin plus three quarter-hour periods covers the half-hour
+/// lookahead, including a period starting exactly on its far edge.
 const MINUTELY_BINS: u16 = 4;
 
 pub struct OpenMeteoCollector {
@@ -72,7 +71,8 @@ impl OpenMeteoCollector {
             .append_pair("hourly", HOURLY_FIELDS)
             .append_pair("minutely_15", MINUTELY_FIELDS)
             .append_pair("forecast_minutely_15", &MINUTELY_BINS.to_string())
-            .append_pair("forecast_hours", &forecast_hours.to_string())
+            // The first hourly timestamp ends an elapsed period.
+            .append_pair("forecast_hours", &(forecast_hours + 1).to_string())
             .append_pair("timezone", "UTC");
         Ok(Self {
             latitude,
@@ -217,8 +217,11 @@ pub fn parse_open_meteo(
             title: "Hourly forecast".into(),
             summary,
             observed_at: None,
-            starts_at: Some(time),
-            ends_at: None,
+            // Accumulations and gust maxima describe the preceding hour;
+            // instantaneous fields (such as temperature) apply at its end.
+            // https://open-meteo.com/en/docs#hourly-parameter-definition
+            starts_at: Some(time - Duration::hours(1)),
+            ends_at: Some(time),
             location: Some(location.clone()),
             source: source.clone(),
             attributes,
@@ -279,8 +282,8 @@ pub fn parse_open_meteo(
                     .filter(|value| !value.is_null())
                     .map(|amount| format!("{amount} mm in 15 minutes")),
                 observed_at: None,
-                starts_at: Some(time),
-                ends_at: None,
+                starts_at: Some(time - Duration::minutes(15)),
+                ends_at: Some(time),
                 location: Some(location.clone()),
                 source: source.clone(),
                 attributes,
@@ -422,6 +425,14 @@ mod tests {
         assert_eq!(items[0].kind, ItemKind::WeatherCurrent);
         assert_eq!(items[1].kind, ItemKind::WeatherHourly);
         assert_eq!(items[1].attributes["precipitation_probability"], json!(70));
+        assert_eq!(
+            items[1].starts_at.unwrap().to_rfc3339(),
+            "2026-08-14T21:00:00+00:00"
+        );
+        assert_eq!(
+            items[1].ends_at.unwrap().to_rfc3339(),
+            "2026-08-14T22:00:00+00:00"
+        );
 
         let bins = items
             .iter()
@@ -432,7 +443,14 @@ mod tests {
         // say which quarter of the hour the rain arrives in.
         assert_eq!(bins[2].attributes["precipitation"], json!(0.6));
         assert_eq!(bins[2].attributes["units"]["precipitation"], json!("mm"));
-        assert_ne!(bins[0].starts_at, bins[1].starts_at);
+        assert_eq!(
+            bins[2].starts_at.unwrap().to_rfc3339(),
+            "2026-08-14T22:15:00+00:00"
+        );
+        assert_eq!(
+            bins[2].ends_at.unwrap().to_rfc3339(),
+            "2026-08-14T22:30:00+00:00"
+        );
     }
 
     /// `minutely_15` coverage is region-dependent. A location without it must

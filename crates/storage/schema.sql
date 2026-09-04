@@ -74,6 +74,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS bridge_state_intervals_current
 CREATE INDEX IF NOT EXISTS bridge_state_intervals_training
     ON bridge_state_intervals(bridge_key, state, started_at_ms);
 
+CREATE INDEX IF NOT EXISTS bridge_state_intervals_recent
+    ON bridge_state_intervals(started_at_ms);
+
 -- Per-vessel opening ledger, learned from observed bridge-line crossings.
 --
 -- AIS never broadcasts air draft, so whether a hull needs the span raised is
@@ -118,6 +121,9 @@ CREATE TABLE IF NOT EXISTS ais_transits (
 CREATE INDEX IF NOT EXISTS ais_transits_unresolved
     ON ais_transits(crossed_at_ms)
     WHERE outcome IS NULL;
+
+CREATE INDEX IF NOT EXISTS ais_transits_recent
+    ON ais_transits(crossed_at_ms);
 
 -- Where hulls actually ran, kept for a year so the charted centreline can be
 -- calibrated against observed water rather than traced once and trusted
@@ -173,6 +179,21 @@ CREATE TABLE IF NOT EXISTS bridge_forecast_samples (
 
 CREATE INDEX IF NOT EXISTS bridge_forecast_samples_training
     ON bridge_forecast_samples(target_key, evaluated_at_ms, model_version);
+
+-- Exact inputs and outputs at periodic samples and material changes. Unlike
+-- minute summaries, these do not overwrite a brief alert in the same minute.
+-- Kept for 30 days; compact forecast/outcome history remains independent.
+CREATE TABLE IF NOT EXISTS bridge_forecast_replays (
+    target_key TEXT NOT NULL,
+    evaluated_at_ms INTEGER NOT NULL,
+    model_version TEXT NOT NULL,
+    input_json TEXT NOT NULL CHECK (json_valid(input_json)),
+    prediction_json TEXT NOT NULL CHECK (json_valid(prediction_json)),
+    PRIMARY KEY (target_key, evaluated_at_ms)
+);
+
+CREATE INDEX IF NOT EXISTS bridge_forecast_replays_retention
+    ON bridge_forecast_replays(evaluated_at_ms);
 
 -- Ledger seed: the four vessels whose crossings were observed end-to-end with
 -- FL511 confirmation during the 2026-08-17 discovery session

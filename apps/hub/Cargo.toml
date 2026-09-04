@@ -10,7 +10,5 @@ description = "Optional always-on BrickellStatus hub"
 publish = false
 
 [dependencies]
-anyhow.workspace = true
-tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -6,16 +6,6 @@
   import { notice, persistPreferences, preferences, saving, snapshot } from '$lib/state';
   import type { UnitSystem } from '$lib/types';
 
-  // `$state`, not a plain `let`. Without a rune this component compiled in
-  // legacy mode, where the template's dependencies are found by reading the
-  // expressions in it: `{localTime()}` mentions `localTime` and never `now`, so
-  // reassigning `now` every second invalidated nothing and the clock showed the
-  // moment the app started, forever. Runes track reads at runtime, so calling
-  // through a function is no longer a way to hide a dependency.
-  //
-  // `refreshing` has to come along. One rune puts the whole component in runes
-  // mode, and a plain `let` left behind would quietly stop being reactive --
-  // here that would have frozen the refresh button's spinner instead.
   let now = $state(new Date());
   let refreshing = $state(false);
 
@@ -48,6 +38,8 @@
     refreshing = true;
     try {
       notice.set(await refreshSources());
+    } catch (error) {
+      notice.set({ ok: false, message: error instanceof Error ? error.message : 'Sources could not refresh.' });
     } finally {
       refreshing = false;
     }

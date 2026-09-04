@@ -1,19 +1,18 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { MapPinned, RadioTower } from '@lucide/svelte';
-  import { onMount } from 'svelte';
 
   import ChannelScopeEditor from '$lib/components/ChannelScopeEditor.svelte';
   import EpaperPreview from '$lib/components/EpaperPreview.svelte';
   import SwitchField from '$lib/components/SwitchField.svelte';
-  import { persistPreferences, preferences, snapshot } from '$lib/state';
+  import { preferences, snapshot } from '$lib/state';
+  import { preferencesEditor } from '$lib/preferencesEditor.svelte';
   import type { AppPreferences, ChannelPreference } from '$lib/types';
 
   let draft = $state<AppPreferences | null>(null);
   let selectedId = $state('');
   let initializedFromStore = $state(false);
-  let saveInFlight = false;
-  let saveQueued = false;
+  const { saveNow } = preferencesEditor(() => draft, (next) => { draft = next; });
 
   $effect(() => {
     if ($preferences && !initializedFromStore) {
@@ -33,74 +32,8 @@
     draft.profile.channels[index] = channel;
     draft.profile.preset = 'custom';
     if (commit) void saveNow();
-    else scheduleSave();
   }
 
-  async function save() {
-    if (!draft) return;
-    if (saveInFlight) {
-      saveQueued = true;
-      return;
-    }
-
-    saveInFlight = true;
-    const payload = $state.snapshot(draft);
-    const submittedFingerprint = JSON.stringify(payload);
-    try {
-      await persistPreferences(payload);
-    } finally {
-      saveInFlight = false;
-      const currentFingerprint = draft ? JSON.stringify($state.snapshot(draft)) : '';
-      const anotherSaveIsNeeded = saveQueued || currentFingerprint !== submittedFingerprint;
-      saveQueued = false;
-      if (anotherSaveIsNeeded) void save();
-    }
-  }
-
-  // A switch is a decision, not a draft: it commits the moment it is thrown.
-  async function saveNow() {
-    if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = undefined;
-    await save();
-  }
-
-  // Typed fields commit too, just not per keystroke. Long enough that a name
-  // being typed is one write rather than twenty; short enough that nobody can
-  // leave the page believing an edit was applied when it was not.
-  const SETTLE_MS = 700;
-  let saveTimer: ReturnType<typeof setTimeout> | undefined;
-
-  function scheduleSave() {
-    if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      saveTimer = undefined;
-      void save();
-    }, SETTLE_MS);
-  }
-
-  // A pending edit must not die with the page. Leaving flushes it.
-  onMount(() => () => {
-    if (saveTimer) {
-      clearTimeout(saveTimer);
-      void save();
-    }
-  });
-
-  const draftFingerprint = $derived(draft ? JSON.stringify($state.snapshot(draft)) : '');
-  const savedFingerprint = $derived($preferences ? JSON.stringify($preferences) : '');
-
-  $effect(() => {
-    // Depend on the full fingerprint, not merely an `unsaved` boolean. Every
-    // keystroke therefore restarts the settle window, even after the first edit
-    // has already made the page dirty.
-    if (!initializedFromStore || !draftFingerprint || !savedFingerprint) return;
-    if (draftFingerprint === savedFingerprint) {
-      if (saveTimer) clearTimeout(saveTimer);
-      saveTimer = undefined;
-      return;
-    }
-    scheduleSave();
-  });
 </script>
 
 <svelte:head><title>Channels · BrickellStatus</title></svelte:head>
@@ -117,8 +50,6 @@
     </div>
     <div class="heading-actions">
       <a class="secondary-action" href="/map"><MapPinned size={17} aria-hidden="true" /> Open map</a>
-      <!-- No Save button: every change on this page applies itself. The status
-           exists so "applied" is something the reader can see, not assume. -->
     </div>
   </header>
 

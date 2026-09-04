@@ -1,6 +1,7 @@
-import { derived, get, writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 
 import { getDisplayStatus, getPreferences, getSnapshot, savePreferences } from './api';
+import { rebasePreferences } from './preferences';
 import type {
   AppPreferences,
   AppSnapshot,
@@ -16,77 +17,111 @@ export const saving = writable(false);
 export const notice = writable<MutationResult | null>(null);
 export const displayStatus = writable<DisplayConnectionStatus | null>(null);
 
-export const activeChannels = derived(snapshot, ($snapshot) =>
-  $snapshot?.channels.filter((channel) => channel.enabled) ?? []
-);
-
-let refreshTimer: ReturnType<typeof setInterval> | undefined;
-let displayStatusTimer: ReturnType<typeof setInterval> | undefined;
+let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+let displayStatusTimer: ReturnType<typeof setTimeout> | undefined;
+let refreshGeneration = 0;
+let displayGeneration = 0;
+let snapshotRequest = 0;
+let appRequest = 0;
+let saveQueue = Promise.resolve();
+let pendingSaves = 0;
 
 export async function loadApp(): Promise<void> {
+  const request = ++appRequest;
+  const nextSnapshotRequest = ++snapshotRequest;
   loading.set(true);
   loadError.set(null);
   try {
     const [nextSnapshot, nextPreferences] = await Promise.all([getSnapshot(), getPreferences()]);
-    snapshot.set(nextSnapshot);
+    if (request !== appRequest) return;
+    if (nextSnapshotRequest === snapshotRequest) snapshot.set(nextSnapshot);
     preferences.set(nextPreferences);
   } catch (error) {
-    loadError.set(error instanceof Error ? error.message : 'The console could not load.');
+    if (request === appRequest) {
+      loadError.set(error instanceof Error ? error.message : 'The console could not load.');
+    }
   } finally {
-    loading.set(false);
+    if (request === appRequest) loading.set(false);
   }
 }
 
 export function startSnapshotRefresh(intervalMs = 10_000): void {
   stopSnapshotRefresh();
-  refreshTimer = setInterval(async () => {
+  const generation = refreshGeneration;
+  async function refresh() {
+    const request = ++snapshotRequest;
     try {
-      snapshot.set(await getSnapshot());
-      loadError.set(null);
+      const next = await getSnapshot();
+      if (generation === refreshGeneration && request === snapshotRequest) {
+        snapshot.set(next);
+        loadError.set(null);
+      }
     } catch (error) {
-      loadError.set(error instanceof Error ? error.message : 'Live refresh failed.');
+      if (generation === refreshGeneration && request === snapshotRequest) {
+        loadError.set(error instanceof Error ? error.message : 'Live refresh failed.');
+      }
+    } finally {
+      if (generation === refreshGeneration) refreshTimer = setTimeout(refresh, intervalMs);
     }
-  }, intervalMs);
+  }
+  refreshTimer = setTimeout(refresh, intervalMs);
 }
 
 export function stopSnapshotRefresh(): void {
-  if (refreshTimer) clearInterval(refreshTimer);
+  refreshGeneration += 1;
+  clearTimeout(refreshTimer);
   refreshTimer = undefined;
 }
 
 export async function loadDisplayStatus(): Promise<void> {
+  const generation = displayGeneration;
+  const previous = get(displayStatus);
   try {
-    displayStatus.set(await getDisplayStatus());
+    const next = await getDisplayStatus();
+    if (generation === displayGeneration && get(displayStatus) === previous) displayStatus.set(next);
   } catch {
-    // Browser previews have no hardware bridge. The live board simply omits
-    // the ON PANEL mark there rather than treating that as a console failure.
-    displayStatus.set(null);
+    if (generation === displayGeneration && get(displayStatus) === previous) displayStatus.set(null);
   }
 }
 
 export function startDisplayStatusRefresh(intervalMs = 5_000): void {
   stopDisplayStatusRefresh();
-  displayStatusTimer = setInterval(() => void loadDisplayStatus(), intervalMs);
+  const generation = displayGeneration;
+  async function refresh() {
+    await loadDisplayStatus();
+    if (generation === displayGeneration) displayStatusTimer = setTimeout(refresh, intervalMs);
+  }
+  displayStatusTimer = setTimeout(refresh, intervalMs);
 }
 
 export function stopDisplayStatusRefresh(): void {
-  if (displayStatusTimer) clearInterval(displayStatusTimer);
+  displayGeneration += 1;
+  clearTimeout(displayStatusTimer);
   displayStatusTimer = undefined;
 }
 
-export async function persistPreferences(next: AppPreferences): Promise<MutationResult> {
+export async function persistPreferences(
+  next: AppPreferences,
+  base: AppPreferences | null = get(preferences)
+): Promise<MutationResult> {
+  pendingSaves += 1;
   saving.set(true);
+  const previousSave = saveQueue;
+  let release!: () => void;
+  saveQueue = new Promise<void>((resolve) => { release = resolve; });
+  await previousSave;
   try {
-    const result = await savePreferences(next);
+    const current = get(preferences);
+    const result = await savePreferences(base && current ? rebasePreferences(next, base, current) : next);
     if (result.ok) {
       const [savedPreferences, nextSnapshot] = await Promise.all([getPreferences(), getSnapshot()]);
+      // Discard reads started before this mutation was published.
+      snapshotRequest += 1;
+      appRequest += 1;
+      loading.set(false);
       preferences.set(savedPreferences);
       snapshot.set(nextSnapshot);
-      // Confirmation is transient and self-clearing. The desks used to carry a
-      // quiet permanent indicator instead, which read as a greyed-out Save
-      // button -- the exact affordance this app does not have and should never
-      // appear to. Writes are debounced, so this is one notice per burst of
-      // edits rather than per keystroke, and it leaves on its own.
+      loadError.set(null);
       notice.set({ ok: true, message: 'Saved.' });
       return result;
     }
@@ -100,10 +135,8 @@ export async function persistPreferences(next: AppPreferences): Promise<Mutation
     notice.set(result);
     return result;
   } finally {
-    saving.set(false);
+    pendingSaves -= 1;
+    saving.set(pendingSaves > 0);
+    release();
   }
-}
-
-export function currentPreferences(): AppPreferences | null {
-  return get(preferences);
 }

@@ -38,6 +38,7 @@ import math
 import sqlite3
 import statistics
 import sys
+from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -93,7 +94,7 @@ class Forecast:
 
 
 def connect(path: Path) -> sqlite3.Connection:
-    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    return sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
 
 
 def table_exists(connection: sqlite3.Connection, table: str) -> bool:
@@ -215,12 +216,23 @@ def clock_offset(ms: int) -> float:
 
 
 def binomial_tail(hits: int, trials: int, chance: float) -> float:
-    return sum(
-        math.comb(trials, index)
-        * chance**index
-        * (1 - chance) ** (trials - index)
+    if hits <= 0:
+        return 1.0
+    if hits > trials or chance == 0:
+        return 0.0
+    if chance == 1:
+        return 1.0
+    # Individual binomial coefficients overflow float conversion as history
+    # grows, even though every probability is at most one.
+    return min(1.0, math.fsum(
+        math.exp(
+            math.lgamma(trials + 1) - math.lgamma(index + 1)
+            - math.lgamma(trials - index + 1)
+            + index * math.log(chance)
+            + (trials - index) * math.log1p(-chance)
+        )
         for index in range(hits, trials + 1)
-    )
+    ))
 
 
 def merge_spans(spans: list[tuple[int, int]], tolerance: int = 0):
@@ -236,17 +248,34 @@ def merge_spans(spans: list[tuple[int, int]], tolerance: int = 0):
 
 
 def observed_spans(intervals: list[Interval]) -> list[tuple[int, int]]:
-    return merge_spans(
-        [
-            (row.started, row.confirmed)
-            for row in intervals
-            if row.key == TARGET
-            and row.relation == "target"
-            and row.reason != "legacy"
-            and row.state != "unknown"
-        ],
-        CONTINUITY_GAP,
-    )
+    by_source: dict[str, list[Interval]] = defaultdict(list)
+    for row in intervals:
+        if row.key == TARGET and row.relation == "target":
+            by_source[row.source].append(row)
+    spans = []
+    for rows in by_source.values():
+        previous = None
+        for row in sorted(rows, key=lambda row: row.started):
+            if row.reason == "legacy" or row.state == "unknown":
+                previous = None
+                continue
+            spans.append((row.started, row.confirmed))
+            if (
+                previous is not None
+                and row.reason == "state_change"
+                and row.session is not None
+                and row.session == previous.session
+                and 0 <= row.started - previous.confirmed <= CONTINUITY_GAP
+            ):
+                spans.append((previous.confirmed, row.started))
+            previous = row
+    return merge_spans(spans)
+
+
+def covers_window(spans: list[tuple[int, int]], start: int, end: int) -> bool:
+    """Whether a sorted, merged coverage span contains the entire window."""
+    index = bisect_right(spans, (start, math.inf)) - 1
+    return index >= 0 and spans[index][1] >= end
 
 
 def clean_lifts(intervals: list[Interval], key: str) -> list[int]:
@@ -652,10 +681,9 @@ def score_forecasts(
     )
     sample_spans = merge_spans(
         [
-            (sample.at, sample.at + 2 * MINUTE)
+            (sample.at, sample.at + ALERT_HORIZON * MINUTE)
             for sample in samples
         ],
-        2 * MINUTE,
     )
     eligible = [
         opening
@@ -725,7 +753,7 @@ def score_chance(
             episodes.append(sample)
         was_up = bridge_is_up
         previous = sample
-    sample_spans = merge_spans([(s.at, s.at + 2 * MINUTE) for s in samples], 2 * MINUTE)
+    sample_spans = merge_spans([(s.at, s.at + ALERT_HORIZON * MINUTE) for s in samples])
     eligible = [
         opening
         for opening in openings
@@ -761,7 +789,6 @@ def reliability_line(
     samples: list[Forecast],
     openings: list[int],
     up_spans: list[tuple[int, int]],
-    model: str,
 ) -> None:
     """Is a 0.70 score a 70% chance? Brier score and a coarse reliability table.
 
@@ -793,7 +820,7 @@ def reliability_line(
     print("    score band -> observed opening rate: " + " · ".join(cells))
 
 
-def forecast_section(samples, openings, up_spans) -> None:
+def forecast_section(samples, openings, up_spans, observed) -> None:
     print(
         "\nFORECAST OUTCOMES  "
         f"(opening within {ALERT_HORIZON} min)"
@@ -806,6 +833,12 @@ def forecast_section(samples, openings, up_spans) -> None:
     if not samples:
         print("  forecast sampling is enabled; no samples have accumulated yet")
         return
+    complete = [s for s in samples if covers_window(observed, s.at, s.at + ALERT_HORIZON * MINUTE)]
+    print(f"  excluded {len(samples) - len(complete)} samples without a fully observed outcome window")
+    if not complete:
+        print("  waiting for complete forecast outcome windows")
+        return
+    samples = complete
     print(
         f"  {'sample':<21}{'alerts':>7}{'precision':>9}{'recall':>9}"
         f"{'false':>8}{'lead':>9}{'ETA hit':>9}"
@@ -830,7 +863,7 @@ def forecast_section(samples, openings, up_spans) -> None:
             subset = [sample for sample in model_samples if sample.mode == mode]
             if subset:
                 score_forecasts(subset, openings, up_spans, f"  {mode} <= {ALERT_HORIZON}m")
-        reliability_line(model_samples, openings, up_spans, model)
+        reliability_line(model_samples, openings, up_spans)
 
 
 def vessel_section(path: Path) -> None:
@@ -958,7 +991,6 @@ def main() -> int:
             and row.state == "up"
             and row.reason != "legacy"
         ],
-        CONTINUITY_GAP,
     )
     ups = {key: clean_lifts(intervals, key) for key in RIVER}
 
@@ -978,7 +1010,7 @@ def main() -> int:
     else:
         print("\nCLOCK / UPSTREAM / RIVER TRANSITS")
         print("  waiting for continuously observed Brickell openings")
-    forecast_section(read_forecasts(path), openings, up_spans)
+    forecast_section(read_forecasts(path), openings, up_spans, spans)
     print("\nNothing was changed. Model weights remain human-reviewed.")
     return 0
 

@@ -1624,17 +1624,21 @@ mod tests {
         if !root.join("manifest.json").is_file() {
             return;
         }
-        let Ok(bundle) = FirmwareBundle::load(&root) else {
-            return;
+        let bundle = match FirmwareBundle::load(&root) {
+            Ok(bundle) => bundle,
+            Err(FirmwareError::NoVariants) => return,
+            Err(error) => panic!("invalid generated firmware bundle: {error}"),
         };
-        let Some(revision) = bundle.source_revision.as_deref() else {
-            return;
-        };
+        let revision = bundle
+            .source_revision
+            .as_deref()
+            .expect("bundled images must name their source revision");
         assert_ne!(
             revision,
             brickellstatus_eink::UNKNOWN_BUILD,
             "a bundle that cannot name its own build must not be shipped"
         );
+        let terminated_revision = format!("{revision}\0");
         for variant in bundle.variants() {
             let application = variant
                 .segments
@@ -1644,8 +1648,8 @@ mod tests {
             assert!(
                 application
                     .bytes
-                    .windows(revision.len())
-                    .any(|window| window == revision.as_bytes()),
+                    .windows(terminated_revision.len())
+                    .any(|window| window == terminated_revision.as_bytes()),
                 "{} ships an image that never says {revision:?}, so every board \
                  flashed from it reports a build this app will not recognise",
                 variant.id

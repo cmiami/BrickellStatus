@@ -1,13 +1,10 @@
 <script lang="ts">
   import {
     BellRing,
-    BookOpenText,
     Clock3,
     Database,
     MapPinned,
-    MonitorUp,
     RadioTower,
-    SlidersHorizontal
   } from '@lucide/svelte';
   import { page } from '$app/stores';
 

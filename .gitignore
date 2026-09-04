@@ -45,6 +45,9 @@ state/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
 config.local.toml
 
 # Firmware
@@ -61,3 +64,7 @@ firmware/panel/.vscode/
 # The public design contract lives in DESIGN.md; product imagery lives in docs/assets/.
 /.impeccable/
 .svelte-kit/
+
+# Python verification tools
+__pycache__/
+*.pyc

@@ -331,6 +331,8 @@ pub struct ForecastSample<'a> {
     pub contribution_bps_json: &'a str,
     /// Compact JSON object carrying source age/availability at evaluation.
     pub source_freshness_json: &'a str,
+    /// Exact replay inputs and prediction, supplied together by new runtimes.
+    pub replay_json: Option<(&'a str, &'a str)>,
     pub session_id: &'a str,
 }
 
@@ -1569,6 +1571,17 @@ impl Store {
         Ok(resolved)
     }
 
+    /// Predictor inputs without aggregating crossing histories or limiting the
+    /// learned population to the display catalog's page size.
+    pub async fn ais_outcome_counts(&self) -> Result<Vec<(String, i64, i64)>, StorageError> {
+        Ok(sqlx::query_as(
+            "SELECT mmsi, transits_opened, transits_fits_under FROM ais_vessel_ledger \
+             WHERE transits_opened > 0 OR transits_fits_under > 0",
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// The durable vessel catalog. Hulls with a learned crossing outcome come
     /// first so a bounded predictor read cannot evict known openers behind a
     /// busy day of newly seen bay traffic; each group is most-recent first.
@@ -1634,25 +1647,17 @@ impl Store {
                 l.draught_meters,
                 l.transits_opened,
                 l.transits_fits_under,
-                COALESCE(t.transits_unknown, 0) AS transits_unknown,
-                COALESCE(t.transits_pending, 0) AS transits_pending,
+                SUM(CASE WHEN t.outcome = 'unknown' THEN 1 ELSE 0 END) AS transits_unknown,
+                SUM(CASE WHEN t.mmsi IS NOT NULL AND t.outcome IS NULL THEN 1 ELSE 0 END) AS transits_pending,
                 l.first_seen_ms,
                 l.last_seen_ms,
-                t.last_crossing_at_ms,
-                t.last_opened_at_ms
+                MAX(t.crossed_at_ms) AS last_crossing_at_ms,
+                MAX(CASE WHEN t.outcome = 'opened' THEN t.crossed_at_ms END) AS last_opened_at_ms
             FROM ais_vessel_ledger l
-            LEFT JOIN (
-                SELECT
-                    mmsi,
-                    SUM(CASE WHEN outcome = 'unknown' THEN 1 ELSE 0 END) AS transits_unknown,
-                    SUM(CASE WHEN outcome IS NULL THEN 1 ELSE 0 END) AS transits_pending,
-                    MAX(crossed_at_ms) AS last_crossing_at_ms,
-                    MAX(CASE WHEN outcome = 'opened' THEN crossed_at_ms END) AS last_opened_at_ms
-                FROM ais_transits
-                GROUP BY mmsi
-            ) t ON t.mmsi = l.mmsi
+            LEFT JOIN ais_transits t ON t.mmsi = l.mmsi
             WHERE l.transits_opened > 0
-            ORDER BY COALESCE(t.last_opened_at_ms, l.last_seen_ms) DESC,
+            GROUP BY l.mmsi
+            ORDER BY COALESCE(MAX(CASE WHEN t.outcome = 'opened' THEN t.crossed_at_ms END), l.last_seen_ms) DESC,
                      l.mmsi ASC
             "#,
         )
@@ -1794,9 +1799,11 @@ impl Store {
             schedule_mode,
             contribution_bps_json,
             source_freshness_json,
+            replay_json,
             session_id,
         } = sample;
         let minute_bucket_ms = evaluated_at_ms - evaluated_at_ms.rem_euclid(60_000);
+        let mut transaction = self.pool.begin().await?;
         sqlx::query(
             r#"
             INSERT INTO bridge_forecast_samples(
@@ -1833,8 +1840,27 @@ impl Store {
         .bind(contribution_bps_json)
         .bind(source_freshness_json)
         .bind(session_id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+        if let Some((input, prediction)) = replay_json {
+            sqlx::query(
+                "INSERT OR IGNORE INTO bridge_forecast_replays \
+                 (target_key,evaluated_at_ms,model_version,input_json,prediction_json) \
+                 VALUES (?1,?2,?3,?4,?5)",
+            )
+            .bind(target_key)
+            .bind(evaluated_at_ms)
+            .bind(model_version)
+            .bind(input)
+            .bind(prediction)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query("DELETE FROM bridge_forecast_replays WHERE evaluated_at_ms < ?1")
+                .bind(evaluated_at_ms.saturating_sub(30 * 24 * 60 * 60 * 1_000))
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -2939,6 +2965,7 @@ mod tests {
                     schedule_mode: "on_signal",
                     contribution_bps_json: r#"{"ais":4200,"upstream":2600}"#,
                     source_freshness_json: r#"{"aisSeconds":3,"fl511Seconds":8}"#,
+                    replay_json: Some((r#"{"evidence":[]}"#, r#"{"state":"clear"}"#)),
                     session_id: "run-a",
                 })
                 .await
@@ -2951,6 +2978,14 @@ mod tests {
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].evaluated_at_ms, 59_000);
         assert_eq!(samples[0].state, "likely");
+        let replays: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM bridge_forecast_replays")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            replays.0, 2,
+            "material changes in one minute must both survive"
+        );
     }
 
     #[tokio::test]
@@ -4015,6 +4050,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1, "one row per movement, not one per fetch");
+    }
+
+    #[tokio::test]
+    async fn predictor_counts_include_all_labelled_hulls_without_history() {
+        let store = Store::in_memory().await.unwrap();
+        sqlx::query(
+            r#"
+            WITH RECURSIVE n(value) AS (
+                VALUES(1) UNION ALL SELECT value + 1 FROM n WHERE value < 2100
+            )
+            INSERT INTO ais_vessel_ledger
+                (mmsi, transits_opened, transits_fits_under, first_seen_ms, last_seen_ms)
+            SELECT printf('%09d', 900000000 + value), 1, 0, 0, 0 FROM n
+            "#,
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ais_vessel_ledger (mmsi, first_seen_ms, last_seen_ms) VALUES ('900999999', 0, 0)",
+        ).execute(&store.pool).await.unwrap();
+        let counts = store.ais_outcome_counts().await.unwrap();
+        assert_eq!(
+            counts
+                .iter()
+                .filter(|(mmsi, _, _)| mmsi.starts_with("900"))
+                .count(),
+            2100
+        );
+        assert!(!counts.iter().any(|(mmsi, _, _)| mmsi == "900999999"));
+        let openers = store.list_known_ais_openers().await.unwrap();
+        let without_crossings = openers
+            .iter()
+            .find(|vessel| vessel.mmsi == "900000001")
+            .unwrap();
+        assert_eq!(without_crossings.transits_pending, 0);
+        assert_eq!(without_crossings.last_crossing_at_ms, None);
     }
 
     #[tokio::test]

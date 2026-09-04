@@ -2,7 +2,7 @@
   import VesselSource from './VesselSource.svelte';
   import { snapshot } from '$lib/state';
   import type { AisSettings, ChannelPreference, RiverStation, UnitSystem } from '$lib/types';
-  import { scopeText, setScope, type ChannelChange } from './scope';
+  import { scopeText, type ChannelChange } from './scope';
 
   let {
     channel,

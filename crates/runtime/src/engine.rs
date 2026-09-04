@@ -35,12 +35,12 @@ use brickellstatus_model::{
 };
 use brickellstatus_policy::{
     BRIDGE_ALERT_HORIZON_MINUTES, BrickellSchedule, BridgeEvidence, BridgePrediction,
-    BridgePredictor, ContributionDisposition, EvidenceKind, KNOWN_OPENER_LIKELY_BPS,
-    KNOWN_OPENER_LIKELY_ETA_MINUTES, PredictionError,
+    BridgePredictor, BridgeReplayInput, ContributionDisposition, EvidenceKind,
+    KNOWN_OPENER_LIKELY_BPS, KNOWN_OPENER_LIKELY_ETA_MINUTES, PredictionError,
 };
 use brickellstatus_storage::{
-    AisCrossingObservation, AisCrossingRecord, AisLedgerEntry, AisTrackFix, AisVesselObservation,
-    ForecastSample, StorageError, Store,
+    AIS_TRACK_FIX_MIN_SPACING_MS, AisCrossingObservation, AisCrossingRecord, AisLedgerEntry,
+    AisTrackFix, AisVesselObservation, ForecastSample, StorageError, Store,
 };
 use futures::{StreamExt, stream};
 use jiff::{Timestamp, tz::TimeZone};
@@ -62,10 +62,6 @@ const FORECAST_TARGET_KEY: &str = "brickell";
 const FORECAST_MATERIAL_STEP_BPS: i64 = 250;
 const RECENT_VESSEL_CROSSINGS: u32 = 24;
 const KNOTS_TO_METERS_PER_SECOND: f64 = 0.514_444;
-/// Closest two kept fixes of one vessel may sit. Hulls do not move enough in
-/// half a minute to be worth a second row, and the spacing is what keeps a
-/// one-year general archive inside a local database.
-const TRACK_FIX_MIN_SPACING_MS: i64 = 30_000;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -798,6 +794,10 @@ impl RuntimeEngine {
             });
         }
 
+        // Predictions describe what is known after collection finishes. Using
+        // the cycle's start time made newly received AIS fixes look future-dated
+        // and timestamped their evidence before it was actually available.
+        let now_ms = self.clock.now_millis();
         let mut succeeded = 0;
         let mut failed = 0;
         for (registration, outcome) in executions {
@@ -859,7 +859,7 @@ impl RuntimeEngine {
             &current_evidence,
             next_state.previous_prediction.as_ref(),
         )?;
-        self.record_forecast_sample(&prediction, &mut next_state)
+        self.record_forecast_sample(&prediction, &current_evidence, &mut next_state)
             .await?;
         next_state.previous_prediction = Some(prediction);
 
@@ -1152,25 +1152,35 @@ impl RuntimeEngine {
                 let observed_at_ms = observed_at.as_millisecond();
                 // One fix per vessel per half-minute is finer than any hull
                 // changes position, and keeps a year practical locally.
-                if kept_at_ms
-                    .is_some_and(|kept| (observed_at_ms - kept).abs() < TRACK_FIX_MIN_SPACING_MS)
-                {
+                if kept_at_ms.is_some_and(|kept| {
+                    (observed_at_ms - kept).abs() < AIS_TRACK_FIX_MIN_SPACING_MS
+                }) {
                     continue;
                 }
                 kept_at_ms = Some(observed_at_ms);
-                let projected = project(point.latitude, point.longitude);
+                let projected = (point.branch.is_none()
+                    || point.s_meters.is_none()
+                    || point.offset_meters.is_none())
+                .then(|| project(point.latitude, point.longitude));
                 transaction
                     .record_ais_track_fix(AisTrackFix {
                         mmsi: &track.mmsi,
                         observed_at_ms,
                         latitude: point.latitude,
                         longitude: point.longitude,
-                        speed_knots: point.speed_knots.or(Some(track.speed_knots)),
-                        course_degrees: point.course_degrees.or(Some(track.course_degrees)),
-                        branch: point.branch.as_deref().or(Some(projected.branch.as_str())),
-                        s_meters: point.s_meters.or(Some(projected.s_meters)),
-                        offset_meters: point.offset_meters.or(Some(projected.offset_meters)),
-                        posture: track.posture.as_deref(),
+                        speed_knots: point.speed_knots,
+                        course_degrees: point.course_degrees,
+                        branch: point
+                            .branch
+                            .as_deref()
+                            .or_else(|| projected.as_ref().map(|p| p.branch.as_str())),
+                        s_meters: point
+                            .s_meters
+                            .or_else(|| projected.as_ref().map(|p| p.s_meters)),
+                        offset_meters: point
+                            .offset_meters
+                            .or_else(|| projected.as_ref().map(|p| p.offset_meters)),
+                        posture: None,
                         session_id: &self.session_id,
                     })
                     .await?;
@@ -1186,7 +1196,10 @@ impl RuntimeEngine {
             else {
                 continue;
             };
-            let projected = project(latitude, longitude);
+            let projected = (entry.branch.is_none()
+                || entry.s_meters.is_none()
+                || entry.offset_meters.is_none())
+            .then(|| project(latitude, longitude));
             transaction
                 .record_ais_track_fix(AisTrackFix {
                     mmsi: &entry.mmsi,
@@ -1195,9 +1208,16 @@ impl RuntimeEngine {
                     longitude,
                     speed_knots: entry.speed_knots,
                     course_degrees: entry.course_degrees,
-                    branch: entry.branch.as_deref().or(Some(projected.branch.as_str())),
-                    s_meters: entry.s_meters.or(Some(projected.s_meters)),
-                    offset_meters: entry.offset_meters.or(Some(projected.offset_meters)),
+                    branch: entry
+                        .branch
+                        .as_deref()
+                        .or_else(|| projected.as_ref().map(|p| p.branch.as_str())),
+                    s_meters: entry
+                        .s_meters
+                        .or_else(|| projected.as_ref().map(|p| p.s_meters)),
+                    offset_meters: entry
+                        .offset_meters
+                        .or_else(|| projected.as_ref().map(|p| p.offset_meters)),
                     posture: entry.posture.as_deref(),
                     session_id: &self.session_id,
                 })
@@ -1211,15 +1231,11 @@ impl RuntimeEngine {
     async fn load_ais_propensities(&self) -> Result<BTreeMap<String, u16>, RuntimeError> {
         Ok(self
             .store
-            // Labelled hulls sort first, so this only has to exceed the number
-            // of hulls with an outcome; four weeks of catalog growth must not
-            // push a known opener out of the map.
-            .list_ais_ledger(2_000)
+            .ais_outcome_counts()
             .await?
             .into_iter()
-            .filter_map(|entry| {
-                opening_propensity_bps(entry.transits_opened, entry.transits_fits_under)
-                    .map(|score| (entry.mmsi, score))
+            .filter_map(|(mmsi, opened, fits_under)| {
+                opening_propensity_bps(opened, fits_under).map(|score| (mmsi, score))
             })
             .collect())
     }
@@ -1230,6 +1246,7 @@ impl RuntimeEngine {
     async fn record_forecast_sample(
         &self,
         prediction: &BridgePrediction,
+        evidence: &[BridgeEvidence],
         state: &mut PersistedRuntimeState,
     ) -> Result<(), RuntimeError> {
         let fields = forecast_storage_fields(prediction)?;
@@ -1257,6 +1274,23 @@ impl RuntimeEngine {
             return Ok(());
         }
 
+        let replay = BridgeReplayInput {
+            config: self.predictor.config().clone(),
+            at: prediction.evaluated_at,
+            evidence: evidence.to_vec(),
+            previous_predictive_state: state
+                .previous_prediction
+                .as_ref()
+                .map(|p| p.predictive_state),
+            previous_public_state: state.previous_prediction.as_ref().map(|p| p.state),
+        };
+        let replay_json = serde_json::to_string(&replay).map_err(|error| {
+            RuntimeError::Normalization(format!("could not encode replay inputs: {error}"))
+        })?;
+        let prediction_json = serde_json::to_string(prediction).map_err(|error| {
+            RuntimeError::Normalization(format!("could not encode replay prediction: {error}"))
+        })?;
+
         self.store
             .record_forecast_sample(ForecastSample {
                 target_key: FORECAST_TARGET_KEY,
@@ -1270,6 +1304,7 @@ impl RuntimeEngine {
                 schedule_mode: fields.schedule_mode,
                 contribution_bps_json: &fields.contribution_bps_json,
                 source_freshness_json: &fields.source_freshness_json,
+                replay_json: Some((&replay_json, &prediction_json)),
                 session_id: &self.session_id,
             })
             .await?;
@@ -1917,7 +1952,11 @@ fn scheduled_transit_observation(
     // tug explicitly rather than assuming it keeps the claim checkable: if the
     // board ever lists an unassisted river movement, it is scored as ordinary
     // traffic instead of silently inheriting an exemption it does not have.
-    let exempt = item.attributes.contains_key("tug");
+    let exempt = item
+        .attributes
+        .get("tug")
+        .and_then(Value::as_str)
+        .is_some_and(|name| !name.trim().is_empty());
 
     let eta_at = item
         .attributes
@@ -1925,6 +1964,9 @@ fn scheduled_transit_observation(
         .and_then(Value::as_str)
         .and_then(|value| value.parse::<Timestamp>().ok())
         .map(|value| value.as_millisecond())?;
+    if eta_at < now_ms {
+        return None;
+    }
     let minutes_out = (eta_at - now_ms) / 60_000;
     if !(0..=180).contains(&minutes_out) {
         return None;
@@ -1953,33 +1995,24 @@ fn scheduled_transit_observation(
     })
 }
 
-/// Metres from each upstream bascule down to the Brickell Avenue Bridge, taken
-/// from the FL511 coordinates the selectors use.
-///
-/// An upstream opening only means something once it is turned into "when could
-/// that vessel be here", and that needs a distance.
+/// Channel metres from an upstream bascule to Brickell. The previous lookup
+/// used shorter point-to-point distances, cutting across bends (W Flagler was
+/// 1,223 m instead of about 1,459 m). AIS and FL511 now use the same geometry.
 fn upstream_distance_meters(bridge_key: &str) -> Option<f64> {
-    match bridge_key {
-        "sw_2_ave" => Some(759.0),
-        "sw_1_st" => Some(1_112.0),
-        "w_flagler" => Some(1_223.0),
-        "nw_5_st" => Some(1_932.0),
-        "nw_12_ave" => Some(2_845.0),
-        "nw_17_ave" => Some(3_744.0),
-        "nw_22_ave" => Some(4_611.0),
-        "nw_27_ave" => Some(5_574.0),
-        _ => None,
-    }
+    let geometry = corridor_geometry();
+    let station = geometry
+        .iter()
+        .flat_map(|branch| branch.stations)
+        .find(|station| station.bridge_key == Some(bridge_key))?;
+    let distance = project(station.latitude, station.longitude).s_meters;
+    (distance > 0.0).then_some(distance)
 }
 
 /// Miami River transit speeds between an upstream lift and the Brickell lift.
 ///
-/// These were 3 and 6 knots. Measured lags from each upstream lift to the
-/// Brickell lift for the same outbound hull (Aug 23 to Sep 1 2026) imply 2.3
-/// to 3.9 knots made good, slowest nearest the span where hulls ease off and
-/// queue: SW 2 Ave 759 m in a median 8.7 min, W Flagler 1 223 m in 17.5, NW 12
-/// Ave 2 845 m in 30.2, NW 22 Ave 4 611 m in 40.6. Six knots never happened
-/// over a whole leg, so the old fast edge promised lifts that came late.
+/// Existing operating bounds; retain them until passage-linked upstream
+/// timing supports a replacement. Correcting the distance does not justify
+/// refitting speed from whichever unrelated Brickell opening happened next.
 const RIVER_SPEED_SLOW_KNOTS: f64 = 2.5;
 const RIVER_SPEED_FAST_KNOTS: f64 = 5.0;
 const METRES_PER_KNOT_MINUTE: f64 = 1_852.0 / 60.0;
@@ -2655,7 +2688,7 @@ fn ais_evidence_detail(item: &CollectorItem, unit_system: UnitSystem) -> Option<
 // Channel-specific activation, summaries, and snapshot presentation are kept
 // together so scheduler and persistence work remain readable in this module.
 include!("engine/channel_rules.rs");
-fn source_label(kind: ChannelKindDto, _channel: &ChannelPreference) -> &'static str {
+fn source_label(kind: ChannelKindDto) -> &'static str {
     match kind {
         ChannelKindDto::Bridge => "Configured live sources + confidence model",
         ChannelKindDto::Weather => "Open-Meteo",

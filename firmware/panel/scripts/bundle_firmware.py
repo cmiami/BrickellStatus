@@ -7,9 +7,9 @@ Run from the repository root:
 Writes `apps/desktop/src-tauri/resources/firmware/` containing one directory per
 PlatformIO environment plus a `manifest.json` describing the flash layout.
 
-PlatformIO is not required to *build* the desktop app. When it is unavailable
-the script still writes a manifest, with no variants, and the app reports that
-this build ships no firmware. That keeps `tauri.conf.json`'s declared resource
+PlatformIO is not required to *build* the desktop app. Without current cached
+images the script writes an empty manifest, and the app reports that this
+build ships no firmware. That keeps `tauri.conf.json`'s declared resource
 directory present: the Tauri build script rejects a missing bundle resource, and
 a contributor without an embedded toolchain must still be able to build the app.
 """
@@ -170,7 +170,7 @@ def build(environment: str, executable: str) -> None:
     )
 
 
-def boot_app0(environment: str) -> Path | None:
+def boot_app0() -> Path | None:
     """Locates boot_app0.bin inside the installed Arduino framework."""
     candidates = sorted(
         (Path.home() / ".platformio" / "packages").glob(
@@ -180,17 +180,29 @@ def boot_app0(environment: str) -> Path | None:
     return candidates[0] if candidates else None
 
 
-def collect(environment: str) -> list[dict[str, str]] | None:
+def collect(environment: str, revision: str | None) -> list[dict[str, str]] | None:
     build_dir = FIRMWARE_ROOT / ".pio" / "build" / environment
     target = OUTPUT_ROOT / environment
-    target.mkdir(parents=True, exist_ok=True)
 
-    images = []
+    sources = []
     for offset, name in LAYOUT:
-        source = boot_app0(environment) if name == "boot_app0.bin" else build_dir / name
+        source = boot_app0() if name == "boot_app0.bin" else build_dir / name
         if source is None or not source.is_file():
             print(f"  missing {name} for {environment} (looked in {source})")
             return None
+        sources.append((offset, name, source))
+
+    # A cached build can predate the checkout. The manifest must identify the
+    # image actually flashed, not relabel an old binary with today's revision.
+    # Match the complete C string so a dirty build cannot pass as its clean base.
+    application = (build_dir / "firmware.bin").read_bytes()
+    if not revision or revision == "unknown" or revision.encode() + b"\0" not in application:
+        print(f"  {environment}: cached image does not announce source revision {revision!r}")
+        return None
+
+    target.mkdir(parents=True, exist_ok=True)
+    images = []
+    for offset, name, source in sources:
         shutil.copyfile(source, target / name)
         images.append({"offset": offset, "file": name})
     return images
@@ -201,7 +213,7 @@ def main() -> int:
     parser.add_argument(
         "--skip-build",
         action="store_true",
-        help="package whatever is already in .pio/build instead of compiling",
+        help="package existing .pio/build images only when their build id matches the sources",
     )
     arguments = parser.parse_args()
 
@@ -216,18 +228,21 @@ def main() -> int:
 
     executable = platformio()
     if executable is None and not arguments.skip_build:
-        print("PlatformIO not found; writing an empty firmware bundle.")
-        print("Install it, or pass --skip-build to package an existing .pio/build.")
+        print("PlatformIO not found; only current cached firmware can be bundled.")
+        print("Install it to rebuild missing or outdated images.")
 
+    revision = source_revision()
     variants = []
     for variant in VARIANTS:
         environment = variant["id"]
         if executable is not None and not arguments.skip_build:
             print(f"building {environment}...")
             build(environment, executable)
-        images = collect(environment)
+        images = collect(environment, revision)
         if images is None:
-            print(f"  skipping {environment}: images unavailable")
+            if executable is not None and not arguments.skip_build:
+                raise RuntimeError(f"{environment}: freshly built images are missing or have the wrong build id")
+            print(f"  skipping {environment}: current images unavailable; rebuild with PlatformIO")
             continue
         variants.append({**variant, "images": images})
 
@@ -237,7 +252,7 @@ def main() -> int:
         "schemaVersion": 4,
         "chip": "esp32s3",
         "firmwareVersion": firmware_version(),
-        "sourceRevision": source_revision(),
+        "sourceRevision": revision,
         "variants": variants,
     }
     (OUTPUT_ROOT / "manifest.json").write_text(

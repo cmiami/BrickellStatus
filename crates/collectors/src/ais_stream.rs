@@ -1926,7 +1926,10 @@ fn estimate_eta(
 ///   comes far later.
 ///
 /// A target with no corridor model keeps the generic 0.75 to 1.35 band.
-pub fn eta_window_multipliers(branch: Option<RiverBranch>, s_signed: Option<f64>) -> (f64, f64) {
+fn fallback_eta_window_multipliers(
+    branch: Option<RiverBranch>,
+    s_signed: Option<f64>,
+) -> (f64, f64) {
     match branch {
         Some(RiverBranch::River) if s_signed.is_some_and(|s| s > 0.0) => (0.62, 1.12),
         Some(RiverBranch::River) => (1.50, 6.00),
@@ -1958,10 +1961,49 @@ pub fn eta_window_minutes(
     if !minutes.is_finite() || !(0.25..=75.0).contains(&minutes) {
         return None;
     }
-    let (low, high) = eta_window_multipliers(branch, s_signed);
-    let earliest = (minutes * low).floor().max(1.0) as u16;
-    let latest = (minutes * high).ceil().clamp(f64::from(earliest), 90.0) as u16;
+    let (low, high) = fallback_eta_window_multipliers(branch, s_signed);
+    let (lower_minutes, upper_minutes) = match (branch, s_signed) {
+        (Some(RiverBranch::River), Some(s)) if s > 0.0 => learned_timing_bounds(minutes),
+        (Some(RiverBranch::GovernmentCut), Some(s)) if s < 0.0 => learned_timing_bounds(minutes),
+        // Sparse routes retain their prior bounds. A route needs twenty
+        // independent training passages before using the fitted interval.
+        _ => (minutes * low, minutes * high),
+    };
+    let earliest = lower_minutes.floor().max(1.0) as u16;
+    // A slow inbound approach can have a lower bound beyond the reporting
+    // horizon. Clamping the upper bound with min > max would panic; truncating
+    // the lower bound would instead promise an unsupported earlier arrival.
+    if earliest > 90 {
+        return None;
+    }
+    let latest = upper_minutes.ceil().clamp(f64::from(earliest), 90.0) as u16;
     Some((earliest, latest))
+}
+
+/// An additive allowance captures time spent waiting and the tender's lead;
+/// multiplying dead reckoning alone forces both of those to vanish near zero.
+/// Coefficients were selected on earlier passages; see docs/MODEL_AUDIT.md for
+/// later-period interval coverage, source support, and the conditional target.
+fn learned_timing_bounds(minutes: f64) -> (f64, f64) {
+    #[derive(Deserialize)]
+    struct Bound {
+        slope: f64,
+        intercept: f64,
+    }
+    #[derive(Deserialize)]
+    struct TimingModel {
+        lower: Bound,
+        upper: Bound,
+    }
+    static MODEL: std::sync::OnceLock<TimingModel> = std::sync::OnceLock::new();
+    let model = MODEL.get_or_init(|| {
+        serde_json::from_str(include_str!("../models/ais_timing_v1.json"))
+            .expect("embedded AIS timing model is valid")
+    });
+    (
+        model.lower.slope * minutes + model.lower.intercept,
+        model.upper.slope * minutes + model.upper.intercept,
+    )
 }
 
 fn prune_tracks(tracks: &mut BTreeMap<u32, VesselTrack>, now: DateTime<Utc>, retention: Duration) {
@@ -2338,6 +2380,67 @@ fn valid_coordinate(latitude: f64, longitude: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inbound_eta_beyond_reporting_horizon_is_unknown_without_panicking() {
+        // 70 minutes of dead reckoning times the inbound lower multiplier
+        // used to call f64::clamp(105, 90), which panicked on valid AIS data.
+        assert_eq!(
+            eta_window_minutes(2_100.0, 0.5, Some(RiverBranch::River), Some(-2_100.0)),
+            None
+        );
+        for branch in [
+            RiverBranch::River,
+            RiverBranch::GovernmentCut,
+            RiverBranch::NorthApproach,
+            RiverBranch::SouthApproach,
+        ] {
+            for signed_distance in [-1.0, 1.0] {
+                for minutes in 1..=75 {
+                    let distance = f64::from(minutes) * 60.0;
+                    if let Some((low, high)) = eta_window_minutes(
+                        distance,
+                        1.0,
+                        Some(branch),
+                        Some(distance * signed_distance),
+                    ) {
+                        assert!(1 <= low && low <= high && high <= 90);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn supported_routes_use_rounded_fitted_bounds_and_sparse_routes_keep_their_prior() {
+        // Fixed inference cases shared with the offline fitted artifact.
+        for (branch, sign) in [
+            (RiverBranch::River, 1.0),
+            (RiverBranch::GovernmentCut, -1.0),
+        ] {
+            assert_eq!(
+                eta_window_minutes(1_200.0, 2.0, Some(branch), Some(sign * 1_200.0)),
+                Some((3, 18))
+            );
+            assert_eq!(
+                eta_window_minutes(3_600.0, 2.0, Some(branch), Some(sign * 3_600.0)),
+                Some((10, 32))
+            );
+        }
+        assert_eq!(
+            eta_window_minutes(
+                1_200.0,
+                2.0,
+                Some(RiverBranch::NorthApproach),
+                Some(-1_200.0)
+            ),
+            Some((5, 20))
+        );
+        assert_eq!(
+            eta_window_minutes(1_200.0, 2.0, Some(RiverBranch::River), Some(-1_200.0)),
+            Some((15, 60))
+        );
+    }
 
     const RECEIVED: &str = "2026-08-14T16:20:10Z";
 

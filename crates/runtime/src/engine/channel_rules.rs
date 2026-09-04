@@ -244,7 +244,7 @@ fn channel_snapshots(
                 id: channel.id.clone(),
                 kind,
                 title: channel.title.clone(),
-                source_label: source_label(kind, channel).into(),
+                source_label: source_label(kind).into(),
                 availability: coverage.availability,
                 age_seconds: coverage.age_seconds,
                 coverage_complete,

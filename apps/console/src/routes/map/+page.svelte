@@ -1,14 +1,9 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import {
     ArrowLeft,
-    Crosshair,
     LocateFixed,
     MapPinned,
     Move,
-    Network,
-    Plus,
-    Search,
     Trash2
   } from '@lucide/svelte';
 
@@ -16,8 +11,9 @@
   import PinModal from '$lib/components/PinModal.svelte';
   import SwitchField from '$lib/components/SwitchField.svelte';
   import VesselDetailPanel from '$lib/components/VesselDetailPanel.svelte';
-  import { getDeviceLocation, getRadarLayer, getVesselDetail, searchLocations } from '$lib/api';
-  import { notice, persistPreferences, preferences, saving, snapshot } from '$lib/state';
+  import { getDeviceLocation, getRadarLayer, getVesselDetail } from '$lib/api';
+  import { notice, preferences, snapshot } from '$lib/state';
+  import { preferencesEditor } from '$lib/preferencesEditor.svelte';
   import type {
     AlertArea,
     AppPreferences,
@@ -30,6 +26,7 @@
   } from '$lib/types';
 
   let draft = $state<AppPreferences | null>(null);
+  const { saveNow } = preferencesEditor(() => draft, (next) => { draft = next; });
   let initialized = $state(false);
   let locating = $state(false);
   let candidate = $state<AlertArea | null>(null);
@@ -75,7 +72,6 @@
     }
   });
 
-  const activeAreaCount = $derived(draft?.areas.filter((area) => area.enabled).length ?? 0);
   const bridgePoint = $derived.by<LocationMapPoint | null>(() => {
     const scope = draft?.profile.channels.find((channel) => channel.kind === 'bridge')?.scope;
     if (!scope) return null;
@@ -339,6 +335,7 @@
   // separate Save button elsewhere on the page is how a coordinate gets lost.
   async function commitCandidate(named: AlertArea) {
     if (!draft) return;
+    const previousDraft = $state.snapshot(draft);
     pinError = null;
 
     const duplicate = draft.areas.find(
@@ -363,7 +360,12 @@
 
     pinSaving = true;
     try {
-      await persistPreferences($state.snapshot(draft));
+      const result = await saveNow();
+      if (!result?.ok) {
+        draft = previousDraft;
+        pinError = result?.message ?? 'This place could not be saved.';
+        return;
+      }
     } finally {
       pinSaving = false;
     }
@@ -417,44 +419,6 @@
     notice.set({ ok: true, message: `${area.label} removed. Changes save automatically.` });
   }
 
-  async function save() {
-    if (!draft) return;
-    await persistPreferences($state.snapshot(draft));
-  }
-
-  // Edits apply as they are made, matching the outputs desk. A Save button asks
-  // the reader to remember they have unfinished business, then rewards pressing
-  // it with a banner to dismiss -- two chores in exchange for nothing they had
-  // not already told the app.
-  //
-  // Long enough that a number being typed is one write rather than twenty.
-  const SETTLE_MS = 700;
-  let saveTimer: ReturnType<typeof setTimeout> | undefined;
-
-  function scheduleSave() {
-    if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      saveTimer = undefined;
-      void save();
-    }, SETTLE_MS);
-  }
-
-  // Whatever is in flight goes with the reader; an edit must not die with the
-  // page just because the debounce had not fired yet.
-  onMount(() => () => {
-    if (saveTimer) {
-      clearTimeout(saveTimer);
-      void save();
-    }
-  });
-
-  const unsaved = $derived(
-    !!draft && !!$preferences && JSON.stringify($state.snapshot(draft)) !== JSON.stringify($preferences)
-  );
-
-  $effect(() => {
-    if (unsaved) scheduleSave();
-  });
 </script>
 
 <svelte:head>
@@ -469,8 +433,6 @@
       <h1 class="sheet-heading">Map</h1>
       <p class="sheet-intro">Saved places, Brickell Avenue Bridge, and vessel positions from the last hour.</p>
     </div>
-    <!-- Says what is true right now, and asks for nothing. It is a status
-         line, not a banner: nothing to dismiss and nothing to press. -->
   </header>
 
   {#if draft}

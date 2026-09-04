@@ -1,0 +1,11 @@
+{
+  "version": "ais-quantile-v1",
+  "target": "minutes until FL511 lift, conditional on an opening-linked AIS passage",
+  "trained_before_local": "2026-09-02T00:00:00-04:00",
+  "training_passages": 71,
+  "minimum_route_passages": 20,
+  "supported_routes": ["outbound_river", "government_cut"],
+  "route_training_passages": {"outbound_river": 33, "government_cut": 30},
+  "lower": {"quantile": 0.2, "slope": 0.3827277924503293, "intercept": -0.5180574755560712},
+  "upper": {"quantile": 0.8, "slope": 0.7351174400510498, "intercept": 9.850829397952298}
+}

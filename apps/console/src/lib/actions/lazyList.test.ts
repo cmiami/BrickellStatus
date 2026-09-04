@@ -6,16 +6,19 @@ type ObserverCallback = (entries: { isIntersecting: boolean }[]) => void;
 
 let callbacks: ObserverCallback[] = [];
 let disconnects = 0;
+let roots: (Element | Document | null | undefined)[] = [];
 const original = globalThis.IntersectionObserver;
 
 beforeEach(() => {
   callbacks = [];
   disconnects = 0;
+  roots = [];
   // The action calls `new IntersectionObserver(...)`, so the stub has to be
   // constructible; an arrow function is not.
   class StubObserver {
-    constructor(callback: ObserverCallback) {
+    constructor(callback: ObserverCallback, options: IntersectionObserverInit) {
       callbacks.push(callback);
+      roots.push(options.root);
     }
     observe() {}
     unobserve() {}
@@ -76,11 +79,13 @@ describe('lazyLoad', () => {
     expect(disconnects).toBe(1);
   });
 
-  it('degrades to a static window when IntersectionObserver is unavailable', () => {
-    // An engine without the API should render the first page rather than throw.
-    globalThis.IntersectionObserver = undefined as unknown as typeof IntersectionObserver;
+  it('observes the scroll container once its element is bound', () => {
     const onLoadMore = vi.fn();
-    expect(() => lazyLoad(document.createElement('div'), { onLoadMore })).not.toThrow();
-    expect(onLoadMore).not.toHaveBeenCalled();
+    const root = document.createElement('div');
+    const handle = lazyLoad(document.createElement('div'), { root: null, onLoadMore });
+    handle.update({ root, onLoadMore });
+    expect(roots).toEqual([null, root]);
+    expect(disconnects).toBe(1);
+    handle.destroy();
   });
 });

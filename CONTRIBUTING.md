@@ -43,9 +43,7 @@ Required versions are intentionally pinned where reproducibility matters:
 git clone https://github.com/cmiami/BrickellStatus.git
 cd BrickellStatus
 npm --prefix apps/console ci
-cargo test --workspace
-npm --prefix apps/console run check
-npm --prefix apps/console test
+node scripts/verify.mjs all
 ```
 
 Start the full desktop shell with:
@@ -63,13 +61,15 @@ Run the checks relevant to your change, and run the complete set before asking
 for final review:
 
 ```sh
-cargo fmt --all --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-npm --prefix apps/console run check
-npm --prefix apps/console test
-npm --prefix apps/console run build
+node scripts/verify.mjs console  # typecheck, UI tests, production build
+node scripts/verify.mjs core     # Python tests and Rust checks without the desktop shell
+node scripts/verify.mjs all      # complete set, including the desktop shell (default)
 ```
+
+The full command prepares the generated Tauri inputs before running Cargo and
+uses the committed lockfiles. It runs Rust formatting, tests, and Clippy with
+warnings denied, console checks/tests/build, and the calibration tests. It stops
+at the first failure. Core checks avoid the generated desktop assets entirely.
 
 For firmware changes, build every panel environment listed in
 [`firmware/panel/README.md`](firmware/panel/README.md). State whether you tested

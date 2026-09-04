@@ -811,6 +811,79 @@ async fn engine_with(collector: Arc<dyn Collector>, clock: Arc<FixedClock>) -> R
 }
 
 #[tokio::test]
+async fn forecast_time_is_after_the_evidence_finishes_collecting() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let start = 1_786_741_200_000;
+    let clock = Arc::new(FixedClock(AtomicI64::new(start)));
+    let engine = Arc::new(
+        engine_with(
+            Arc::new(BlockingCollector {
+                started: started.clone(),
+                release: release.clone(),
+            }),
+            clock.clone(),
+        )
+        .await,
+    );
+    let task = tokio::spawn({
+        let engine = engine.clone();
+        async move { engine.refresh_all().await }
+    });
+    started.notified().await;
+    clock.advance(20_000);
+    release.notify_one();
+    task.await.unwrap().unwrap();
+    let rows = engine
+        .store
+        .forecast_samples_since(FORECAST_TARGET_KEY, start, 10)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].evaluated_at_ms, start + 20_000);
+}
+
+#[test]
+fn upstream_transit_distance_follows_the_river_bends() {
+    let flagler = upstream_distance_meters("w_flagler").unwrap();
+    assert!((1_450.0..1_470.0).contains(&flagler), "{flagler}");
+    assert_eq!(upstream_distance_meters("brickell"), None);
+    assert_eq!(upstream_distance_meters("unobserved-bridge"), None);
+}
+
+#[test]
+fn pilots_eta_cannot_round_a_past_movement_into_the_future_or_invent_a_tug() {
+    let now = 1_786_741_200_000;
+    let mut item = bridge_item("booking", "Booked vessel", "target", "down");
+    item.attributes.insert("river".into(), json!(true));
+    item.attributes.insert("tug".into(), json!(" "));
+    let availability = Availability {
+        status: AvailabilityStatus::Live,
+        checked_at: TimestampMillis(now),
+        last_success_at: Some(TimestampMillis(now)),
+        detail: None,
+    };
+    item.attributes.insert(
+        "bridge_eta_at".into(),
+        json!(iso_timestamp(now - 30_000).unwrap()),
+    );
+    assert!(
+        scheduled_transit_observation(&item, "bridge", "pilots", now, availability.clone())
+            .is_none()
+    );
+    item.attributes.insert(
+        "bridge_eta_at".into(),
+        json!(iso_timestamp(now + 60_000).unwrap()),
+    );
+    let observation =
+        scheduled_transit_observation(&item, "bridge", "pilots", now, availability).unwrap();
+    assert!(matches!(
+        observation.data,
+        BridgeObservation::ScheduledTransit { exempt: false, .. }
+    ));
+}
+
+#[tokio::test]
 async fn preference_save_does_not_wait_for_collector_network_io() {
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
@@ -1842,9 +1915,10 @@ async fn forecast_history_keeps_one_latest_material_sample_per_minute() {
         .evaluate(TimestampMillis(now_ms), &[], None)
         .unwrap();
     engine
-        .record_forecast_sample(&clear, &mut state)
+        .record_forecast_sample(&clear, &[], &mut state)
         .await
         .unwrap();
+    state.previous_prediction = Some(clear.clone());
 
     let observed_at = TimestampMillis(now_ms + 15_000);
     let ais = BridgeEvidence {
@@ -1869,15 +1943,20 @@ async fn forecast_history_keeps_one_latest_material_sample_per_minute() {
         .evaluate(observed_at, std::slice::from_ref(&ais), Some(&clear))
         .unwrap();
     engine
-        .record_forecast_sample(&likely, &mut state)
+        .record_forecast_sample(&likely, std::slice::from_ref(&ais), &mut state)
         .await
         .unwrap();
+    state.previous_prediction = Some(likely.clone());
     let next_minute = engine
         .predictor
-        .evaluate(TimestampMillis(now_ms + 60_000), &[ais], Some(&likely))
+        .evaluate(
+            TimestampMillis(now_ms + 60_000),
+            std::slice::from_ref(&ais),
+            Some(&likely),
+        )
         .unwrap();
     engine
-        .record_forecast_sample(&next_minute, &mut state)
+        .record_forecast_sample(&next_minute, std::slice::from_ref(&ais), &mut state)
         .await
         .unwrap();
 
@@ -2047,6 +2126,60 @@ async fn every_live_track_refreshes_the_full_vessel_catalog() {
     assert_eq!(breadth_fix.speed_knots, Some(9.1));
     assert_eq!(breadth_fix.branch.as_deref(), Some("north_approach"));
     assert_eq!(breadth_fix.s_meters, Some(-820.0));
+
+    // Older histories omit per-fix motion. Today's speed/course must not be
+    // written backward into those positions as if they had been measured.
+    let mut legacy = state.clone();
+    let source = legacy.sources.get_mut(source_id).unwrap();
+    let mut tracks: Value =
+        serde_json::from_str(&source.cursor.metadata[AIS_VESSEL_TRACKS_CURSOR_KEY]).unwrap();
+    let point = &mut tracks[0]["points"][0];
+    point["observedAt"] = json!("2026-08-14T20:58:00Z");
+    point.as_object_mut().unwrap().remove("speedKnots");
+    point.as_object_mut().unwrap().remove("courseDegrees");
+    source
+        .cursor
+        .metadata
+        .insert(AIS_VESSEL_TRACKS_CURSOR_KEY.into(), tracks.to_string());
+    engine.record_ais_track_fixes(&legacy).await.unwrap();
+    let fixes = engine.store.track_fixes_since(0).await.unwrap();
+    let legacy_fix = fixes
+        .iter()
+        .find(|fix| fix.observed_at_ms == now_ms - 2 * 60_000)
+        .unwrap();
+    assert_eq!(legacy_fix.speed_knots, None);
+    assert_eq!(legacy_fix.course_degrees, None);
+}
+
+#[test]
+fn provider_weather_periods_expire_at_the_published_timestamp() {
+    let now = "2026-08-14T22:20:00Z"
+        .parse::<Timestamp>()
+        .unwrap()
+        .as_millisecond();
+    let mut channel = AppPreferences::default().profile.channels[1].clone();
+    channel.scope.insert("rainAlertEnabled".into(), json!(true));
+    channel
+        .scope
+        .insert("windAlertEnabled".into(), json!(false));
+    let items = brickellstatus_collectors::parse_open_meteo(
+        include_bytes!("../../collectors/fixtures/open-meteo.json"),
+        25.7699,
+        -80.19005,
+    )
+    .unwrap();
+    let elapsed_hour = &items[1];
+    assert!(rain_activation_fact(elapsed_hour, &channel, now).is_none());
+    let wet = items
+        .iter()
+        .find(|item| {
+            item.kind == ItemKind::WeatherMinutely && item.attributes["precipitation"] == json!(0.6)
+        })
+        .unwrap();
+    let fact = rain_activation_fact(wet, &channel, now).unwrap();
+    assert_eq!(fact.lead_minutes, 0);
+    assert_eq!(fact.valid_until_ms, now + 10 * 60_000);
+    assert!(rain_activation_fact(wet, &channel, now + 10 * 60_000).is_none());
 }
 
 struct PanicCollector;

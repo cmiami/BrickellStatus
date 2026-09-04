@@ -28,8 +28,8 @@
     void delivery;
     bridgeVisible = PAGE;
     dispatchVisible = PAGE;
-    bridgeScroll?.scrollTo({ top: 0 });
-    dispatchScroll?.scrollTo({ top: 0 });
+    if (bridgeScroll) bridgeScroll.scrollTop = 0;
+    if (dispatchScroll) dispatchScroll.scrollTop = 0;
   });
 
   const filtered = $derived.by(() => {
@@ -59,14 +59,14 @@
   const visibleBridgeIntervals = $derived(filteredBridgeIntervals.slice(0, bridgeVisible));
   const visibleDispatches = $derived(filtered.slice(0, dispatchVisible));
 
-  const formatTime = (value: string) =>
-    new Intl.DateTimeFormat(undefined, {
+  const timeFormat = new Intl.DateTimeFormat(undefined, {
       month: 'short',
       day: 'numeric',
       hour: 'numeric',
       minute: '2-digit',
       second: '2-digit'
-    }).format(new Date(value));
+    });
+  const formatTime = (value: string) => timeFormat.format(new Date(value));
 
   const channelTitle = (id: string) => $snapshot?.channels.find((item) => item.id === id)?.title ?? id;
 
@@ -206,6 +206,9 @@
           </div>
           <p class="scroll-count" aria-live="polite">
             Showing {visibleBridgeIntervals.length} of {filteredBridgeIntervals.length} intervals
+            {#if bridgeVisible < filteredBridgeIntervals.length}
+              <button class="secondary-action" onclick={() => (bridgeVisible += PAGE)}>Show more intervals</button>
+            {/if}
           </p>
         {:else}
           <div class="empty-log compact-empty">
@@ -279,6 +282,9 @@
         </div>
         <p class="scroll-count" aria-live="polite">
           Showing {visibleDispatches.length} of {filtered.length} messages
+          {#if dispatchVisible < filtered.length}
+            <button class="secondary-action" onclick={() => (dispatchVisible += PAGE)}>Show more messages</button>
+          {/if}
         </p>
       {:else}
         <div class="empty-log">
