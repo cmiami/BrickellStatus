@@ -11,6 +11,9 @@ Read `CONTRIBUTING.md` for product contracts and `DESIGN.md` before UI changes.
   channel rules live in `src/engine/channel_rules.rs`.
 - `crates/storage`: SQLite schema, migrations, retention, and outbox transactions.
 - `crates/eink` and `crates/delivery`: rendering, hardware protocols, messaging.
+- `apps/console/src/lib/{tow-inference,route-hulls}.ts`: portable tow detection and
+  display spacing, mirrored in MiamiBridges `src/shared`. Keep both copies identical;
+  use `towGroups.test.ts` and `RiverLine.test.ts` for native regressions.
 - `apps/console`: UI. Use `preferencesEditor.svelte.ts` for autosaving forms and
   `state.ts` for shared polling; do not create competing refresh/save loops.
 - `apps/desktop/src-tauri`: native commands, secrets, firmware, and output workers.

@@ -14,6 +14,7 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
   import VesselGlyph from './VesselGlyph.svelte';
   import {
     riverSchematic,
+    schematicPointAt,
     type SchematicRoute,
     type SchematicStation,
     type SchematicVessel
@@ -24,6 +25,7 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     travelDirection,
     type TravelDirection
   } from '$lib/river';
+  import { nativeTowGroups } from '$lib/towGroups';
   import { layoutVesselAnnotations } from '$lib/vesselAnnotationLayout';
   import type {
     BridgeCrossing,
@@ -96,6 +98,15 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     return target?.bridgeKey ? (bridgeStates.get(target.bridgeKey) ?? 'unknown') : 'unknown';
   });
   const liveVesselTracks = $derived(currentVesselTracks(vesselTracks, generatedAt));
+  const towGroups = $derived(nativeTowGroups(corridor, liveVesselTracks,
+    generatedAt ? Date.parse(generatedAt) : Math.max(0, ...liveVesselTracks.map((track) => Date.parse(track.observedAt)))));
+  const visibleTowIds = $derived.by(() => {
+    const relevant = new Set(liveVesselTracks.filter((track) => isRelevantBridgeVessel(track, targetBridgeState === 'up')).map((track) => track.mmsi));
+    return new Set(towGroups.flatMap((group) => {
+      const ids = [...group.tugIds, ...group.towIds];
+      return ids.some((id) => relevant.has(id)) ? ids : [];
+    }));
+  });
   // One hull is one row. Both the schematic and the manifest key on the MMSI,
   // and a repeated key aborts the render of the entire live page rather than
   // drawing one vessel twice, so uniqueness is enforced where the set is
@@ -103,12 +114,20 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
   const corridorVesselTracks = $derived.by(() => {
     const byMmsi = new Map<string, VesselTrack>();
     for (const track of liveVesselTracks) {
-      if (!isRelevantBridgeVessel(track, targetBridgeState === 'up')) continue;
+      if (!isRelevantBridgeVessel(track, targetBridgeState === 'up') && !visibleTowIds.has(track.mmsi)) continue;
       if (!byMmsi.has(track.mmsi)) byMmsi.set(track.mmsi, track);
     }
     return [...byMmsi.values()];
   });
-  const schematic = $derived(riverSchematic(corridor, corridorVesselTracks, bridgeStates));
+  const schematic = $derived(riverSchematic(corridor, corridorVesselTracks, bridgeStates, towGroups));
+  const towPaths = $derived.by(() => towGroups.flatMap((group) => {
+    const members = schematic.vessels.filter((v) => [...group.tugIds, ...group.towIds].includes(v.mmsi));
+    if (members.length < 2 || !members.every((v) => v.routeId === members[0].routeId)) return [];
+    const route = schematic.routes.find((r) => r.id === members[0].routeId)!;
+    const start = Math.min(...members.map((v) => v.displaySMeters)), end = Math.max(...members.map((v) => v.displaySMeters));
+    const measures = [start, ...route.points.map((p) => p.sMeters).filter((s) => s > start && s < end), end].sort((a,b) => a-b);
+    return [{ id: group.id, d: measures.map((s, i) => { const p = schematicPointAt(route, s)!; return `${i ? 'L' : 'M'}${p.x} ${p.y}`; }).join(' ') }];
+  }));
   const targetState = $derived(schematic.target?.state ?? 'unknown');
   const visibleStations = $derived(
     schematic.stations.filter(
@@ -586,6 +605,17 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
             </g>
           {/if}
 
+          <g class="tow-relationships" aria-hidden="true">
+            {#each towPaths as link (link.id)}
+              <path d={link.d} fill="none" stroke="var(--color-marine, #173745)" stroke-width="3" stroke-dasharray="8 4"><title>Probable towing unit</title></path>
+            {/each}
+          </g>
+          <g class="vessel-observations" aria-hidden="true">
+            {#each schematic.vessels.filter((vessel) => vessel.estimated) as vessel (vessel.mmsi)}
+              <path d={vessel.estimatePath} fill="none" stroke="var(--color-marine, #173745)" stroke-width="1.5" stroke-dasharray="4 4" />
+              <circle cx={vessel.reportedX} cy={vessel.reportedY} r="4" fill="var(--color-marine, #173745)"><title>{vessel.label}: reported position</title></circle>
+            {/each}
+          </g>
           <g class="vessels">
             {#each schematic.vessels as vessel (vessel.mmsi)}
               {@const ordinal = ordinalByMmsi.get(vessel.mmsi)}
@@ -598,7 +628,7 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
                 data-mmsi={vessel.mmsi}
                 transform="translate({vessel.x.toFixed(1)} {vessel.y.toFixed(1)})"
               >
-                <title>{vesselLabel(vessel)}</title>
+                <title>{vesselLabel(vessel)}{vessel.towGroupId ? " Probable towing unit." : ""}{vessel.estimated ? " Symbol separated along route; dot marks reported position." : ""}</title>
                 {#if activeVesselMmsi === vessel.mmsi}<circle class="identifier-selection" r="42" />{/if}
                 {#if vessel.likelyToOpenBrickell}<circle class="opener-pulse" r="34" />{/if}
                 <g
@@ -749,6 +779,7 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
                     <span>{vessel.speedKnots.toFixed(1)} kn</span>
                   </p>
 
+                  {#if vessel.positioned?.towGroupId}<p class="strip-tow">Probable towing unit</p>{/if}
                   {#if vessel.knownOpener || vessel.likelyToOpenBrickell || openingReading(vessel)}
                     <p class="impact">
                       {#if vessel.knownOpener}<strong>KNOWN OPENER</strong>{/if}
@@ -1464,6 +1495,13 @@ FORM: Brickell Interchange using visible-transit-network staging; seed 55e9df82.
     font-size: var(--type-label);
     font-weight: 700;
     letter-spacing: 0.06em;
+  }
+
+  .strip-tow {
+    margin: 2px 0;
+    color: var(--corridor);
+    font-size: var(--type-caption);
+    font-weight: 700;
   }
 
   .strip-movement span {

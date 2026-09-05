@@ -11,6 +11,8 @@
  */
 import type { RiverCorridor, RiverCorridorBranch, RiverStation, VesselTrack } from './types';
 import { makeChannelProjector, reachVessels, type ReachVessel } from './river';
+import { separateRouteHulls } from './route-hulls';
+import type { PublicVesselGroup } from './tow-inference';
 
 export const RIVER_SCHEMATIC_WIDTH = 1_320;
 export const RIVER_SCHEMATIC_HEIGHT = 640;
@@ -68,6 +70,13 @@ export interface SchematicVessel extends ReachVessel {
   /** Heading along the drawn route, already flipped for downriver travel. */
   angleDegrees: number;
   wake: SchematicTrailPoint[];
+  /** Original route anchor and a separate visual placement. */
+  reportedX: number;
+  reportedY: number;
+  displaySMeters: number;
+  estimated: boolean;
+  estimatePath: string;
+  towGroupId?: string;
 
   // Engine fields repeated at the rendering boundary so a component never has
   // to reconstruct identity, movement, timing, or schedule meaning.
@@ -525,6 +534,8 @@ function placeVessels(
           y: position.y,
           angleDegrees,
           wake: wakeFor(vessel, position, routeById, project),
+          reportedX: position.x, reportedY: position.y,
+          displaySMeters: vessel.sMeters, estimated: false, estimatePath: '',
           vesselName: track.vesselName,
           movement: track.movement,
           routeIntersects: track.routeIntersects,
@@ -558,7 +569,8 @@ function placeVessels(
 export function riverSchematic(
   corridor: RiverCorridor,
   vesselTracks: VesselTrack[],
-  bridgeStates: Map<string, SchematicBridgeState>
+  bridgeStates: Map<string, SchematicBridgeState>,
+  towGroups: PublicVesselGroup[] = []
 ): RiverSchematic {
   const trunk = corridor.branches.find((branch) => branch.id === 'river');
   if (!trunk) {
@@ -619,7 +631,49 @@ export function riverSchematic(
     height: RIVER_SCHEMATIC_HEIGHT,
     routes,
     stations,
-    vessels: placeVessels(vesselTracks, routes, project),
+    vessels: layoutSchematicHulls(placeVessels(vesselTracks, routes, project), routes, towGroups),
     target
   };
+}
+
+/** Footprint spacing is cartographic displacement, never an AIS coordinate. */
+function layoutSchematicHulls(vessels: SchematicVessel[], routes: SchematicRoute[], groups: PublicVesselGroup[]): SchematicVessel[] {
+  const byId = new Map(vessels.map((vessel) => [vessel.mmsi, vessel]));
+  const membership = new Map<string, { formation: string; order: number; desired: number }>();
+  for (const group of groups) {
+    const members = [...group.tugIds, ...group.towIds].map((id) => byId.get(id)).filter((v): v is SchematicVessel => !!v);
+    if (members.length < 2) continue;
+    const freshest = members.reduce((a, b) => a.observedAtMs >= b.observedAtMs ? a : b);
+    const offsets = group.memberOffsetsMeters;
+    members.sort((a, b) => (offsets?.[a.mmsi] ?? a.sMeters) - (offsets?.[b.mmsi] ?? b.sMeters) || a.mmsi.localeCompare(b.mmsi));
+    members.forEach((member, order) => membership.set(member.mmsi, { formation: group.id, order,
+      desired: offsets?.[member.mmsi] !== undefined && offsets[freshest.mmsi] !== undefined
+        ? freshest.sMeters + offsets[member.mmsi]! - offsets[freshest.mmsi]! : member.sMeters }));
+  }
+  const byRoute = new Map(routes.map((route) => [route.id, route]));
+  const sorted = [...vessels].sort((a, b) => b.observedAtMs - a.observedAtMs || a.mmsi.localeCompare(b.mmsi));
+  const placed = separateRouteHulls(sorted.flatMap((vessel) => {
+    const route = byRoute.get(vessel.routeId);
+    if (!route) return [];
+    let minimum = Math.min(...route.points.map((point) => point.sMeters));
+    let maximum = Math.max(...route.points.map((point) => point.sMeters));
+    if (vessel.sMeters < 0) maximum = Math.min(maximum, -2);
+    else minimum = Math.max(minimum, 2);
+    return [{ id: vessel.mmsi, sMeters: membership.get(vessel.mmsi)?.desired ?? vessel.sMeters,
+      minimum, maximum, radius: Math.hypot(Math.max(48, Math.min(68, vessel.hullLength * 2.5)), 42) / 2 + 12,
+      ...membership.get(vessel.mmsi), pointAt: (s: number) => schematicPointAt(route, s)! }];
+  }), 5);
+  return vessels.map((vessel) => {
+    const route = byRoute.get(vessel.routeId)!;
+    const s = placed.get(vessel.mmsi) ?? vessel.sMeters;
+    const point = schematicPointAt(route, s)!;
+    const estimated = Math.hypot(point.x - vessel.reportedX, point.y - vessel.reportedY) > 0.5;
+    const points = [vessel.sMeters, ...route.points.map((p) => p.sMeters).filter((measure) =>
+      measure > Math.min(s, vessel.sMeters) && measure < Math.max(s, vessel.sMeters)), s].sort((a, b) => a - b);
+    return { ...vessel, x: point.x, y: point.y, displaySMeters: s, estimated,
+      angleDegrees: normalizeDegrees(point.angleDegrees + (vessel.direction === 'downriver' ? 180 : 0)),
+      estimatePath: points.map((measure, index) => { const p = schematicPointAt(route, measure)!;
+        return `${index === 0 ? 'M' : 'L'}${p.x} ${p.y}`; }).join(' '),
+      towGroupId: membership.get(vessel.mmsi)?.formation };
+  });
 }

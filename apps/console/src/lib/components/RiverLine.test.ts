@@ -617,7 +617,7 @@ describe('RiverLine', () => {
     expect(compactText(document.body)).not.toContain('367705810');
   });
 
-  it('preserves clustered hull positions without inventing a visual stack', () => {
+  it('separates clustered hulls along the route while preserving reported anchors', () => {
     render(RiverLine, {
       corridor: CORRIDOR,
       vesselTracks: [
@@ -647,12 +647,10 @@ describe('RiverLine', () => {
     const marks = Array.from(document.querySelectorAll('.vessel'));
     const points = marks.map(translatedPoint);
     expect(new Set(marks.map((mark) => mark.getAttribute('transform'))).size).toBe(4);
-    expect(
-      Math.max(...points.map((point) => point.x)) - Math.min(...points.map((point) => point.x))
-    ).toBeLessThan(6);
-    expect(
-      Math.max(...points.map((point) => point.y)) - Math.min(...points.map((point) => point.y))
-    ).toBeLessThan(6);
+    for (let a = 0; a < points.length; a++) for (let b = a + 1; b < points.length; b++) {
+      expect(Math.hypot(points[a].x - points[b].x, points[a].y - points[b].y)).toBeGreaterThan(80);
+    }
+    expect(document.querySelectorAll('.vessel-observations circle').length).toBeGreaterThan(0);
 
     const callouts = Array.from(document.querySelectorAll('.vessel-callout'));
     expect(callouts).toHaveLength(4);

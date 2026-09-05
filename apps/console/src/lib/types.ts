@@ -148,6 +148,11 @@ export interface SourceHealth {
 }
 
 export interface VesselTrackPoint {
+  speedKnots?: number;
+  courseDegrees?: number;
+  branch?: string;
+  sMeters?: number;
+  offsetMeters?: number;
   latitude: number;
   longitude: number;
   observedAt: string;
