@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 brickellstatus-model = { path = "../model" }
-jiff = { version = "=0.2.35", features = ["serde"] }
+jiff = { version = "=0.2.37", features = ["serde"] }
 serde.workspace = true
 thiserror.workspace = true
 
