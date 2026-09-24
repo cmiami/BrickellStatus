@@ -40,7 +40,7 @@ import statistics
 import sys
 from bisect import bisect_right
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -91,6 +91,8 @@ class Forecast:
     eta_min: int | None
     eta_max: int | None
     mode: str
+    # Shadow opening model probability in basis points, recorded from 0.1.48.
+    shadow: int | None = None
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -176,10 +178,15 @@ def read_forecasts(path: Path) -> list[Forecast] | None:
     try:
         if not table_exists(connection, "bridge_forecast_samples"):
             return None
+        shadow = (
+            "shadow_probability_bps"
+            if "shadow_probability_bps" in columns(connection, "bridge_forecast_samples")
+            else "NULL"
+        )
         rows = connection.execute(
             "SELECT evaluated_at_ms, minute_bucket_ms, model_version, state, "
             "predictive_score_bps, confidence_bps, eta_min_minutes, "
-            "eta_max_minutes, schedule_mode FROM bridge_forecast_samples "
+            f"eta_max_minutes, schedule_mode, {shadow} FROM bridge_forecast_samples "
             "WHERE target_key=? ORDER BY evaluated_at_ms",
             (TARGET,),
         ).fetchall()
@@ -864,6 +871,36 @@ def forecast_section(samples, openings, up_spans, observed) -> None:
             if subset:
                 score_forecasts(subset, openings, up_spans, f"  {mode} <= {ALERT_HORIZON}m")
         reliability_line(model_samples, openings, up_spans)
+        shadow_samples = shadow_alert_samples(model_samples)
+        if shadow_samples:
+            score_forecasts(shadow_samples, openings, up_spans, f"{model} shadow",
+                            apply_alert_horizon=False)
+
+
+def shadow_alert_samples(samples: list[Forecast]) -> list[Forecast]:
+    """Replays the shadow model's recorded probability as its own alerts.
+
+    Thresholds come from the shipped artifact. The shadow model has no ETA
+    window, so it is scored without the far-edge gate, as when it was fitted.
+    """
+    recorded = [sample for sample in samples if sample.shadow is not None]
+    if not recorded:
+        return []
+    artifact = Path(__file__).resolve().parents[1] / "crates/runtime/models/opening_shadow_v1.json"
+    try:
+        import json
+        thresholds = json.loads(artifact.read_text())
+        enter, exit_ = thresholds["enter"], thresholds["exit"]
+    except (OSError, ValueError, KeyError):
+        return []
+    result, active, previous = [], False, None
+    for sample in recorded:
+        if previous is None or sample.minute - previous.minute > 2 * MINUTE:
+            active = False
+        active = sample.shadow / 10_000 >= (exit_ if active else enter)
+        result.append(replace(sample, state="likely" if active else "clear"))
+        previous = sample
+    return result
 
 
 def vessel_section(path: Path) -> None:

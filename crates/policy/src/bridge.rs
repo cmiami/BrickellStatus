@@ -22,7 +22,7 @@ use thiserror::Error;
 /// Bump this when score semantics, feature construction, or shipped weights
 /// change. Durable forecast samples use it to keep unlike models out of the
 /// same calibration bucket.
-pub const BRIDGE_FORECAST_MODEL_VERSION: &str = "brickell-v6";
+pub const BRIDGE_FORECAST_MODEL_VERSION: &str = "brickell-v7";
 
 /// Maximum ETA at which a predictive opening becomes a public alert.
 ///
@@ -1621,7 +1621,7 @@ mod tests {
         assert!(
             prediction.predictive_score.as_score() >= predictor.config().thresholds.likely.enter
         );
-        assert_eq!(prediction.model_version, "brickell-v6");
+        assert_eq!(prediction.model_version, "brickell-v7");
     }
 
     fn exempt_transit_at(now: TimestampMillis, minutes: u16) -> BridgeEvidence {

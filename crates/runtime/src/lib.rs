@@ -10,6 +10,7 @@ mod engine;
 mod factory;
 mod location_search;
 mod preferences;
+mod shadow;
 
 pub use brickellstatus_policy::BRIDGE_ALERT_HORIZON_MINUTES;
 pub use catalog::{CatalogEntry, CatalogGroup, CatalogSection, FeedCatalog, catalog};

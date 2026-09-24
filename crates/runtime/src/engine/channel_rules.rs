@@ -294,7 +294,7 @@ fn bridge_resolution_confirmed(
             );
             item.kind == ItemKind::Bridge
                 && item.attributes.get("relation").and_then(Value::as_str) == Some("target")
-                && bridge_item_is_current(item, channel, observed_ms, now_ms)
+                && bridge_item_is_current(item, channel, None, observed_ms, now_ms)
         }) {
             saw_current_target = true;
             if item.attributes.get("state").and_then(Value::as_str) != Some("down")
@@ -1923,7 +1923,7 @@ fn aisstream_status(
                                 |time| time.timestamp_millis(),
                             );
                             channel.is_some_and(|channel| {
-                                bridge_item_is_current(item, channel, observed_ms, now_ms)
+                                bridge_item_is_current(item, channel, None, observed_ms, now_ms)
                             })
                         })
                         .count()
@@ -2165,11 +2165,15 @@ fn vessel_tracks(state: &PersistedRuntimeState, now_ms: i64) -> Vec<VesselTrackS
             // whether that hull has ever needed the span raised. Joining here
             // keeps the learned history on one side of the boundary and the
             // live positions on the other.
-            track.opening_propensity = state.ais_propensities.get(&track.mmsi).copied();
+            let learned = state.ais_propensities.get(&track.mmsi).copied();
+            let first_seen = learned.is_none().then(|| {
+                first_seen_opening_propensity(track.vessel_class.as_deref(), track.length_meters)
+            });
+            track.opening_propensity = learned.or(first_seen.flatten());
             track.schedule_exempt = schedule_exempt(track.vessel_class.as_deref());
-            let learned_opener = track
-                .opening_propensity
-                .is_some_and(|score| score >= KNOWN_OPENER_LIKELY_BPS);
+            // Pre-arming beyond the route gate needs the hull's own history;
+            // a class or size prior informs the score, not the geometry.
+            let learned_opener = learned.is_some_and(|score| score >= KNOWN_OPENER_LIKELY_BPS);
             let known_opener_committed = learned_opener
                 && track.movement == VesselMovementDto::Approaching
                 && matches!(
@@ -2198,8 +2202,9 @@ fn vessel_tracks(state: &PersistedRuntimeState, now_ms: i64) -> Vec<VesselTrackS
             if let Some(schedule) = schedule.as_ref() {
                 annotate_predicted_opening(&mut track, schedule, now_ms);
             }
-            let opening_evidence = learned_opener
-                || track.vessel_class.as_deref() == Some("sailing");
+            let opening_evidence = track
+                .opening_propensity
+                .is_some_and(|score| score >= KNOWN_OPENER_LIKELY_BPS);
             let committed_tight_approach = track.movement == VesselMovementDto::Approaching
                 && track.route_intersects
                 && observed_ms

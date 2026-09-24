@@ -18,6 +18,10 @@ Read `CONTRIBUTING.md` for product contracts and `DESIGN.md` before UI changes.
   `state.ts` for shared polling; do not create competing refresh/save loops.
 - `apps/desktop/src-tauri`: native commands, secrets, firmware, and output workers.
 - `scripts/calibrate_bridge.py`: read-only forecast scoring against observed history.
+- `scripts/opening_shadow.py` and `fit_opening_shadow.py`: the shadow opening model's
+  features and chronological fit. `crates/runtime/src/shadow.rs` mirrors the
+  features; keep both in step through `crates/runtime/fixtures/opening_shadow_parity.json`.
+- `scripts/audit_known_openers.py`: first-seen opener prior and pilots'-board offsets.
 - `scripts/audit_bridge_model.py` and `audit_ais_timing.py`: chronological model
   evaluation; see `docs/MODEL_AUDIT.md` before changing prediction mathematics.
 - `firmware/panel`: physical panel firmware; follow its README for all board builds.

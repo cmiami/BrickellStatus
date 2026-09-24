@@ -125,17 +125,17 @@ telemetry. Secrets live in a private per-user credential file — sealed to your
 Windows account with DPAPI, held owner-only on macOS — and are never written to
 preferences.
 
-> **Proof-of-concept, September 2026.** FL511 bridge history now includes ten
-> days of collection (212 continuously confirmed hours and 183 clean openings
-> as of September 1), and the `brickell-v5` forecast was re-measured against
-> all of it: per-stretch AIS arrival windows, a slot snap that matches when the
-> span actually starts, a clock bonus that can no longer carry weak evidence
-> over the line, a standalone rule for the nearest upstream bascule, and a
-> pilots-board departure offset with the right sign. It is still under two
-> weeks of one season, so treat confidence numbers as early; local history is
-> now floored at four weeks so the next calibration has a full month. SW 1 St
-> and NW 17 Ave have not reported a lift in FL511 since mid-August and stay in
-> the upstream chain regardless. AISStream is delivering vessel detail again (the
+> **Proof-of-concept, September 2026.** FL511 bridge history now covers a
+> month (615 clean openings through September 23), and the `brickell-v7`
+> forecast was re-measured against it: pilots'-board bookings now count as
+> evidence (a timestamp bug had silently discarded them) with offsets measured
+> to the lift, hulls of 24 m and over and passenger vessels are known openers
+> from their first pass, and a moored hull's jitter across the bridge line no
+> longer trains the opening ledger. A fitted opening model now runs in shadow
+> beside the live forecast and never drives an alert; see
+> [`docs/MODEL_AUDIT.md`](docs/MODEL_AUDIT.md). Treat confidence numbers as
+> early: this is still one season. NW 17 Ave has not reported a lift in FL511
+> and stays in the upstream chain regardless. AISStream is delivering vessel detail again (the
 > [upstream issue](https://github.com/aisstream/aisstream/issues/30) remains open,
 > so treat availability as provider-intermittent); the collector now tracks the
 > Miami River in channel coordinates along a surveyed corridor and records every

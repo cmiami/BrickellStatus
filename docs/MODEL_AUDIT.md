@@ -242,3 +242,97 @@ change was followed by a fresh complete Rust test run and workspace Clippy.
 The exported timing chart was visually inspected. Verification used the
 temporary Node 24.15 runtime documented in `CODE_AUDIT.md`; the global Node
 installation remains unchanged.
+
+
+# Bridge model audit — September 23, 2026 (`brickell-v7`, 0.1.48)
+
+A read-only snapshot through September 23 holds 615 clean Brickell openings
+since August 23, 44,977 forecast samples (27,185 minutes of the installed
+`brickell-v5`), 792 crossings and 756 catalogued hulls. The installed app was
+still 0.1.45; `brickell-v6` (0.1.47) had never run, so no v6 trace exists.
+
+## What changed and the evidence for it
+
+**Pilots'-board evidence was being discarded.** The collector stamped each
+board row with its scheduled board time as the observation time, and the item
+freshness check allowed only the bridge channel's two minutes. A future
+booking therefore read as a timestamp from the future, and a current one was
+fresh for two minutes after its board time. Board evidence contributed to 54 of
+27,185 v5 forecast minutes, all within two minutes after an arrival's board
+time; departures never counted. Board rows are now dated by the last
+successful board read (a 304 included), the item check allows a source its
+own cadence as the source check already did, and a booking is kept until the
+far edge of its window passes rather than dropped at its estimate.
+
+Offsets now target the FL511 lift rather than the crossing
+(`scripts/audit_known_openers.py`):
+
+| Direction | Paired lifts | Median | Interquartile | Was |
+| --- | ---: | ---: | --- | ---: |
+| Departure | 23 | −18 min | −23 to −9 | −8 |
+| Arrival | 21 | +48 min (shipped 47) | +44 to +57 | +60 |
+
+Both clear the pre-registered gate and are marked calibrated. Expect little
+change in alert counts: booking-only alert episodes were 85% to 92% precise
+but, added to v5, warned one more opening across Sep 13 to 20, because AIS had
+already seen those hulls.
+
+**First-seen opener prior.** Each hull's first labelled crossing: hulls of
+24 m and over needed the lift 50 times in 55 across every class, passenger
+vessels 7 in 7, tugs under 24 m 4 in 8, and pleasure craft under 24 m 16 in
+56. A hull with no labelled history now gets 0.85 if it is 24 m or longer or a
+passenger vessel (sailing keeps 0.90); history, once it exists, decides.
+Chronologically, rates before Sep 13 and crossings from Sep 13:
+
+| Known-opener flags, 167 opened crossings | Right | Wrong | Precision | Recall | First-seen right / wrong |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Beta(1,1) + sailing (v6) | 135 | 5 | 96% | 81% | 1 / 0 |
+| + first-seen prior (v7) | 144 | 5 | 97% | 86% | 10 / 0 |
+
+A full class prior applied to hulls with history was also tested and rejected:
+it raised recall to 85% but doubled wrong flags to 11.
+
+**Stationary crossings.** All 23 crossings logged by IRON GRYPHON, moored
+beside the span, were at 0.45 kn or less. A crossing at or below 0.5 kn, the
+collector's own stationary cutoff, now resolves as unknown, and a one-time
+migration takes such labels back out of the ledger. Raw crossing rows are kept.
+Identity was also checked: no call sign or IMO is shared across MMSIs, and the
+two SARA hulls are two tugs, so no hulls were merged.
+
+## Shadow opening model
+
+`scripts/fit_opening_shadow.py` fits a logistic model over 21 features built
+only from rows the app stores, as they existed at each minute
+(`scripts/opening_shadow.py`, mirrored in `crates/runtime/src/shadow.rs` and
+pinned by a shared fixture). Board windows came from lifts before Sep 6, the
+threshold (enter 0.55, exit 0.41) from Sep 6 to 12, and the model was scored
+once on Sep 13 to 23 against the recorded live forecast on the same 13,633
+minutes:
+
+| Sep 13 to 23, 196 openings | Alerts | Warned | False | Precision | Median lead |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Recorded live model (v5) | 418 | 137 | 281 | 33% | 20.1 min |
+| Shadow model | 248 | 114 | 134 | 46% | 17.0 min |
+| Chance, one alert per closure | 195 | 77 | 118 | 39% | 18.4 min |
+
+A day-block bootstrap of the paired difference puts the change at −132 to −56
+false alerts and −27 to −3 warned openings. This is a quieter model that misses
+more, not a strict improvement: across its whole operating curve it did not
+reach the live model's 70% recall under this episode scoring. It therefore runs
+in shadow. Its probability is recorded in `bridge_forecast_samples`
+(`shadow_model`, `shadow_probability_bps`) and never consulted by the forecast.
+`python3 scripts/calibrate_bridge.py` scores it beside the live model once
+samples accumulate. Promote it only on its own record, with the owner choosing
+the precision and recall trade.
+
+The shipped coefficients are refitted on every eligible minute (37,953) and
+recorded in `crates/runtime/models/opening_shadow_v1.json` with the test result.
+
+## Reproduction
+
+```sh
+python3 scripts/audit_known_openers.py /path/to/snapshot.sqlite3
+/tmp/brickell-audit-env/bin/python scripts/fit_opening_shadow.py /path/to/snapshot.sqlite3 \
+    --artifact /tmp/opening_shadow_v1.json
+python3 scripts/calibrate_bridge.py /path/to/snapshot.sqlite3
+```

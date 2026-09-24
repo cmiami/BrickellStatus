@@ -50,6 +50,16 @@ class CalibrationTests(unittest.TestCase):
         columns = output.getvalue().splitlines()[0].split()
         self.assertEqual(columns[1:5], ["1", "100%", "100%", "0"])
 
+    def test_shadow_probability_replays_as_its_own_alerts_with_hysteresis(self):
+        from calibrate_bridge import shadow_alert_samples
+        samples = [Forecast(m * MINUTE, m * MINUTE, "brickell-v7", "clear", 0, 0, None, None, "scheduled", bps)
+                   for m, bps in enumerate((1000, 9000, 5000, 3000, None))]
+        states = [s.state for s in shadow_alert_samples(samples)]
+        # enters above the artifact threshold, holds above its exit, leaves below;
+        # a minute without a recorded shadow probability is not scored.
+        self.assertEqual(states, ["clear", "likely", "likely", "clear"])
+        self.assertEqual(shadow_alert_samples([forecast()]), [])
+
     def test_binomial_tail_survives_a_large_history(self):
         self.assertAlmostEqual(binomial_tail(1, 2, 0.5), 0.75)
         self.assertAlmostEqual(binomial_tail(1001, 2001, 0.5), 0.5, places=10)

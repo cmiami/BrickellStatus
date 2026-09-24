@@ -384,6 +384,49 @@ fn ledger_propensity_and_sailing_prior_reach_the_ais_observation() {
 }
 
 #[test]
+fn a_first_seen_large_or_passenger_hull_is_a_known_opener_and_a_small_one_is_not() {
+    let propensity = |class: Option<&str>, length: Option<f64>, learned: &BTreeMap<String, u16>| {
+        let mut item = ais_bridge_item();
+        if let Some(class) = class {
+            item.attributes.insert("vessel_class".into(), json!(class));
+        }
+        if let Some(length) = length {
+            item.attributes
+                .insert("length_meters".into(), json!(length));
+        }
+        let Some(BridgeObservation::AisTrack {
+            opening_propensity, ..
+        }) = bridge_fact(&item, learned)
+        else {
+            panic!("expected an AIS track");
+        };
+        opening_propensity.map(|value| value.basis_points)
+    };
+    let none = BTreeMap::new();
+    // Hulls of 24 m and over, and passenger vessels, open from their first pass.
+    assert_eq!(
+        propensity(Some("pleasure craft"), Some(24.0), &none),
+        Some(8_500)
+    );
+    assert_eq!(propensity(Some("cargo"), Some(89.0), &none), Some(8_500));
+    assert_eq!(
+        propensity(Some("passenger"), Some(18.0), &none),
+        Some(8_500)
+    );
+    assert!(u16::try_from(8_500).unwrap() >= KNOWN_OPENER_LIKELY_BPS);
+    // A small yacht or a small tug earns no prior; nor does an unmeasured hull.
+    assert_eq!(propensity(Some("pleasure craft"), Some(23.0), &none), None);
+    assert_eq!(propensity(Some("tug + tow"), Some(17.0), &none), None);
+    assert_eq!(propensity(None, None, &none), None);
+    // Once a hull has its own history, that history decides, not the prior.
+    let learned = BTreeMap::from([("367719770".to_string(), 2_500_u16)]);
+    assert_eq!(
+        propensity(Some("pleasure craft"), Some(40.0), &learned),
+        Some(2_500)
+    );
+}
+
+#[test]
 fn a_known_opener_prearms_only_while_approaching_in_the_corridor() {
     let mut item = ais_bridge_item();
     item.attributes
@@ -863,14 +906,34 @@ fn pilots_eta_cannot_round_a_past_movement_into_the_future_or_invent_a_tug() {
         last_success_at: Some(TimestampMillis(now)),
         detail: None,
     };
+    // Past the far edge of its window, a booking has expired.
     item.attributes.insert(
         "bridge_eta_at".into(),
-        json!(iso_timestamp(now - 30_000).unwrap()),
+        json!(iso_timestamp(now - 16 * 60_000).unwrap()),
     );
     assert!(
         scheduled_transit_observation(&item, "bridge", "pilots", now, availability.clone())
             .is_none()
     );
+    // Thirty seconds past its estimate, the lift can still be coming: keep
+    // it, but never with a window that starts in the future of a past estimate.
+    item.attributes.insert(
+        "bridge_eta_at".into(),
+        json!(iso_timestamp(now - 30_000).unwrap()),
+    );
+    let observation =
+        scheduled_transit_observation(&item, "bridge", "pilots", now, availability.clone())
+            .unwrap();
+    assert!(matches!(
+        observation.data,
+        BridgeObservation::ScheduledTransit {
+            eta: Some(EtaRangeMinutes {
+                earliest: 0,
+                latest: 14
+            }),
+            ..
+        }
+    ));
     item.attributes.insert(
         "bridge_eta_at".into(),
         json!(iso_timestamp(now + 60_000).unwrap()),
@@ -879,8 +942,69 @@ fn pilots_eta_cannot_round_a_past_movement_into_the_future_or_invent_a_tug() {
         scheduled_transit_observation(&item, "bridge", "pilots", now, availability).unwrap();
     assert!(matches!(
         observation.data,
-        BridgeObservation::ScheduledTransit { exempt: false, .. }
+        BridgeObservation::ScheduledTransit {
+            exempt: false,
+            eta: Some(EtaRangeMinutes {
+                earliest: 0,
+                latest: 16
+            }),
+            ..
+        }
     ));
+}
+
+#[test]
+fn a_future_booking_from_the_last_board_read_is_live_evidence() {
+    // The regression: the board time was carried as the observation time, so
+    // every future booking read as a timestamp from the future and was
+    // discarded, and a current one was fresh for two minutes of every ten.
+    let now_ms = 1_786_741_200_000;
+    let preferences = AppPreferences::default();
+    let channel = preferences
+        .profile
+        .channels
+        .iter()
+        .find(|channel| channel.kind == ChannelKindDto::Bridge)
+        .unwrap();
+    let source_id = "bbpilots.bridge.brickell";
+    let mut booking = bridge_item("booking", "PEPIN EXPRESS", "target", "down");
+    booking.kind = ItemKind::VesselMovement;
+    booking.observed_at = None;
+    booking.starts_at = chrono::DateTime::from_timestamp_millis(now_ms + 25 * 60_000);
+    booking.attributes.insert("river".into(), json!(true));
+    booking
+        .attributes
+        .insert("vessel".into(), json!("PEPIN EXPRESS"));
+    booking.attributes.insert("tug".into(), json!("MRT"));
+    booking.attributes.insert(
+        "bridge_eta_at".into(),
+        json!(iso_timestamp(now_ms + 7 * 60_000).unwrap()),
+    );
+    let mut source = healthy_source_state(&channel.id, booking, now_ms);
+    // Read eight minutes ago by a feed polled every ten.
+    source.last_success_ms = Some(now_ms - 8 * 60_000);
+    source.poll_interval_ms = Some(10 * 60_000);
+    let mut state = PersistedRuntimeState {
+        active_sources: BTreeMap::from([(source_id.into(), channel.id.clone())]),
+        ..PersistedRuntimeState::default()
+    };
+    state.sources.insert(source_id.into(), source.clone());
+
+    let (evidence, _) = bridge_evidence(&state, &preferences, now_ms).unwrap();
+    let transit = evidence
+        .iter()
+        .find(|item| matches!(item.fact, BridgeObservation::ScheduledTransit { .. }))
+        .expect("the booking is evidence");
+    assert_eq!(transit.availability, AvailabilityStatus::Live);
+
+    // A board that has not been read for well over its own cadence is stale.
+    source.last_success_ms = Some(now_ms - 30 * 60_000);
+    state.sources.insert(source_id.into(), source);
+    let (evidence, _) = bridge_evidence(&state, &preferences, now_ms).unwrap();
+    assert!(evidence.iter().all(|item| {
+        !matches!(item.fact, BridgeObservation::ScheduledTransit { .. })
+            || item.availability != AvailabilityStatus::Live
+    }));
 }
 
 #[tokio::test]

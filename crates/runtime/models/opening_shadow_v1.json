@@ -1,0 +1,104 @@
+{
+  "version": "opening-shadow-v1",
+  "target": "FL511 Brickell lift within 30 minutes of a bridge-down minute",
+  "mode": "shadow: recorded beside the live forecast, never drives an alert",
+  "trained_through_local": "2026-09-23T19:15-04:00",
+  "eligible_minutes": 37953,
+  "openings": 615,
+  "features": [
+    "ais_closing",
+    "ais_known",
+    "ais_sail",
+    "ais_eta30",
+    "ais_out",
+    "ais_in",
+    "ais_wait",
+    "ais_far_known",
+    "ais_far_unknown",
+    "up_any15",
+    "up_two20",
+    "up_sw2ave12",
+    "up_sw1st12",
+    "up_ordered20",
+    "bbp_down",
+    "bbp_up",
+    "sched_weekday",
+    "blackout",
+    "slot_soon",
+    "daytime",
+    "recent_open30"
+  ],
+  "coefficients": [
+    -0.647076,
+    0.978469,
+    1.934961,
+    1.403239,
+    -0.065531,
+    -0.414077,
+    0.086191,
+    0.954515,
+    0.137815,
+    0.589195,
+    0.403334,
+    0.5557,
+    0.163011,
+    0.059039,
+    1.373277,
+    2.550946,
+    0.232419,
+    -0.22265,
+    0.018342,
+    0.696385,
+    -0.004382
+  ],
+  "intercept": -2.094412,
+  "enter": 0.55,
+  "exit": 0.4125,
+  "board_windows": {
+    "upriver": [
+      16,
+      58
+    ],
+    "downriver": [
+      -55,
+      -8
+    ]
+  },
+  "validation": {
+    "start": "2026-09-06",
+    "episode_f1": 0.5852
+  },
+  "test": {
+    "start": "2026-09-13",
+    "minutes": 13633,
+    "live": {
+      "alerts": 418,
+      "hits": 137,
+      "false": 281,
+      "openings": 196,
+      "lead": 20.10033333333333
+    },
+    "shadow": {
+      "alerts": 248,
+      "hits": 114,
+      "false": 134,
+      "openings": 196,
+      "lead": 16.976433333333333
+    },
+    "chance": {
+      "alerts": 195,
+      "hits": 77,
+      "false": 118,
+      "openings": 196,
+      "lead": 18.410733333333333
+    },
+    "bootstrap95_false_delta": [
+      -132,
+      -56
+    ],
+    "bootstrap95_warned_delta": [
+      -27,
+      -3
+    ]
+  }
+}

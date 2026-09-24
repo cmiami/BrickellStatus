@@ -1291,6 +1291,7 @@ impl RuntimeEngine {
             RuntimeError::Normalization(format!("could not encode replay prediction: {error}"))
         })?;
 
+        let shadow = self.shadow_probability_bps(prediction.evaluated_at.0).await;
         self.store
             .record_forecast_sample(ForecastSample {
                 target_key: FORECAST_TARGET_KEY,
@@ -1305,12 +1306,93 @@ impl RuntimeEngine {
                 contribution_bps_json: &fields.contribution_bps_json,
                 source_freshness_json: &fields.source_freshness_json,
                 replay_json: Some((&replay_json, &prediction_json)),
+                shadow: shadow
+                    .as_ref()
+                    .map(|(version, bps)| (version.as_str(), *bps)),
                 session_id: &self.session_id,
             })
             .await?;
         state.last_forecast_sample_minute_ms = Some(minute_bucket_ms);
         state.last_forecast_signature = Some(signature);
         Ok(())
+    }
+
+    /// Scores the shadow opening model from stored history at `now_ms`.
+    ///
+    /// Recorded beside the forecast for later comparison and never consulted
+    /// by it. A failure here is logged and skipped rather than allowed to
+    /// cost the live forecast its sample.
+    async fn shadow_probability_bps(&self, now_ms: i64) -> Option<(String, i64)> {
+        let model = crate::shadow::ShadowModel::shipped()?;
+        let schedule = BrickellSchedule::new().ok()?;
+        let schedule = crate::shadow::schedule_context(&schedule, now_ms)?;
+        let rows = match self
+            .store
+            .shadow_model_rows(
+                now_ms,
+                now_ms - crate::shadow::FIX_LOOKBACK_MS,
+                now_ms - crate::shadow::HISTORY_BUFFER_MS,
+                now_ms - crate::shadow::UPSTREAM_LOOKBACK_MS,
+                crate::shadow::BOARD_GRACE_MS,
+            )
+            .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                warn!(%error, "shadow opening model inputs unavailable");
+                return None;
+            }
+        };
+        let inputs = crate::shadow::ShadowInputs {
+            now_ms,
+            fixes: rows
+                .fixes
+                .into_iter()
+                .map(
+                    |(mmsi, at, sog, branch, s, posture)| crate::shadow::ShadowFix {
+                        mmsi,
+                        at,
+                        sog,
+                        branch,
+                        s,
+                        posture,
+                    },
+                )
+                .collect(),
+            history: rows
+                .outcomes
+                .into_iter()
+                .map(|(mmsi, opened, fits_under)| (mmsi, (opened, fits_under)))
+                .collect(),
+            classes: rows
+                .sailing
+                .into_iter()
+                .map(|mmsi| (mmsi, "sailing".to_string()))
+                .collect(),
+            up_starts: rows
+                .lifts
+                .into_iter()
+                .map(|(key, relation, at)| crate::shadow::ShadowLift { key, relation, at })
+                .collect(),
+            board: rows
+                .board
+                .into_iter()
+                .map(|(direction, scheduled_at, first_seen, last_seen)| {
+                    crate::shadow::ShadowBooking {
+                        direction,
+                        scheduled_at,
+                        first_seen,
+                        last_seen,
+                    }
+                })
+                .collect(),
+            schedule,
+        };
+        let probability = model.probability(&inputs);
+        Some((
+            model.version.clone(),
+            (probability * 10_000.0).round() as i64,
+        ))
     }
 
     async fn persist_refresh(
@@ -1805,6 +1887,34 @@ fn nonnegative_count(label: &str, value: i64) -> Result<u64, RuntimeError> {
     })
 }
 
+/// Prior opening propensity for a hull the ledger has never labelled.
+///
+/// A mast is the reason the bascule exists, so a sailing rig starts at 0.90.
+/// Size and trade decide the rest. On each hull's first labelled crossing
+/// (Aug 23 to Sep 23 2026), hulls of 24 m and over needed the span raised 50
+/// times in 55 across every class, and passenger vessels 7 in 7. Tugs under
+/// 24 m split 4 and 4, often running without a tow, and pleasure craft under
+/// 24 m opened only 16 times in 56, so neither earns a prior. Rates were learned
+/// on crossings before Sep 13; on Sep 13 to 23 the rule flagged 10 first-seen
+/// openers and no first-seen hull that fit under, against 1 and 0 before it.
+/// A hull with any labelled crossing uses its own history instead.
+fn first_seen_opening_propensity(
+    vessel_class: Option<&str>,
+    length_meters: Option<f64>,
+) -> Option<u16> {
+    match vessel_class {
+        Some("sailing") => Some(9_000),
+        Some("passenger") => Some(FIRST_SEEN_LARGE_HULL_PROPENSITY_BPS),
+        _ if length_meters.is_some_and(|length| length >= FIRST_SEEN_LARGE_HULL_METERS) => {
+            Some(FIRST_SEEN_LARGE_HULL_PROPENSITY_BPS)
+        }
+        _ => None,
+    }
+}
+
+const FIRST_SEEN_LARGE_HULL_METERS: f64 = 24.0;
+const FIRST_SEEN_LARGE_HULL_PROPENSITY_BPS: u16 = 8_500;
+
 /// Beta(1,1)-smoothed share of classified crossings that needed the span
 /// raised. One opener reads about 0.67, never 1.0; repetition earns certainty.
 fn opening_propensity_bps(opened: i64, fits_under: i64) -> Option<u16> {
@@ -1930,6 +2040,10 @@ fn update_bridge_transitions(
 /// Only river traffic heading past the target counts. Deep-draft arrivals and
 /// departures at PortMiami never enter the river, and a movement whose bridge
 /// ETA has already passed describes a transit that is over.
+/// Minutes either side of a pilots'-board estimate that its window covers.
+const TRANSIT_WINDOW_BEFORE_MINUTES: i64 = 10;
+const TRANSIT_WINDOW_AFTER_MINUTES: i64 = 15;
+
 fn scheduled_transit_observation(
     item: &CollectorItem,
     channel_id: &str,
@@ -1964,14 +2078,19 @@ fn scheduled_transit_observation(
         .and_then(Value::as_str)
         .and_then(|value| value.parse::<Timestamp>().ok())
         .map(|value| value.as_millisecond())?;
-    if eta_at < now_ms {
+    // The window runs from ten minutes before the estimate to fifteen after
+    // it, because lifts do: departures measured against their estimate land
+    // from about five before to fourteen after. Keep the booking until the far
+    // edge of that window passes. Dropping it at the estimate itself discarded
+    // half the departures before their lift. Anything older has expired,
+    // and a window never starts before now.
+    let offset_ms = eta_at - now_ms;
+    if !(-TRANSIT_WINDOW_AFTER_MINUTES * 60_000..=180 * 60_000).contains(&offset_ms) {
         return None;
     }
-    let minutes_out = (eta_at - now_ms) / 60_000;
-    if !(0..=180).contains(&minutes_out) {
-        return None;
-    }
-    let minutes_out = u16::try_from(minutes_out).unwrap_or(u16::MAX);
+    let minutes_out = offset_ms.div_euclid(60_000);
+    let earliest = u16::try_from((minutes_out - TRANSIT_WINDOW_BEFORE_MINUTES).max(0)).ok()?;
+    let latest = u16::try_from(minutes_out + TRANSIT_WINDOW_AFTER_MINUTES).ok()?;
 
     Some(Observation {
         id: ObservationId(format!("{source_id}:transit:{}", item.id)),
@@ -1987,10 +2106,7 @@ fn scheduled_transit_observation(
             // The board publishes pilot boarding times, so this window is only
             // as good as the transit allowance behind it; the collector marks
             // it uncalibrated for the same reason.
-            eta: Some(EtaRangeMinutes::new(
-                minutes_out.saturating_sub(10),
-                minutes_out.saturating_add(15),
-            )),
+            eta: Some(EtaRangeMinutes::new(earliest, latest.max(earliest))),
         },
     })
 }
@@ -2223,8 +2339,11 @@ fn bridge_fact(
                 .copied()
                 .map(Confidence::from_basis_points);
             let opening_propensity = learned_propensity.or_else(|| {
-                (item.attributes.get("vessel_class").and_then(Value::as_str) == Some("sailing"))
-                    .then(|| Confidence::from_basis_points(9_000))
+                first_seen_opening_propensity(
+                    item.attributes.get("vessel_class").and_then(Value::as_str),
+                    item.attributes.get("length_meters").and_then(Value::as_f64),
+                )
+                .map(Confidence::from_basis_points)
             });
             let raw_route_intersects = item.attributes.get("route_intersects")?.as_bool()?;
             // A hull that has repeatedly needed Brickell raised is useful
@@ -2341,11 +2460,16 @@ fn bridge_evidence(
                 || source.last_success_ms.unwrap_or(now_ms),
                 |time| time.timestamp_millis(),
             );
-            let item_availability = if !bridge_item_is_current(item, channel, observed_ms, now_ms)
-                && matches!(
-                    availability,
-                    AvailabilityDto::Fresh | AvailabilityDto::Delayed
-                ) {
+            let item_availability = if !bridge_item_is_current(
+                item,
+                channel,
+                source.poll_interval_ms,
+                observed_ms,
+                now_ms,
+            ) && matches!(
+                availability,
+                AvailabilityDto::Fresh | AvailabilityDto::Delayed
+            ) {
                 AvailabilityDto::Stale
             } else {
                 availability
@@ -2449,6 +2573,7 @@ fn bridge_evidence(
 fn bridge_item_is_current(
     item: &CollectorItem,
     channel: &ChannelPreference,
+    poll_interval_ms: Option<i64>,
     observed_ms: i64,
     now_ms: i64,
 ) -> bool {
@@ -2457,8 +2582,15 @@ fn bridge_item_is_current(
     if observed_ms > now_ms.saturating_add(30_000) {
         return false;
     }
+    // The same allowance `source_availability` grants: the channel budget
+    // plus the source's own cadence. Without it, a row from the pilots'
+    // board, read every ten minutes, was current for two minutes out of ten
+    // and contributed to 54 of 27,185 forecast minutes (Sep 1 to 20, 2026).
+    let cadence_seconds = poll_interval_ms
+        .and_then(|ms| u64::try_from(ms / 1_000).ok())
+        .unwrap_or(0);
     if TimestampMillis(observed_ms).age_seconds_at(TimestampMillis(now_ms))
-        > u64::from(channel.max_age_minutes) * 60
+        > (u64::from(channel.max_age_minutes) * 60).saturating_add(cadence_seconds)
     {
         return false;
     }

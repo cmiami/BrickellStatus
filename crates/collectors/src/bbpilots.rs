@@ -38,20 +38,25 @@ use crate::{
 const DEFAULT_SCHEDULE_URL: &str = "https://bbpilots.com/";
 const DEFAULT_TIME_ZONE: &str = "America/New_York";
 
-/// Transit allowances between the pilots' scheduled time and the Brickell
-/// Avenue Bridge, in minutes after the board time.
+/// Minutes from the pilots' board time to the Brickell Avenue Bridge lift.
 ///
-/// Both started as guesses (60 and +20). Matching each board row to the same
-/// hull's own AIS crossing of the bridge line (Aug 17 to Sep 1 2026) measured
-/// them: arrivals cross a median 58 minutes after the board time (n = 7,
-/// interquartile 54 to 65), so 60 stands. Departures cross a median 8 minutes
-/// *before* it (n = 6, every one negative, interquartile 11 to 6 before), so
-/// the old +20 had the wrong sign and missed by about half an hour: the board
-/// time for a departure is not when the tow leaves the berth. Both samples are
-/// below the pre-registered twenty-pair gate, so every emitted estimate still
-/// carries `eta_calibrated: false`; the sign, however, is not in doubt.
-const DEFAULT_INBOUND_TRANSIT_MINUTES: i64 = 60;
-const DEFAULT_OUTBOUND_TRANSIT_MINUTES: i64 = -8;
+/// These target the FL511 lift, which is what a forecast predicts, rather
+/// than the moment the hull crosses the line about four minutes later.
+/// `scripts/audit_known_openers.py` pairs the board revision the app could see
+/// thirty minutes before each lift with the FL511 lift containing that hull's
+/// own AIS crossing (Aug 23 to Sep 23 2026). Departures lift a median 18
+/// minutes before the board time (n = 23, interquartile 23 to 9 before): the
+/// board time for a departure is not when the tow leaves the berth. Arrivals
+/// lift a median 48 minutes after it (n = 21, interquartile 44 to 57 after),
+/// so the old 60 ran a quarter of an hour late; 47 is kept, a minute inside
+/// that, so the hosted and native estimates agree. Both directions clear the
+/// pre-registered gate of twenty pairs with an interquartile range under 40.
+const DEFAULT_INBOUND_TRANSIT_MINUTES: i64 = 47;
+const DEFAULT_OUTBOUND_TRANSIT_MINUTES: i64 = -18;
+/// Paired lifts behind each default, for the calibration flag.
+const INBOUND_CALIBRATION_PAIRS: u32 = 21;
+const OUTBOUND_CALIBRATION_PAIRS: u32 = 23;
+const CALIBRATION_PAIR_GATE: u32 = 20;
 
 /// A page far smaller than this means the board did not render at all, which is
 /// worth distinguishing from a genuinely empty schedule.
@@ -299,10 +304,19 @@ impl BbPilotsCollector {
             attributes.insert("river_direction".into(), json!(direction.as_str()));
             attributes.insert("bridge_eta_at".into(), json!(eta.to_rfc3339()));
             attributes.insert("bridge_eta_offset_minutes".into(), json!(offset_minutes));
-            // The offset is an unvalidated placeholder. Anything consuming this
-            // must present it as an estimate, and the learning pass that
-            // replaces it should flip this flag.
-            attributes.insert("eta_calibrated".into(), json!(false));
+            // Calibrated only for a shipped default that has cleared the
+            // twenty-pair gate; a configured override is never presumed so.
+            let calibrated = match direction {
+                RiverDirection::Upriver => {
+                    self.config.inbound_transit_minutes == DEFAULT_INBOUND_TRANSIT_MINUTES
+                        && INBOUND_CALIBRATION_PAIRS >= CALIBRATION_PAIR_GATE
+                }
+                RiverDirection::Downriver => {
+                    self.config.outbound_transit_minutes == DEFAULT_OUTBOUND_TRANSIT_MINUTES
+                        && OUTBOUND_CALIBRATION_PAIRS >= CALIBRATION_PAIR_GATE
+                }
+            };
+            attributes.insert("eta_calibrated".into(), json!(calibrated));
         }
 
         let action = movement.action.as_str();
@@ -336,7 +350,12 @@ impl BbPilotsCollector {
             kind: ItemKind::VesselMovement,
             title: format!("{} — {}", movement.vessel, action),
             summary,
-            observed_at: Some(movement.scheduled_at),
+            // The board time is when the movement is scheduled, not when it
+            // was observed. Leaving this empty lets the runtime date the row
+            // by the last successful board read, including a 304 that
+            // confirms an unchanged board. Dating it by the schedule made
+            // every future booking look like a timestamp from the future.
+            observed_at: None,
             starts_at: Some(movement.scheduled_at),
             ends_at: None,
             location: None,
@@ -803,7 +822,7 @@ mod tests {
     }
 
     #[test]
-    fn eta_is_offset_by_direction_and_flagged_uncalibrated() {
+    fn eta_targets_the_lift_and_is_calibrated_only_past_the_pair_gate() {
         let collector = BbPilotsCollector::new(BbPilotsConfig::default()).unwrap();
         let schedule = schedule();
         let item = |vessel: &str| {
@@ -822,12 +841,17 @@ mod tests {
             inbound.attributes["bridge_eta_offset_minutes"],
             json!(DEFAULT_INBOUND_TRANSIT_MINUTES)
         );
-        // 20:00 local + 60m inbound allowance.
+        // 20:00 local + 47m to the lift.
         assert_eq!(
             inbound.attributes["bridge_eta_at"],
-            json!("2026-08-16T01:00:00+00:00")
+            json!("2026-08-16T00:47:00+00:00")
         );
-        assert_eq!(inbound.attributes["eta_calibrated"], json!(false));
+        // Twenty-one paired arrivals clear the gate.
+        assert_eq!(inbound.attributes["eta_calibrated"], json!(true));
+        // The board time is a schedule, never an observation time; a future
+        // board time must not read as a reading from the future.
+        assert!(inbound.observed_at.is_none());
+        assert!(inbound.starts_at.is_some());
 
         let outbound = item("BABUN EXPRESS");
         assert_eq!(outbound.attributes["river_direction"], json!("downriver"));
@@ -843,6 +867,23 @@ mod tests {
         assert!(
             outbound_eta < outbound.starts_at.expect("board time"),
             "departure eta must precede the board time"
+        );
+        // Twenty-three paired departures clear the gate.
+        assert_eq!(outbound.attributes["eta_calibrated"], json!(true));
+        // An override is not presumed calibrated.
+        let overridden = BbPilotsCollector::new(BbPilotsConfig {
+            outbound_transit_minutes: -10,
+            ..BbPilotsConfig::default()
+        })
+        .unwrap();
+        let babun = schedule
+            .movements
+            .iter()
+            .find(|movement| movement.vessel == "BABUN EXPRESS")
+            .unwrap();
+        assert_eq!(
+            overridden.movement_item(babun).attributes["eta_calibrated"],
+            json!(false)
         );
 
         // Deep-draft traffic gets no ETA at all rather than a misleading one.

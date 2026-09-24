@@ -1,0 +1,387 @@
+{
+ "description": "Shared by scripts/test_opening_shadow.py and crates/runtime/src/shadow.rs: identical inputs must give identical features and probability in Python and Rust.",
+ "board_windows": {
+  "downriver": [
+   -55,
+   -8
+  ],
+  "upriver": [
+   16,
+   58
+  ]
+ },
+ "model": {
+  "features": [
+   "ais_closing",
+   "ais_known",
+   "ais_sail",
+   "ais_eta30",
+   "ais_out",
+   "ais_in",
+   "ais_wait",
+   "ais_far_known",
+   "ais_far_unknown",
+   "up_any15",
+   "up_two20",
+   "up_sw2ave12",
+   "up_sw1st12",
+   "up_ordered20",
+   "bbp_down",
+   "bbp_up",
+   "sched_weekday",
+   "blackout",
+   "slot_soon",
+   "daytime",
+   "recent_open30"
+  ],
+  "coefficients": [
+   -0.6,
+   -0.25,
+   0.1,
+   0.45,
+   0.8,
+   -0.35,
+   0.0,
+   0.35,
+   0.7,
+   1.05,
+   -0.1,
+   0.25,
+   0.6,
+   0.95,
+   1.3,
+   0.15,
+   0.5,
+   0.85,
+   1.2,
+   1.55,
+   0.4
+  ],
+  "intercept": -1.25
+ },
+ "cases": [
+  {
+   "inputs": {
+    "now_ms": 1789485600000,
+    "fixes": [
+     {
+      "mmsi": "111111111",
+      "at": 1789485480000,
+      "sog": 4.0,
+      "branch": "river",
+      "s": 1700.0,
+      "posture": "underway"
+     },
+     {
+      "mmsi": "111111111",
+      "at": 1789485540000,
+      "sog": 4.0,
+      "branch": "river",
+      "s": 1500.0,
+      "posture": "underway"
+     },
+     {
+      "mmsi": "222222222",
+      "at": 1789485420000,
+      "sog": 5.0,
+      "branch": "government_cut",
+      "s": -2700.0,
+      "posture": "underway"
+     },
+     {
+      "mmsi": "222222222",
+      "at": 1789485480000,
+      "sog": 5.0,
+      "branch": "government_cut",
+      "s": -2500.0,
+      "posture": "underway"
+     },
+     {
+      "mmsi": "333333333",
+      "at": 1789485420000,
+      "sog": 0.2,
+      "branch": "river",
+      "s": -300.0,
+      "posture": "waiting"
+     },
+     {
+      "mmsi": "444444444",
+      "at": 1789485360000,
+      "sog": 5.5,
+      "branch": "government_cut",
+      "s": -1100.0,
+      "posture": "underway"
+     },
+     {
+      "mmsi": "444444444",
+      "at": 1789485420000,
+      "sog": 5.5,
+      "branch": "government_cut",
+      "s": -900.0,
+      "posture": "underway"
+     },
+     {
+      "mmsi": "555555555",
+      "at": 1789485060000,
+      "sog": 4.0,
+      "branch": "river",
+      "s": 900.0,
+      "posture": "underway"
+     },
+     {
+      "mmsi": "555555555",
+      "at": 1789485120000,
+      "sog": 4.0,
+      "branch": "river",
+      "s": 700.0,
+      "posture": "underway"
+     },
+     {
+      "mmsi": "666666666",
+      "at": 1789485540000,
+      "sog": 4.0,
+      "branch": "river",
+      "s": 800.0,
+      "posture": "underway"
+     },
+     {
+      "mmsi": "666666666",
+      "at": 1789485600000,
+      "sog": 4.0,
+      "branch": "river",
+      "s": 600.0,
+      "posture": "underway"
+     }
+    ],
+    "history": {
+     "111111111": [
+      3,
+      0
+     ],
+     "444444444": [
+      0,
+      0
+     ]
+    },
+    "classes": {
+     "444444444": "sailing",
+     "111111111": "tug"
+    },
+    "up_starts": [
+     {
+      "key": "nw_27_ave",
+      "relation": "upstream",
+      "at": 1789483500000
+     },
+     {
+      "key": "sw_1_st",
+      "relation": "upstream",
+      "at": 1789485000000
+     },
+     {
+      "key": "sw_2_ave",
+      "relation": "upstream",
+      "at": 1789485300000
+     },
+     {
+      "key": "brickell",
+      "relation": "target",
+      "at": 1789484400000
+     }
+    ],
+    "board": [
+     {
+      "direction": "downriver",
+      "scheduled_at": 1789487400000,
+      "first_seen": 1789478400000,
+      "last_seen": 1789485300000
+     },
+     {
+      "direction": "upriver",
+      "scheduled_at": 1789485000000,
+      "first_seen": 1789474800000,
+      "last_seen": 1789484100000
+     }
+    ],
+    "schedule": {
+     "mode": "scheduled",
+     "local_hour": 11,
+     "seconds_to_slot": 600
+    }
+   },
+   "expected_features": {
+    "ais_closing": 1.0,
+    "ais_known": 1.0,
+    "ais_sail": 1.0,
+    "ais_eta30": 1.0,
+    "ais_out": 1.0,
+    "ais_in": 1.0,
+    "ais_wait": 1.0,
+    "ais_far_known": 0.0,
+    "ais_far_unknown": 1.0,
+    "up_any15": 1.0,
+    "up_two20": 1.0,
+    "up_sw2ave12": 1.0,
+    "up_sw1st12": 1.0,
+    "up_ordered20": 1.0,
+    "bbp_down": 1.0,
+    "bbp_up": 0.0,
+    "sched_weekday": 1.0,
+    "blackout": 0.0,
+    "slot_soon": 1.0,
+    "daytime": 1.0,
+    "recent_open30": 1.0
+   },
+   "expected_probability": 0.999324917269
+  },
+  {
+   "inputs": {
+    "now_ms": 1789797900000,
+    "fixes": [
+     {
+      "mmsi": "777777777",
+      "at": 1789797720000,
+      "sog": 3.0,
+      "branch": "river",
+      "s": 1000.0,
+      "posture": "underway"
+     },
+     {
+      "mmsi": "777777777",
+      "at": 1789797780000,
+      "sog": 3.0,
+      "branch": "river",
+      "s": 1200.0,
+      "posture": "underway"
+     },
+     {
+      "mmsi": "888888888",
+      "at": 1789797720000,
+      "sog": 4.0,
+      "branch": "river",
+      "s": -700.0,
+      "posture": "underway"
+     },
+     {
+      "mmsi": "888888888",
+      "at": 1789797780000,
+      "sog": 4.0,
+      "branch": "river",
+      "s": -500.0,
+      "posture": "underway"
+     },
+     {
+      "mmsi": "999999999",
+      "at": 1789797810000,
+      "sog": 4.0,
+      "branch": "river",
+      "s": 2000.0,
+      "posture": "underway"
+     },
+     {
+      "mmsi": "999999999",
+      "at": 1789797840000,
+      "sog": 4.0,
+      "branch": "river",
+      "s": 1900.0,
+      "posture": "underway"
+     }
+    ],
+    "history": {
+     "888888888": [
+      1,
+      1
+     ]
+    },
+    "classes": {},
+    "up_starts": [
+     {
+      "key": "nw_5_st",
+      "relation": "upstream",
+      "at": 1789797900000
+     },
+     {
+      "key": "brickell",
+      "relation": "target",
+      "at": 1789797900000
+     }
+    ],
+    "board": [
+     {
+      "direction": "upriver",
+      "scheduled_at": 1789796700000,
+      "first_seen": 1789783500000,
+      "last_seen": 1789797420000
+     }
+    ],
+    "schedule": {
+     "mode": "on_signal",
+     "local_hour": 2,
+     "seconds_to_slot": 1500
+    }
+   },
+   "expected_features": {
+    "ais_closing": 1.0,
+    "ais_known": 0.0,
+    "ais_sail": 0.0,
+    "ais_eta30": 1.0,
+    "ais_out": 0.0,
+    "ais_in": 1.0,
+    "ais_wait": 0.0,
+    "ais_far_known": 0.0,
+    "ais_far_unknown": 0.0,
+    "up_any15": 1.0,
+    "up_two20": 0.0,
+    "up_sw2ave12": 0.0,
+    "up_sw1st12": 0.0,
+    "up_ordered20": 0.0,
+    "bbp_down": 0.0,
+    "bbp_up": 1.0,
+    "sched_weekday": 0.0,
+    "blackout": 0.0,
+    "slot_soon": 0.0,
+    "daytime": 0.0,
+    "recent_open30": 0.0
+   },
+   "expected_probability": 0.365864408989
+  }
+ ],
+ "schedule_cases": [
+  {
+   "now_ms": 1786707300000,
+   "mode": "blackout",
+   "local_hour": 7,
+   "seconds_to_slot": 1500
+  },
+  {
+   "now_ms": 1786748400000,
+   "mode": "on_signal",
+   "local_hour": 19,
+   "seconds_to_slot": 0
+  },
+  {
+   "now_ms": 1788793200000,
+   "mode": "on_signal",
+   "local_hour": 11,
+   "seconds_to_slot": 0
+  },
+  {
+   "now_ms": 1788879600000,
+   "mode": "scheduled",
+   "local_hour": 11,
+   "seconds_to_slot": 0
+  },
+  {
+   "now_ms": 1796134200000,
+   "mode": "scheduled",
+   "local_hour": 9,
+   "seconds_to_slot": 1200
+  },
+  {
+   "now_ms": 1789485630000,
+   "mode": "scheduled",
+   "local_hour": 11,
+   "seconds_to_slot": 570
+  }
+ ]
+}

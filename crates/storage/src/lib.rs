@@ -34,6 +34,13 @@ pub const DEFAULT_AIS_TRACK_RETENTION_MS: i64 = 365 * 24 * 60 * 60 * 1_000;
 /// Default horizon for minute-level forecast evaluation samples.
 pub const DEFAULT_FORECAST_RETENTION_MS: i64 = 2 * 365 * 24 * 60 * 60 * 1_000;
 
+/// Speed at or below which a bridge-line "crossing" is a stationary hull's
+/// position jitter, not a transit. It matches the collector's own stationary
+/// cutoff. Every one of the 23 crossings logged by IRON GRYPHON, a boat moored
+/// beside the span, was at 0.45 kn or less (Aug 18 to Sep 23 2026); such a
+/// crossing says nothing about whether the hull needed the span raised.
+pub const STATIONARY_CROSSING_MAX_KNOTS: f64 = 0.5;
+
 /// The least history any pruning pass may leave behind: four weeks.
 ///
 /// Bridge intervals, crossings, the vessel ledger and pilots-board movements
@@ -333,7 +340,35 @@ pub struct ForecastSample<'a> {
     pub source_freshness_json: &'a str,
     /// Exact replay inputs and prediction, supplied together by new runtimes.
     pub replay_json: Option<(&'a str, &'a str)>,
+    /// Shadow opening model version and its probability in basis points.
+    /// Recorded for comparison only; it never decided this forecast.
+    pub shadow: Option<(&'a str, i64)>,
     pub session_id: &'a str,
+}
+
+/// One stored AIS fix for the shadow model: mmsi, observed_at_ms,
+/// speed_knots, branch, s_meters, posture.
+pub type ShadowFixRow = (
+    String,
+    i64,
+    Option<f64>,
+    Option<String>,
+    Option<f64>,
+    Option<String>,
+);
+
+/// Stored rows behind one shadow-model evaluation. Tuples keep the column
+/// order of the queries in [`Store::shadow_model_rows`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ShadowModelRows {
+    pub fixes: Vec<ShadowFixRow>,
+    /// mmsi, opened, fits_under.
+    pub outcomes: Vec<(String, i64, i64)>,
+    pub sailing: Vec<String>,
+    /// bridge_key, relation, started_at_ms.
+    pub lifts: Vec<(String, String, i64)>,
+    /// river_direction, scheduled_at_ms, first_seen_at_ms, last_seen_at_ms.
+    pub board: Vec<(String, i64, i64, i64)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, sqlx::FromRow)]
@@ -868,6 +903,7 @@ impl Store {
         self.ensure_vessel_catalog_columns().await?;
         self.ensure_forecast_minute_key().await?;
         self.backfill_vessel_catalog_from_tracks().await?;
+        self.relabel_stationary_crossings().await?;
         Ok(())
     }
 
@@ -878,6 +914,25 @@ impl Store {
     /// table is left untouched by it and needs the column added explicitly.
     /// SQLite has no ADD COLUMN IF NOT EXISTS, hence the pragma check.
     async fn ensure_bridge_learning_columns(&self) -> Result<(), StorageError> {
+        // Shadow opening model columns (0.1.48): recorded, never decisive.
+        if !self
+            .table_has_column("bridge_forecast_samples", "shadow_model")
+            .await?
+        {
+            sqlx::query("ALTER TABLE bridge_forecast_samples ADD COLUMN shadow_model TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
+        if !self
+            .table_has_column("bridge_forecast_samples", "shadow_probability_bps")
+            .await?
+        {
+            sqlx::query(
+                "ALTER TABLE bridge_forecast_samples ADD COLUMN shadow_probability_bps INTEGER",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
         if !self
             .table_has_column("bridge_state_intervals", "session_id")
             .await?
@@ -1012,6 +1067,57 @@ impl Store {
             INSERT INTO settings(key, value_json, updated_at)
             VALUES (?1, 'true', 'schema-migration')
             "#,
+        )
+        .bind(MIGRATION_KEY)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Builds before 0.1.48 labelled a stationary hull's jitter across the
+    /// bridge line as a crossing that opened or fit under. Take those outcomes
+    /// back out of the ledger's counters and mark the crossings unknown. The
+    /// raw crossing rows, times and speeds are kept.
+    async fn relabel_stationary_crossings(&self) -> Result<(), StorageError> {
+        const MIGRATION_KEY: &str = "storage.stationary_crossing_relabel.v1";
+        let complete =
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM settings WHERE key = ?1)")
+                .bind(MIGRATION_KEY)
+                .fetch_one(&self.pool)
+                .await?;
+        if complete {
+            return Ok(());
+        }
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            UPDATE ais_vessel_ledger SET
+                transits_opened = MAX(0, transits_opened - (
+                    SELECT COUNT(*) FROM ais_transits t
+                    WHERE t.mmsi = ais_vessel_ledger.mmsi
+                      AND t.outcome = 'opened' AND t.speed_knots <= ?1)),
+                transits_fits_under = MAX(0, transits_fits_under - (
+                    SELECT COUNT(*) FROM ais_transits t
+                    WHERE t.mmsi = ais_vessel_ledger.mmsi
+                      AND t.outcome = 'fits_under' AND t.speed_knots <= ?1))
+            WHERE mmsi IN (
+                SELECT mmsi FROM ais_transits
+                WHERE outcome IN ('opened', 'fits_under') AND speed_knots <= ?1)
+            "#,
+        )
+        .bind(STATIONARY_CROSSING_MAX_KNOTS)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE ais_transits SET outcome = 'unknown' \
+             WHERE outcome IN ('opened', 'fits_under') AND speed_knots <= ?1",
+        )
+        .bind(STATIONARY_CROSSING_MAX_KNOTS)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO settings(key, value_json, updated_at) VALUES (?1, 'true', 'schema-migration')",
         )
         .bind(MIGRATION_KEY)
         .execute(&mut *transaction)
@@ -1495,6 +1601,7 @@ impl Store {
             UPDATE ais_transits
             SET outcome = 'opened', resolved_at_ms = ?2
             WHERE outcome IS NULL AND crossed_at_ms <= ?2 - ?1
+              AND speed_knots > ?5
               AND EXISTS (
                 SELECT 1 FROM bridge_state_intervals b
                 WHERE b.relation = 'target' AND b.state = 'up'
@@ -1513,6 +1620,7 @@ impl Store {
         .bind(now_ms)
         .bind(OPEN_CONFIRM_AFTER_MS)
         .bind(OPEN_MAX_LEAD_MS)
+        .bind(STATIONARY_CROSSING_MAX_KNOTS)
         .fetch_all(&mut *transaction)
         .await?;
         for (mmsi,) in opened {
@@ -1530,6 +1638,7 @@ impl Store {
             UPDATE ais_transits
             SET outcome = 'fits_under', resolved_at_ms = ?2
             WHERE outcome IS NULL AND crossed_at_ms <= ?2 - ?1
+              AND speed_knots > ?3
               AND EXISTS (
                 SELECT 1 FROM bridge_state_intervals b
                 WHERE b.relation = 'target' AND b.state = 'down'
@@ -1545,6 +1654,7 @@ impl Store {
         )
         .bind(SETTLE_MS)
         .bind(now_ms)
+        .bind(STATIONARY_CROSSING_MAX_KNOTS)
         .fetch_all(&mut *transaction)
         .await?;
         for (mmsi,) in fits_under {
@@ -1556,6 +1666,21 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         }
+        // A stationary hull's jitter across the line is not a transit; it
+        // stays unknown rather than teaching the ledger a false outcome.
+        sqlx::query(
+            r#"
+            UPDATE ais_transits
+            SET outcome = 'unknown', resolved_at_ms = ?2
+            WHERE outcome IS NULL AND crossed_at_ms <= ?2 - ?1
+              AND (speed_knots IS NULL OR speed_knots <= ?3)
+            "#,
+        )
+        .bind(SETTLE_MS)
+        .bind(now_ms)
+        .bind(STATIONARY_CROSSING_MAX_KNOTS)
+        .execute(&mut *transaction)
+        .await?;
         sqlx::query(
             r#"
             UPDATE ais_transits
@@ -1800,6 +1925,7 @@ impl Store {
             contribution_bps_json,
             source_freshness_json,
             replay_json,
+            shadow,
             session_id,
         } = sample;
         let minute_bucket_ms = evaluated_at_ms - evaluated_at_ms.rem_euclid(60_000);
@@ -1810,9 +1936,9 @@ impl Store {
                 target_key, evaluated_at_ms, minute_bucket_ms, model_version,
                 state, predictive_score_bps, confidence_bps, eta_min_minutes,
                 eta_max_minutes, schedule_mode, contribution_bps_json,
-                source_freshness_json, session_id
+                source_freshness_json, session_id, shadow_model, shadow_probability_bps
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             ON CONFLICT(target_key, minute_bucket_ms) DO UPDATE SET
                 evaluated_at_ms = excluded.evaluated_at_ms,
                 model_version = excluded.model_version,
@@ -1824,7 +1950,9 @@ impl Store {
                 schedule_mode = excluded.schedule_mode,
                 contribution_bps_json = excluded.contribution_bps_json,
                 source_freshness_json = excluded.source_freshness_json,
-                session_id = excluded.session_id
+                session_id = excluded.session_id,
+                shadow_model = excluded.shadow_model,
+                shadow_probability_bps = excluded.shadow_probability_bps
             "#,
         )
         .bind(target_key)
@@ -1840,6 +1968,8 @@ impl Store {
         .bind(contribution_bps_json)
         .bind(source_freshness_json)
         .bind(session_id)
+        .bind(shadow.map(|(model, _)| model))
+        .bind(shadow.map(|(_, bps)| bps))
         .execute(&mut *transaction)
         .await?;
         if let Some((input, prediction)) = replay_json {
@@ -1862,6 +1992,67 @@ impl Store {
         }
         transaction.commit().await?;
         Ok(())
+    }
+
+    /// Stored rows the shadow opening model reads at `now_ms`, exactly as
+    /// `scripts/opening_shadow.py` reads them from a snapshot: fixes from
+    /// `fix_since_ms` up to (not including) now, moving crossing outcomes
+    /// resolved by `outcome_cutoff_ms`, sailing hulls, observed lifts since
+    /// `lift_since_ms`, and board revisions still on the board.
+    pub async fn shadow_model_rows(
+        &self,
+        now_ms: i64,
+        fix_since_ms: i64,
+        outcome_cutoff_ms: i64,
+        lift_since_ms: i64,
+        board_grace_ms: i64,
+    ) -> Result<ShadowModelRows, StorageError> {
+        let fixes = sqlx::query_as(
+            "SELECT mmsi, observed_at_ms, speed_knots, branch, s_meters, posture \
+             FROM ais_track_fixes WHERE observed_at_ms >= ?1 AND observed_at_ms < ?2",
+        )
+        .bind(fix_since_ms)
+        .bind(now_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        let outcomes = sqlx::query_as(
+            "SELECT mmsi, SUM(outcome = 'opened'), SUM(outcome = 'fits_under') \
+             FROM ais_transits WHERE outcome IN ('opened', 'fits_under') \
+               AND resolved_at_ms <= ?1 AND speed_knots > ?2 GROUP BY mmsi",
+        )
+        .bind(outcome_cutoff_ms)
+        .bind(STATIONARY_CROSSING_MAX_KNOTS)
+        .fetch_all(&self.pool)
+        .await?;
+        let sailing =
+            sqlx::query_scalar("SELECT mmsi FROM ais_vessel_ledger WHERE vessel_class = 'sailing'")
+                .fetch_all(&self.pool)
+                .await?;
+        let lifts = sqlx::query_as(
+            "SELECT bridge_key, relation, started_at_ms FROM bridge_state_intervals \
+             WHERE state = 'up' AND start_reason = 'state_change' \
+               AND started_at_ms >= ?1 AND started_at_ms <= ?2",
+        )
+        .bind(lift_since_ms)
+        .bind(now_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        let board = sqlx::query_as(
+            "SELECT river_direction, scheduled_at_ms, first_seen_at_ms, last_seen_at_ms \
+             FROM river_transits WHERE river_direction IS NOT NULL \
+               AND first_seen_at_ms <= ?1 AND last_seen_at_ms >= ?1 - ?2",
+        )
+        .bind(now_ms)
+        .bind(board_grace_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(ShadowModelRows {
+            fixes,
+            outcomes,
+            sailing,
+            lifts,
+            board,
+        })
     }
 
     /// Forecast evaluations since a cutoff, oldest first, for calibration.
@@ -2641,6 +2832,125 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn a_stationary_hulls_jitter_across_the_line_teaches_the_ledger_nothing() {
+        let store = Store::in_memory().await.unwrap();
+        let base = 1_800_000_000_000_i64;
+        let mut transaction = store.begin_transaction().await.unwrap();
+        for (state, at) in [
+            ("down", base),
+            ("up", base + 240_000),
+            ("up", base + 300_000),
+            ("down", base + 360_000),
+        ] {
+            transaction
+                .record_bridge_state(BridgeObservation {
+                    source_id: "fl511.bridge",
+                    bridge_key: "brickell",
+                    bridge_name: "Brickell Avenue Bridge",
+                    relation: "target",
+                    state,
+                    observed_at_ms: at,
+                    session_id: "test",
+                })
+                .await
+                .unwrap();
+        }
+        // Both cross while the span is up; one is moving, one is moored beside it.
+        for (mmsi, speed_knots) in [("555000555", 3.8), ("666000666", 0.3)] {
+            transaction
+                .record_ais_crossing(AisCrossingObservation {
+                    mmsi,
+                    vessel_name: Some("TEST VESSEL"),
+                    vessel_class: Some("pleasure craft"),
+                    length_meters: Some(20.0),
+                    draught_meters: None,
+                    direction: "upriver",
+                    crossed_at_ms: base + 270_000,
+                    speed_knots,
+                    session_id: "test",
+                })
+                .await
+                .unwrap();
+        }
+        transaction.commit().await.unwrap();
+        store.resolve_ais_transits(base + 540_000).await.unwrap();
+        let outcome = |mmsi: &'static str| {
+            let store = &store;
+            async move {
+                sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT outcome FROM ais_transits WHERE mmsi = ?1",
+                )
+                .bind(mmsi)
+                .fetch_one(store.pool())
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(outcome("555000555").await.as_deref(), Some("opened"));
+        assert_eq!(outcome("666000666").await.as_deref(), Some("unknown"));
+        let ledger = store.list_ais_ledger(100).await.unwrap();
+        let moored = ledger
+            .iter()
+            .find(|entry| entry.mmsi == "666000666")
+            .unwrap();
+        assert_eq!(moored.transits_opened + moored.transits_fits_under, 0);
+    }
+
+    #[tokio::test]
+    async fn stationary_crossings_labelled_by_older_builds_are_taken_back_once() {
+        let store = Store::in_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO ais_vessel_ledger(mmsi, name, transits_opened, transits_fits_under, first_seen_ms, last_seen_ms) \
+             VALUES ('319279200', 'IRON GRYPHON', 4, 17, 1, 2)",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+        for (at, speed, outcome) in [
+            (1_000, 0.2, "opened"),
+            (2_000, 0.45, "fits_under"),
+            (3_000, 0.1, "fits_under"),
+            (4_000, 3.5, "opened"),
+        ] {
+            sqlx::query(
+                "INSERT INTO ais_transits(mmsi, crossed_at_ms, direction, speed_knots, outcome, resolved_at_ms) \
+                 VALUES ('319279200', ?1, 'upriver', ?2, ?3, ?1)",
+            )
+            .bind(at)
+            .bind(speed)
+            .bind(outcome)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        }
+        // Opening the store already ran the correction on an empty table.
+        sqlx::query("DELETE FROM settings WHERE key = 'storage.stationary_crossing_relabel.v1'")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        store.relabel_stationary_crossings().await.unwrap();
+        store.relabel_stationary_crossings().await.unwrap();
+        let (opened, under): (i64, i64) = sqlx::query_as(
+            "SELECT transits_opened, transits_fits_under FROM ais_vessel_ledger WHERE mmsi = '319279200'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            (opened, under),
+            (3, 15),
+            "one opened and two fits-under taken back, once"
+        );
+        let unknown: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM ais_transits WHERE mmsi = '319279200' AND outcome = 'unknown'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(unknown, 3);
+    }
+
+    #[tokio::test]
     async fn ais_crossings_resolve_against_bridge_intervals_and_train_the_ledger() {
         let store = Store::in_memory().await.unwrap();
         let base = 1_800_000_000_000_i64;
@@ -2966,6 +3276,7 @@ mod tests {
                     contribution_bps_json: r#"{"ais":4200,"upstream":2600}"#,
                     source_freshness_json: r#"{"aisSeconds":3,"fl511Seconds":8}"#,
                     replay_json: Some((r#"{"evidence":[]}"#, r#"{"state":"clear"}"#)),
+                    shadow: Some(("opening-shadow-v1", 4_200)),
                     session_id: "run-a",
                 })
                 .await
@@ -2978,6 +3289,13 @@ mod tests {
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].evaluated_at_ms, 59_000);
         assert_eq!(samples[0].state, "likely");
+        let shadow: (Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT shadow_model, shadow_probability_bps FROM bridge_forecast_samples",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(shadow, (Some("opening-shadow-v1".into()), Some(4_200)));
         let replays: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM bridge_forecast_replays")
             .fetch_one(&store.pool)
             .await
@@ -2986,6 +3304,114 @@ mod tests {
             replays.0, 2,
             "material changes in one minute must both survive"
         );
+    }
+
+    #[tokio::test]
+    async fn shadow_model_rows_are_exactly_what_was_known_at_the_minute() {
+        let store = Store::in_memory().await.unwrap();
+        let now = 1_800_000_000_000_i64;
+        let minute = 60_000;
+        let pool = store.pool();
+        for (at, speed) in [
+            (now - 18 * minute, 3.0),
+            (now - 3 * minute, 3.0),
+            (now, 3.0),
+        ] {
+            sqlx::query(
+                "INSERT INTO ais_track_fixes(mmsi, observed_at_ms, latitude, longitude, speed_knots, branch, s_meters, posture) \
+                 VALUES ('123456789', ?1, 25.77, -80.19, ?2, 'river', 900, 'underway')",
+            )
+            .bind(at)
+            .bind(speed)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        for (crossed, outcome, resolved, speed) in [
+            (now - 90 * minute, "opened", now - 80 * minute, 4.0),
+            (now - 70 * minute, "fits_under", now - 60 * minute, 0.3),
+            (now - 25 * minute, "opened", now - 10 * minute, 4.0),
+        ] {
+            sqlx::query(
+                "INSERT INTO ais_transits(mmsi, crossed_at_ms, direction, speed_knots, outcome, resolved_at_ms) \
+                 VALUES ('123456789', ?1, 'downriver', ?4, ?2, ?3)",
+            )
+            .bind(crossed)
+            .bind(outcome)
+            .bind(resolved)
+            .bind(speed)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        for (key, started, reason) in [
+            ("sw_2_ave", now - 5 * minute, "state_change"),
+            ("sw_1_st", now - 40 * minute, "state_change"),
+            ("w_flagler", now - 4 * minute, "session_start"),
+        ] {
+            sqlx::query(
+                "INSERT INTO bridge_state_intervals(source_id, bridge_key, bridge_name, relation, state, started_at_ms, ended_at_ms, session_id, last_confirmed_at_ms, start_reason) \
+                 VALUES ('fl511', ?1, ?1, 'upstream', 'up', ?2, ?2, 's', ?2, ?3)",
+            )
+            .bind(key)
+            .bind(started)
+            .bind(reason)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        for (key, first, last) in [
+            ("on-board", now - 120 * minute, now - 5 * minute),
+            ("dropped", now - 120 * minute, now - 11 * minute),
+            ("not-yet", now + minute, now + 2 * minute),
+        ] {
+            sqlx::query(
+                "INSERT INTO river_transits(source_id, movement_key, vessel, action, river_direction, scheduled_at_ms, first_seen_at_ms, last_seen_at_ms) \
+                 VALUES ('bbpilots', ?1, 'V', 'departure', 'downriver', ?2, ?3, ?4)",
+            )
+            .bind(key)
+            .bind(now + 20 * minute)
+            .bind(first)
+            .bind(last)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        let rows = store
+            .shadow_model_rows(
+                now,
+                now - 17 * minute,
+                now - 20 * minute,
+                now - 30 * minute,
+                10 * minute,
+            )
+            .await
+            .unwrap();
+        // The fix at `now` and the one before the lookback are excluded.
+        assert_eq!(rows.fixes.len(), 1);
+        assert_eq!(rows.fixes[0].1, now - 3 * minute);
+        // Only the moving crossing resolved before the buffer counts. The four
+        // discovery-session seed crossings ride in with every schema.
+        assert_eq!(
+            rows.outcomes
+                .iter()
+                .filter(|row| row.0 == "123456789")
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![("123456789".to_string(), 1, 0)]
+        );
+        // Only observed state changes inside the lookback are lifts.
+        assert_eq!(
+            rows.lifts,
+            vec![(
+                "sw_2_ave".to_string(),
+                "upstream".to_string(),
+                now - 5 * minute
+            )]
+        );
+        // A row seen at the last poll is on the board; older or future rows are not.
+        assert_eq!(rows.board.len(), 1);
+        assert_eq!(rows.board[0].3, now - 5 * minute);
     }
 
     #[tokio::test]
